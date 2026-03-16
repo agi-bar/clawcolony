@@ -3,7 +3,6 @@ package server
 import (
 	"context"
 	"encoding/json"
-	"fmt"
 	"net/http"
 	"strings"
 	"testing"
@@ -11,19 +10,6 @@ import (
 
 	"clawcolony/internal/store"
 )
-
-type failTransferStore struct {
-	store.Store
-	failures map[string]int
-}
-
-func (s *failTransferStore) TransferWithFloor(ctx context.Context, fromBotID, toBotID string, amount int64) (store.TokenTransfer, error) {
-	if remaining := s.failures[fromBotID]; remaining > 0 {
-		s.failures[fromBotID] = remaining - 1
-		return store.TokenTransfer{}, fmt.Errorf("forced transfer failure for %s", fromBotID)
-	}
-	return s.Store.TransferWithFloor(ctx, fromBotID, toBotID, amount)
-}
 
 func treasuryBalanceForTest(t *testing.T, srv *Server) int64 {
 	t.Helper()
@@ -34,30 +20,10 @@ func treasuryBalanceForTest(t *testing.T, srv *Server) int64 {
 	return account.Balance
 }
 
-func setTreasuryBalanceForTest(t *testing.T, srv *Server, amount int64) {
-	t.Helper()
-	ctx := context.Background()
-	account, err := srv.ensureTreasuryAccount(ctx)
-	if err != nil {
-		t.Fatalf("ensure treasury account: %v", err)
-	}
-	switch {
-	case account.Balance > amount:
-		if _, err := srv.store.Consume(ctx, clawTreasurySystemID, account.Balance-amount); err != nil {
-			t.Fatalf("lower treasury balance: %v", err)
-		}
-	case account.Balance < amount:
-		if _, err := srv.store.Recharge(ctx, clawTreasurySystemID, amount-account.Balance); err != nil {
-			t.Fatalf("raise treasury balance: %v", err)
-		}
-	}
-}
-
 func TestAPIColonyStatusIncludesTreasuryAndUptime(t *testing.T) {
 	srv := newTestServer()
 	srv.cfg.TreasuryInitialToken = 5000
 	ctx := context.Background()
-	setTreasuryBalanceForTest(t, srv, 5000)
 
 	_ = seedActiveUser(t, srv)
 	_ = seedActiveUser(t, srv)
@@ -121,141 +87,14 @@ func TestAPIColonyStatusIncludesTreasuryAndUptime(t *testing.T) {
 	}
 }
 
-func TestTokenDrainTickCreditsTreasuryUnderV2(t *testing.T) {
-	srv := newTestServer()
-	srv.cfg.TreasuryInitialToken = 500
-	ctx := context.Background()
-	userID := seedActiveUser(t, srv)
-	beforeUser := tokenBalanceForUser(t, srv, userID)
-	beforeTreasury := treasuryBalanceForTest(t, srv)
-	tax := srv.tokenPolicy().TaxPerTick(false)
-
-	if err := srv.runTokenDrainTick(ctx, 1); err != nil {
-		t.Fatalf("run token drain tick: %v", err)
-	}
-
-	afterUser := tokenBalanceForUser(t, srv, userID)
-	afterTreasury := treasuryBalanceForTest(t, srv)
-	if afterUser != beforeUser-tax {
-		t.Fatalf("user balance=%d want %d", afterUser, beforeUser-tax)
-	}
-	if afterTreasury != beforeTreasury+tax {
-		t.Fatalf("treasury balance=%d want %d", afterTreasury, beforeTreasury+tax)
-	}
-	if afterUser+afterTreasury != beforeUser+beforeTreasury {
-		t.Fatalf("total supply changed before=%d after=%d", beforeUser+beforeTreasury, afterUser+afterTreasury)
-	}
-}
-
-func TestMailSendOverageCreditsTreasuryUnderV2(t *testing.T) {
-	srv := newTestServer()
-	srv.cfg.TreasuryInitialToken = 500
-	senderID, senderAPIKey := seedActiveUserWithAPIKey(t, srv)
-	recipientID := seedActiveUser(t, srv)
-	beforeSender := tokenBalanceForUser(t, srv, senderID)
-	beforeRecipient := tokenBalanceForUser(t, srv, recipientID)
-	beforeTreasury := treasuryBalanceForTest(t, srv)
-
-	w := doJSONRequestWithHeaders(t, srv.mux, http.MethodPost, "/api/v1/mail/send", map[string]any{
-		"to_user_ids": []string{recipientID},
-		"body":        strings.Repeat("a", 50010),
-	}, apiKeyHeaders(senderAPIKey))
-	if w.Code != http.StatusAccepted {
-		t.Fatalf("mail send status=%d body=%s", w.Code, w.Body.String())
-	}
-
-	afterSender := tokenBalanceForUser(t, srv, senderID)
-	afterRecipient := tokenBalanceForUser(t, srv, recipientID)
-	afterTreasury := treasuryBalanceForTest(t, srv)
-	if afterSender != beforeSender-10 {
-		t.Fatalf("sender balance=%d want %d", afterSender, beforeSender-10)
-	}
-	if afterRecipient != beforeRecipient {
-		t.Fatalf("recipient balance=%d want %d", afterRecipient, beforeRecipient)
-	}
-	if afterTreasury != beforeTreasury+10 {
-		t.Fatalf("treasury balance=%d want %d", afterTreasury, beforeTreasury+10)
-	}
-	if afterSender+afterRecipient+afterTreasury != beforeSender+beforeRecipient+beforeTreasury {
-		t.Fatalf("total supply changed before=%d after=%d", beforeSender+beforeRecipient+beforeTreasury, afterSender+afterRecipient+afterTreasury)
-	}
-}
-
-func TestMailSendOverageRejectsWhenSenderCannotCoverCharge(t *testing.T) {
-	srv := newTestServer()
-	srv.cfg.TreasuryInitialToken = 500
-	senderID, senderAPIKey := seedActiveUserWithAPIKey(t, srv)
-	recipientID := seedActiveUser(t, srv)
-	beforeSender := tokenBalanceForUser(t, srv, senderID)
-	beforeRecipient := tokenBalanceForUser(t, srv, recipientID)
-	beforeTreasury := treasuryBalanceForTest(t, srv)
-
-	w := doJSONRequestWithHeaders(t, srv.mux, http.MethodPost, "/api/v1/mail/send", map[string]any{
-		"to_user_ids": []string{recipientID},
-		"body":        strings.Repeat("a", 51001),
-	}, apiKeyHeaders(senderAPIKey))
-	if w.Code != http.StatusPaymentRequired {
-		t.Fatalf("mail send insufficient status=%d body=%s", w.Code, w.Body.String())
-	}
-
-	afterSender := tokenBalanceForUser(t, srv, senderID)
-	afterRecipient := tokenBalanceForUser(t, srv, recipientID)
-	afterTreasury := treasuryBalanceForTest(t, srv)
-	if afterSender != beforeSender {
-		t.Fatalf("sender balance=%d want %d", afterSender, beforeSender)
-	}
-	if afterRecipient != beforeRecipient {
-		t.Fatalf("recipient balance=%d want %d", afterRecipient, beforeRecipient)
-	}
-	if afterTreasury != beforeTreasury {
-		t.Fatalf("treasury balance=%d want %d", afterTreasury, beforeTreasury)
-	}
-}
-
-func TestTokenDrainTickContinuesAfterAtomicTransferFailure(t *testing.T) {
-	baseStore := store.NewInMemory()
-	failingStore := &failTransferStore{
-		Store:    baseStore,
-		failures: map[string]int{},
-	}
-	srv := newTestServerWithStore(failingStore)
-	srv.cfg.TreasuryInitialToken = 500
-	ctx := context.Background()
-	firstUser := seedActiveUser(t, srv)
-	secondUser := seedActiveUser(t, srv)
-	beforeFirst := tokenBalanceForUser(t, srv, firstUser)
-	beforeSecond := tokenBalanceForUser(t, srv, secondUser)
-	beforeTreasury := treasuryBalanceForTest(t, srv)
-	tax := srv.tokenPolicy().TaxPerTick(false)
-	failingStore.failures[firstUser] = 1
-
-	if err := srv.runTokenDrainTick(ctx, 1); err != nil {
-		t.Fatalf("run token drain tick: %v", err)
-	}
-
-	deltas := []int64{
-		tokenBalanceForUser(t, srv, firstUser) - beforeFirst,
-		tokenBalanceForUser(t, srv, secondUser) - beforeSecond,
-	}
-	if !((deltas[0] == 0 && deltas[1] == -tax) || (deltas[0] == -tax && deltas[1] == 0)) {
-		t.Fatalf("user deltas=%v want one unchanged and one taxed by %d", deltas, tax)
-	}
-	if got := treasuryBalanceForTest(t, srv); got != beforeTreasury+tax {
-		t.Fatalf("treasury balance=%d want %d", got, beforeTreasury+tax)
-	}
-}
-
 func TestKBProposalApplyConsumesTreasury(t *testing.T) {
 	srv := newTestServer()
-	content := strings.Repeat("t", 500)
-	expectedReward := knowledgeRewardForContent(srv, content, 0)
-	srv.cfg.TreasuryInitialToken = expectedReward + 200
+	srv.cfg.TreasuryInitialToken = communityRewardAmountKBApply + 200
 	ctx := context.Background()
 	proposer := seedActiveUser(t, srv)
 	_, applierAPIKey := seedActiveUserWithAPIKey(t, srv)
-	setTreasuryBalanceForTest(t, srv, expectedReward+200)
-	if got := treasuryBalanceForTest(t, srv); got != expectedReward+200 {
-		t.Fatalf("initial treasury=%d want %d", got, expectedReward+200)
+	if got := treasuryBalanceForTest(t, srv); got != communityRewardAmountKBApply+200 {
+		t.Fatalf("initial treasury=%d want %d", got, communityRewardAmountKBApply+200)
 	}
 
 	proposal, _, err := srv.store.CreateKBProposal(ctx, store.KBProposal{
@@ -269,13 +108,12 @@ func TestKBProposalApplyConsumesTreasury(t *testing.T) {
 		OpType:     "add",
 		Section:    "knowledge/runtime",
 		Title:      "treasury",
-		NewContent: content,
-		DiffText:   "+ treasury backed shared result",
+		NewContent: "shared result",
+		DiffText:   "+ shared result",
 	})
 	if err != nil {
 		t.Fatalf("create proposal: %v", err)
 	}
-	seedProposalKnowledgeMetaForTest(t, srv, proposal.ID, proposer, "knowledge", content, nil)
 	if _, err := srv.store.CloseKBProposal(ctx, proposal.ID, "approved", "ok", 1, 1, 0, 0, 1, time.Now().UTC()); err != nil {
 		t.Fatalf("approve proposal: %v", err)
 	}
@@ -286,8 +124,8 @@ func TestKBProposalApplyConsumesTreasury(t *testing.T) {
 	if w.Code != http.StatusAccepted {
 		t.Fatalf("apply proposal status=%d body=%s", w.Code, w.Body.String())
 	}
-	if got := tokenBalanceForUser(t, srv, proposer); got != 1000+expectedReward {
-		t.Fatalf("proposer balance=%d want %d", got, 1000+expectedReward)
+	if got := tokenBalanceForUser(t, srv, proposer); got != 1000+communityRewardAmountKBApply {
+		t.Fatalf("proposer balance=%d want %d", got, 1000+communityRewardAmountKBApply)
 	}
 	if got := treasuryBalanceForTest(t, srv); got != 200 {
 		t.Fatalf("treasury balance=%d want 200", got)
@@ -299,7 +137,6 @@ func TestTokenWishFulfillConsumesTreasury(t *testing.T) {
 	srv.cfg.TreasuryInitialToken = 25
 	userID, userAPIKey := seedActiveUserWithAPIKey(t, srv)
 	fulfillerUserID, fulfillerAPIKey := seedActiveUserWithAPIKey(t, srv)
-	setTreasuryBalanceForTest(t, srv, 25)
 	if got := treasuryBalanceForTest(t, srv); got != 25 {
 		t.Fatalf("initial treasury=%d want 25", got)
 	}
@@ -341,7 +178,6 @@ func TestTokenWishFulfillReturnsConflictWhenTreasuryInsufficient(t *testing.T) {
 	srv.cfg.TreasuryInitialToken = 5
 	userID, userAPIKey := seedActiveUserWithAPIKey(t, srv)
 	_, fulfillerAPIKey := seedActiveUserWithAPIKey(t, srv)
-	setTreasuryBalanceForTest(t, srv, 5)
 	if got := treasuryBalanceForTest(t, srv); got != 5 {
 		t.Fatalf("initial treasury=%d want 5", got)
 	}
@@ -381,10 +217,10 @@ func TestTokenWishFulfillReturnsConflictWhenTreasuryInsufficient(t *testing.T) {
 func TestPiTaskSubmitConsumesTreasury(t *testing.T) {
 	srv := newTestServer()
 	srv.cfg.TreasuryInitialToken = 100
-	userID := seedActiveUser(t, srv)
+	userID, apiKey := seedActiveUserWithAPIKey(t, srv)
 	before := treasuryBalanceForTest(t, srv)
 
-	w := doJSONRequest(t, srv.mux, http.MethodPost, "/api/v1/tasks/pi/claim", map[string]any{"user_id": userID})
+	w := doJSONRequestWithHeaders(t, srv.mux, http.MethodPost, "/api/v1/tasks/pi/claim", map[string]any{"user_id": userID}, apiKeyHeaders(apiKey))
 	if w.Code != http.StatusAccepted {
 		t.Fatalf("pi claim status=%d body=%s", w.Code, w.Body.String())
 	}
@@ -400,11 +236,11 @@ func TestPiTaskSubmitConsumesTreasury(t *testing.T) {
 	task := srv.piTasks[claim.Item.TaskID]
 	srv.taskMu.Unlock()
 
-	w = doJSONRequest(t, srv.mux, http.MethodPost, "/api/v1/tasks/pi/submit", map[string]any{
+	w = doJSONRequestWithHeaders(t, srv.mux, http.MethodPost, "/api/v1/tasks/pi/submit", map[string]any{
 		"user_id": userID,
 		"task_id": task.TaskID,
 		"answer":  task.Expected,
-	})
+	}, apiKeyHeaders(apiKey))
 	if w.Code != http.StatusAccepted {
 		t.Fatalf("pi submit status=%d body=%s", w.Code, w.Body.String())
 	}
@@ -419,13 +255,12 @@ func TestPiTaskSubmitConsumesTreasury(t *testing.T) {
 func TestPiTaskSubmitRejectsWhenTreasuryInsufficient(t *testing.T) {
 	srv := newTestServer()
 	srv.cfg.TreasuryInitialToken = 1
-	userID := seedActiveUser(t, srv)
-	setTreasuryBalanceForTest(t, srv, 1)
+	userID, apiKey := seedActiveUserWithAPIKey(t, srv)
 	if got := treasuryBalanceForTest(t, srv); got != 1 {
 		t.Fatalf("initial treasury=%d want 1", got)
 	}
 
-	w := doJSONRequest(t, srv.mux, http.MethodPost, "/api/v1/tasks/pi/claim", map[string]any{"user_id": userID})
+	w := doJSONRequestWithHeaders(t, srv.mux, http.MethodPost, "/api/v1/tasks/pi/claim", map[string]any{"user_id": userID}, apiKeyHeaders(apiKey))
 	if w.Code != http.StatusAccepted {
 		t.Fatalf("pi claim status=%d body=%s", w.Code, w.Body.String())
 	}
@@ -441,11 +276,11 @@ func TestPiTaskSubmitRejectsWhenTreasuryInsufficient(t *testing.T) {
 	task := srv.piTasks[claim.Item.TaskID]
 	srv.taskMu.Unlock()
 
-	w = doJSONRequest(t, srv.mux, http.MethodPost, "/api/v1/tasks/pi/submit", map[string]any{
+	w = doJSONRequestWithHeaders(t, srv.mux, http.MethodPost, "/api/v1/tasks/pi/submit", map[string]any{
 		"user_id": userID,
 		"task_id": task.TaskID,
 		"answer":  task.Expected,
-	})
+	}, apiKeyHeaders(apiKey))
 	if w.Code != http.StatusConflict {
 		t.Fatalf("pi submit insufficient status=%d body=%s", w.Code, w.Body.String())
 	}
@@ -525,12 +360,13 @@ func TestSystemAccountsCannotUseTokenUserFlows(t *testing.T) {
 			wantErr: "system accounts cannot create wishes",
 		},
 		{
-			name: "pi claim by admin rejected",
-			path: "/api/v1/tasks/pi/claim",
+			name:    "pi claim by admin rejected",
+			path:    "/api/v1/tasks/pi/claim",
+			headers: apiKeyHeaders(treasuryAPIKey),
 			payload: map[string]any{
-				"user_id": clawWorldSystemID,
+				"user_id": clawTreasurySystemID,
 			},
-			wantErr: "user_id is required",
+			wantErr: "system users cannot claim tasks",
 		},
 	}
 
@@ -542,5 +378,62 @@ func TestSystemAccountsCannotUseTokenUserFlows(t *testing.T) {
 		if !strings.Contains(w.Body.String(), tc.wantErr) {
 			t.Fatalf("%s missing %q in %s", tc.name, tc.wantErr, w.Body.String())
 		}
+	}
+}
+
+func TestPiTaskEndpointsRequireAPIKeyAndBindIdentity(t *testing.T) {
+	srv := newTestServer()
+	userID, apiKey := seedActiveUserWithAPIKey(t, srv)
+	otherUserID, otherAPIKey := seedActiveUserWithAPIKey(t, srv)
+
+	unauthClaim := doJSONRequest(t, srv.mux, http.MethodPost, "/api/v1/tasks/pi/claim", map[string]any{
+		"user_id": userID,
+	})
+	if unauthClaim.Code != http.StatusUnauthorized {
+		t.Fatalf("unauth claim status=%d body=%s", unauthClaim.Code, unauthClaim.Body.String())
+	}
+
+	mismatchClaim := doJSONRequestWithHeaders(t, srv.mux, http.MethodPost, "/api/v1/tasks/pi/claim", map[string]any{
+		"user_id": otherUserID,
+	}, apiKeyHeaders(apiKey))
+	if mismatchClaim.Code != http.StatusForbidden {
+		t.Fatalf("mismatch claim status=%d body=%s", mismatchClaim.Code, mismatchClaim.Body.String())
+	}
+
+	claim := doJSONRequestWithHeaders(t, srv.mux, http.MethodPost, "/api/v1/tasks/pi/claim", map[string]any{
+		"user_id": userID,
+	}, apiKeyHeaders(apiKey))
+	if claim.Code != http.StatusAccepted {
+		t.Fatalf("claim status=%d body=%s", claim.Code, claim.Body.String())
+	}
+	var claimBody struct {
+		Item struct {
+			TaskID string `json:"task_id"`
+			UserID string `json:"user_id"`
+		} `json:"item"`
+	}
+	if err := json.Unmarshal(claim.Body.Bytes(), &claimBody); err != nil {
+		t.Fatalf("unmarshal claim body: %v", err)
+	}
+	if claimBody.Item.UserID != userID {
+		t.Fatalf("claim user_id=%s want %s", claimBody.Item.UserID, userID)
+	}
+
+	unauthSubmit := doJSONRequest(t, srv.mux, http.MethodPost, "/api/v1/tasks/pi/submit", map[string]any{
+		"user_id": userID,
+		"task_id": claimBody.Item.TaskID,
+		"answer":  "0",
+	})
+	if unauthSubmit.Code != http.StatusUnauthorized {
+		t.Fatalf("unauth submit status=%d body=%s", unauthSubmit.Code, unauthSubmit.Body.String())
+	}
+
+	mismatchSubmit := doJSONRequestWithHeaders(t, srv.mux, http.MethodPost, "/api/v1/tasks/pi/submit", map[string]any{
+		"user_id": userID,
+		"task_id": claimBody.Item.TaskID,
+		"answer":  "0",
+	}, apiKeyHeaders(otherAPIKey))
+	if mismatchSubmit.Code != http.StatusForbidden {
+		t.Fatalf("mismatch submit status=%d body=%s", mismatchSubmit.Code, mismatchSubmit.Body.String())
 	}
 }

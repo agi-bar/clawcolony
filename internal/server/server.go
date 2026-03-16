@@ -1272,17 +1272,8 @@ func (s *Server) handleWorldFreezeRescue(w http.ResponseWriter, r *http.Request)
 		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
 		return
 	}
-	if !isLoopbackRemoteAddr(r.RemoteAddr) {
-		expected := strings.TrimSpace(s.cfg.InternalSyncToken)
-		got := internalSyncTokenFromRequest(r)
-		if expected == "" {
-			writeError(w, http.StatusUnauthorized, "non-loopback requests require internal sync token configuration")
-			return
-		}
-		if got == "" || got != expected {
-			writeError(w, http.StatusUnauthorized, "unauthorized")
-			return
-		}
+	if !s.authorizeInternalWriteRequest(w, r) {
+		return
 	}
 	var req worldFreezeRescueRequest
 	if err := decodeJSON(r, &req); err != nil {
@@ -1642,6 +1633,9 @@ type worldTickReplayRequest struct {
 func (s *Server) handleWorldTickReplay(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost && r.Method != http.MethodPut {
 		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	if !s.authorizeInternalWriteRequest(w, r) {
 		return
 	}
 	var req worldTickReplayRequest
@@ -2181,6 +2175,9 @@ func (s *Server) handleWorldCostAlertSettingsUpsert(w http.ResponseWriter, r *ht
 		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
 		return
 	}
+	if !s.authorizeInternalWriteRequest(w, r) {
+		return
+	}
 	var req worldCostAlertSettingsUpsertRequest
 	if err := decodeJSON(r, &req); err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
@@ -2392,6 +2389,9 @@ func (s *Server) handleRuntimeSchedulerSettings(w http.ResponseWriter, r *http.R
 func (s *Server) handleRuntimeSchedulerSettingsUpsert(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost && r.Method != http.MethodPut {
 		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	if !s.authorizeInternalWriteRequest(w, r) {
 		return
 	}
 	var item runtimeSchedulerSettings
@@ -3161,6 +3161,9 @@ func (s *Server) handleWorldEvolutionAlertSettingsUpsert(w http.ResponseWriter, 
 		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
 		return
 	}
+	if !s.authorizeInternalWriteRequest(w, r) {
+		return
+	}
 	var req worldEvolutionAlertSettings
 	if err := decodeJSON(r, &req); err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
@@ -3633,6 +3636,9 @@ func (s *Server) handleTokenRecharge(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleTokenConsume(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	if !s.authorizeInternalWriteRequest(w, r) {
 		return
 	}
 	var req tokenOperationRequest
@@ -11781,8 +11787,9 @@ func (s *Server) handlePiTaskMeta(w http.ResponseWriter, r *http.Request) {
 				"method":  "POST",
 				"path":    "/api/v1/tasks/pi/claim",
 				"purpose": "领取任务（每分钟最多一次，且最多1个进行中任务）",
+				"auth":    "Authorization: Bearer <api_key>",
 				"params": map[string]string{
-					"user_id": "string, required",
+					"user_id": "string, optional legacy field; if provided it must match api_key identity",
 				},
 			},
 			{
@@ -11790,8 +11797,9 @@ func (s *Server) handlePiTaskMeta(w http.ResponseWriter, r *http.Request) {
 				"method":  "POST",
 				"path":    "/api/v1/tasks/pi/submit",
 				"purpose": "提交答案，正确奖励 token，错误扣除 token",
+				"auth":    "Authorization: Bearer <api_key>",
 				"params": map[string]string{
-					"user_id": "string, required",
+					"user_id": "string, optional legacy field; if provided it must match api_key identity",
 					"task_id": "string, required",
 					"answer":  "string(one digit), required",
 				},
@@ -11816,21 +11824,29 @@ func (s *Server) handlePiTaskClaim(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
 		return
 	}
+	userID, ok := s.requireAPIKeyUserID(w, r)
+	if !ok {
+		return
+	}
 	var req piTaskClaimRequest
 	if err := decodeJSON(r, &req); err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
 	req.UserID = strings.TrimSpace(req.UserID)
-	if isExcludedTokenUserID(req.UserID) {
-		writeError(w, http.StatusBadRequest, "user_id is required")
+	if req.UserID != "" && req.UserID != userID {
+		writeError(w, http.StatusForbidden, "user_id does not match api_key identity")
 		return
 	}
-	if _, err := s.store.GetBot(r.Context(), req.UserID); err != nil {
+	if isExcludedTokenUserID(userID) {
+		writeError(w, http.StatusBadRequest, "system users cannot claim tasks")
+		return
+	}
+	if _, err := s.store.GetBot(r.Context(), userID); err != nil {
 		writeError(w, http.StatusBadRequest, "user not found")
 		return
 	}
-	if err := s.ensureUserAlive(r.Context(), req.UserID); err != nil {
+	if err := s.ensureUserAlive(r.Context(), userID); err != nil {
 		writeError(w, http.StatusConflict, err.Error())
 		return
 	}
@@ -11838,7 +11854,7 @@ func (s *Server) handlePiTaskClaim(w http.ResponseWriter, r *http.Request) {
 	s.taskMu.Lock()
 	defer s.taskMu.Unlock()
 
-	if taskID := s.activeTasks[req.UserID]; taskID != "" {
+	if taskID := s.activeTasks[userID]; taskID != "" {
 		task := s.piTasks[taskID]
 		writeJSON(w, http.StatusConflict, map[string]any{
 			"error":       "active task exists",
@@ -11846,7 +11862,7 @@ func (s *Server) handlePiTaskClaim(w http.ResponseWriter, r *http.Request) {
 		})
 		return
 	}
-	if ts := s.lastClaimAt[req.UserID]; !ts.IsZero() && time.Since(ts) < piTaskClaimCooldown {
+	if ts := s.lastClaimAt[userID]; !ts.IsZero() && time.Since(ts) < piTaskClaimCooldown {
 		writeError(w, http.StatusTooManyRequests, "claim rate limited: one task per minute")
 		return
 	}
@@ -11859,7 +11875,7 @@ func (s *Server) handlePiTaskClaim(w http.ResponseWriter, r *http.Request) {
 	reward := int64(10 + rand.Intn(21))
 	task := piTask{
 		TaskID:      fmt.Sprintf("pitask-%d-%04d", time.Now().UnixMilli(), rand.Intn(10000)),
-		BotID:       req.UserID,
+		BotID:       userID,
 		Position:    pos,
 		Question:    fmt.Sprintf("请算出 pi 小数点后第 %d 位数字是什么？", pos),
 		Example:     fmt.Sprintf("pi 小数点后第%d位是%s", pos, string(s.piDigits[pos-1])),
@@ -11869,8 +11885,8 @@ func (s *Server) handlePiTaskClaim(w http.ResponseWriter, r *http.Request) {
 		CreatedAt:   time.Now().UTC(),
 	}
 	s.piTasks[task.TaskID] = task
-	s.activeTasks[req.UserID] = task.TaskID
-	s.lastClaimAt[req.UserID] = time.Now().UTC()
+	s.activeTasks[userID] = task.TaskID
+	s.lastClaimAt[userID] = time.Now().UTC()
 
 	writeJSON(w, http.StatusAccepted, map[string]any{"item": task})
 }
@@ -11878,6 +11894,10 @@ func (s *Server) handlePiTaskClaim(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handlePiTaskSubmit(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	userID, ok := s.requireAPIKeyUserID(w, r)
+	if !ok {
 		return
 	}
 	var req piTaskSubmitRequest
@@ -11888,11 +11908,15 @@ func (s *Server) handlePiTaskSubmit(w http.ResponseWriter, r *http.Request) {
 	req.UserID = strings.TrimSpace(req.UserID)
 	req.TaskID = strings.TrimSpace(req.TaskID)
 	req.Answer = normalizeDigitAnswer(req.Answer)
-	if isExcludedTokenUserID(req.UserID) || req.TaskID == "" || req.Answer == "" {
-		writeError(w, http.StatusBadRequest, "user_id, task_id, answer are required")
+	if req.UserID != "" && req.UserID != userID {
+		writeError(w, http.StatusForbidden, "user_id does not match api_key identity")
 		return
 	}
-	if err := s.ensureUserAlive(r.Context(), req.UserID); err != nil {
+	if isExcludedTokenUserID(userID) || req.TaskID == "" || req.Answer == "" {
+		writeError(w, http.StatusBadRequest, "task_id and answer are required")
+		return
+	}
+	if err := s.ensureUserAlive(r.Context(), userID); err != nil {
 		writeError(w, http.StatusConflict, err.Error())
 		return
 	}
@@ -11904,7 +11928,7 @@ func (s *Server) handlePiTaskSubmit(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "task not found")
 		return
 	}
-	if task.BotID != req.UserID {
+	if task.BotID != userID {
 		s.taskMu.Unlock()
 		writeError(w, http.StatusForbidden, "task does not belong to user")
 		return
@@ -11924,7 +11948,7 @@ func (s *Server) handlePiTaskSubmit(w http.ResponseWriter, r *http.Request) {
 		task.Status = "failed"
 	}
 	s.piTasks[req.TaskID] = task
-	delete(s.activeTasks, req.UserID)
+	delete(s.activeTasks, userID)
 	s.taskMu.Unlock()
 
 	var (
@@ -11933,20 +11957,20 @@ func (s *Server) handlePiTaskSubmit(w http.ResponseWriter, r *http.Request) {
 		err      error
 	)
 	if correct {
-		_, ledger, err = s.transferFromTreasury(r.Context(), req.UserID, task.RewardToken)
+		_, ledger, err = s.transferFromTreasury(r.Context(), userID, task.RewardToken)
 	} else {
-		ledger, deducted, err = s.consumeWithFloor(r.Context(), req.UserID, task.RewardToken)
+		ledger, deducted, err = s.consumeWithFloor(r.Context(), userID, task.RewardToken)
 	}
 	if err != nil {
 		if correct {
 			s.taskMu.Lock()
 			restored := s.piTasks[req.TaskID]
-			if restored.TaskID != "" && restored.BotID == req.UserID && restored.Status == "success" {
+			if restored.TaskID != "" && restored.BotID == userID && restored.Status == "success" {
 				restored.Status = "claimed"
 				restored.Submitted = ""
 				restored.SubmittedAt = nil
 				s.piTasks[req.TaskID] = restored
-				s.activeTasks[req.UserID] = req.TaskID
+				s.activeTasks[userID] = req.TaskID
 			}
 			s.taskMu.Unlock()
 		}

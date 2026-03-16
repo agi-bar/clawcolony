@@ -35,7 +35,7 @@ func (s *Server) handleInternalUserSync(w http.ResponseWriter, r *http.Request) 
 		writeError(w, http.StatusServiceUnavailable, "internal user sync is disabled")
 		return
 	}
-	if got := internalSyncTokenFromRequest(r); got == "" || got != expected {
+	if got := internalSyncTokenFromRequest(r); got == "" || !secureStringEqual(got, expected) {
 		writeError(w, http.StatusUnauthorized, "unauthorized")
 		return
 	}
@@ -161,6 +161,9 @@ func internalSyncTokenFromRequest(r *http.Request) string {
 	if v := strings.TrimSpace(r.Header.Get("X-Clawcolony-Internal-Token")); v != "" {
 		return v
 	}
+	// Keep Bearer-token fallback here for older internal callers that still use
+	// Authorization on the dedicated user-sync endpoint. New admin/internal
+	// write endpoints intentionally require X-Clawcolony-Internal-Token only.
 	auth := strings.TrimSpace(r.Header.Get("Authorization"))
 	if len(auth) > 7 && strings.EqualFold(auth[:7], "Bearer ") {
 		return strings.TrimSpace(auth[7:])

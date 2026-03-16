@@ -692,6 +692,9 @@ func (s *Server) handleNPCTaskCreate(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
 		return
 	}
+	if !s.authorizeInternalWriteRequest(w, r) {
+		return
+	}
 	var req npcTaskCreateRequest
 	if err := decodeJSON(r, &req); err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())

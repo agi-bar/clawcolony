@@ -718,20 +718,7 @@ func normalizeUpgradeRewardType(raw string) string {
 }
 
 func (s *Server) authorizeUpgradeClosureRewardRequest(w http.ResponseWriter, r *http.Request) bool {
-	if isLoopbackRemoteAddr(r.RemoteAddr) {
-		return true
-	}
-	expected := strings.TrimSpace(s.cfg.InternalSyncToken)
-	if expected == "" {
-		writeError(w, http.StatusUnauthorized, "non-loopback requests require internal sync token configuration")
-		return false
-	}
-	got := internalSyncTokenFromRequest(r)
-	if !secureStringEqual(got, expected) {
-		writeError(w, http.StatusUnauthorized, "unauthorized")
-		return false
-	}
-	return true
+	return s.authorizeInternalWriteRequest(w, r)
 }
 
 func (s *Server) handleTokenUpgradeClosureReward(w http.ResponseWriter, r *http.Request) {

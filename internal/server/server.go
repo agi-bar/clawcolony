@@ -6538,7 +6538,7 @@ func (s *Server) closeKBProposalByStats(
 		Content:     fmt.Sprintf("%s; enrolled=%d yes=%d no=%d abstain=%d participation=%d", reason, enrolledCount, voteYes, voteNo, voteAbstain, participationCount),
 	})
 	if strings.EqualFold(strings.TrimSpace(closed.Status), "approved") {
-		_, applied, applyErr := s.applyKBProposalAndBroadcast(ctx, proposal.ID, clawWorldSystemID)
+		_, applied, applyErr := s.applyKBProposalAndBroadcast(ctx, proposal.ID, proposal.ProposerUserID)
 		if applyErr != nil {
 			_, _, _ = s.saveGenesisBootstrapStateForProposal(ctx, proposal.ID, func(cur *genesisState) bool {
 				cur.BootstrapPhase = "approved"

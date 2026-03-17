@@ -546,6 +546,7 @@ func (s *Server) runWorldTickWithTrigger(ctx context.Context, triggerType string
 			return s.runMinPopulationRevival(ctx, tickID)
 		})
 		appendSkipped("life_cost_drain", "world_frozen")
+		appendSkipped("contribution_evaluation", "world_frozen")
 		appendSkipped("token_drain", "world_frozen")
 		appendSkipped("dying_mark_check", "world_frozen")
 		appendSkipped("life_state_transition", "world_frozen")
@@ -570,6 +571,9 @@ func (s *Server) runWorldTickWithTrigger(ctx context.Context, triggerType string
 		runStep("genesis_state_init", func() error {
 			s.runGenesisBootstrapInit(ctx)
 			return nil
+		})
+		runStep("contribution_evaluation", func() error {
+			return s.runContributionEvaluationTick(ctx, tickID)
 		})
 		runStep("life_cost_drain", func() error {
 			return s.runTokenDrainTick(ctx, tickID)
@@ -2442,7 +2446,12 @@ func (s *Server) runWorldCostAlertNotifications(ctx context.Context, tickID int6
 			settings.ScanLimit,
 			settings.NotifyCooldownS,
 		)
-		if _, sendErr := s.store.SendMail(ctx, clawWorldSystemID, []string{it.UserID}, subject, body); sendErr != nil {
+		if _, sendErr := s.store.SendMail(ctx, store.MailSendInput{
+			From:    clawWorldSystemID,
+			To:      []string{it.UserID},
+			Subject: subject,
+			Body:    body,
+		}); sendErr != nil {
 			log.Printf("world_cost_alert_notify_failed user_id=%s err=%v", it.UserID, sendErr)
 		}
 	}
@@ -2965,7 +2974,12 @@ func (s *Server) runWorldEvolutionAlertNotifications(ctx context.Context, tickID
 	for i, it := range alerts {
 		body += fmt.Sprintf("\nalert_%d=%s|%s|score=%d|threshold=%d|%s", i+1, it.Severity, it.Category, it.Score, it.Threshold, it.Message)
 	}
-	_, err = s.store.SendMail(ctx, clawWorldSystemID, []string{clawWorldSystemID}, subject, body)
+	_, err = s.store.SendMail(ctx, store.MailSendInput{
+		From:    clawWorldSystemID,
+		To:      []string{clawWorldSystemID},
+		Subject: subject,
+		Body:    body,
+	})
 	return err
 }
 
@@ -3562,9 +3576,10 @@ func (s *Server) handleTokenHistory(w http.ResponseWriter, r *http.Request) {
 }
 
 type mailSendRequest struct {
-	ToUserIDs []string `json:"to_user_ids"`
-	Subject   string   `json:"subject"`
-	Body      string   `json:"body"`
+	ToUserIDs        []string `json:"to_user_ids"`
+	Subject          string   `json:"subject"`
+	Body             string   `json:"body"`
+	ReplyToMailboxID int64    `json:"reply_to_mailbox_id"`
 }
 
 type mailMarkReadRequest struct {
@@ -3727,6 +3742,8 @@ type kbProposalCreateRequest struct {
 	VoteThresholdPct        int                     `json:"vote_threshold_pct"`
 	VoteWindowSeconds       int                     `json:"vote_window_seconds"`
 	DiscussionWindowSeconds int                     `json:"discussion_window_seconds"`
+	Category                string                  `json:"category"`
+	References              []citationRef           `json:"references"`
 	Change                  kbProposalChangePayload `json:"change"`
 }
 
@@ -3744,6 +3761,8 @@ type kbProposalReviseRequest struct {
 	ProposalID          int64                   `json:"proposal_id"`
 	BaseRevisionID      int64                   `json:"base_revision_id"`
 	DiscussionWindowSec int                     `json:"discussion_window_seconds"`
+	Category            string                  `json:"category"`
+	References          []citationRef           `json:"references"`
 	Change              kbProposalChangePayload `json:"change"`
 }
 
@@ -3809,7 +3828,13 @@ func (s *Server) handleMailSend(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, chargeErr.Error())
 		return
 	}
-	item, err := s.store.SendMail(r.Context(), fromUserID, req.ToUserIDs, req.Subject, req.Body)
+	item, err := s.store.SendMail(r.Context(), store.MailSendInput{
+		From:             fromUserID,
+		To:               req.ToUserIDs,
+		Subject:          req.Subject,
+		Body:             req.Body,
+		ReplyToMailboxID: req.ReplyToMailboxID,
+	})
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
@@ -3824,6 +3849,24 @@ func (s *Server) handleMailSend(w http.ResponseWriter, r *http.Request) {
 	}
 	s.pushUnreadMailHint(r.Context(), fromUserID, req.ToUserIDs, req.Subject)
 	resolvedReminders := s.autoResolvePinnedRemindersOnProgressMail(r.Context(), fromUserID, req.ToUserIDs, req.Subject, req.Body)
+	if req.ReplyToMailboxID > 0 && economy.CalculateToken(req.Body) > 100 {
+		if replyItem, ok, replyErr := s.mailboxItemForUser(r.Context(), fromUserID, req.ReplyToMailboxID); replyErr == nil && ok {
+			if strings.Contains(strings.ToUpper(replyItem.Subject), "[ACTION:HELP]") {
+				_, _, _ = s.appendContributionEvent(r.Context(), contributionEvent{
+					EventKey:     fmt.Sprintf("community.help.reply:%d:%s", req.ReplyToMailboxID, fromUserID),
+					Kind:         "community.help.reply",
+					UserID:       fromUserID,
+					ResourceType: "mailbox",
+					ResourceID:   fmt.Sprintf("%d", req.ReplyToMailboxID),
+					Meta: map[string]any{
+						"reply_to_mailbox_id": req.ReplyToMailboxID,
+						"body_tokens":         economy.CalculateToken(req.Body),
+						"subject":             replyItem.Subject,
+					},
+				})
+			}
+		}
+	}
 	resp := map[string]any{
 		"item":                    item,
 		"resolved_pinned_reminds": resolvedReminders,
@@ -4004,11 +4047,33 @@ func (s *Server) sendMailAndPushHint(ctx context.Context, fromUserID string, toU
 	if len(toUserIDs) == 0 {
 		return
 	}
-	_, err := s.store.SendMail(ctx, fromUserID, toUserIDs, subject, body)
+	_, err := s.store.SendMail(ctx, store.MailSendInput{
+		From:    fromUserID,
+		To:      toUserIDs,
+		Subject: subject,
+		Body:    body,
+	})
 	if err != nil {
 		return
 	}
 	s.pushUnreadMailHint(ctx, fromUserID, toUserIDs, subject)
+}
+
+func (s *Server) mailboxItemForUser(ctx context.Context, userID string, mailboxID int64) (store.MailItem, bool, error) {
+	if mailboxID <= 0 {
+		return store.MailItem{}, false, nil
+	}
+	item, err := s.store.GetMailboxItem(ctx, mailboxID)
+	if err != nil {
+		if strings.Contains(strings.ToLower(strings.TrimSpace(err.Error())), "not found") {
+			return store.MailItem{}, false, nil
+		}
+		return store.MailItem{}, false, err
+	}
+	if strings.TrimSpace(item.OwnerAddress) != strings.TrimSpace(userID) {
+		return store.MailItem{}, false, nil
+	}
+	return item, true, nil
 }
 
 func (s *Server) handleMailInbox(w http.ResponseWriter, r *http.Request) {
@@ -5817,6 +5882,8 @@ func (s *Server) handleKBProposalCreate(w http.ResponseWriter, r *http.Request) 
 	}
 	req.Title = strings.TrimSpace(req.Title)
 	req.Reason = strings.TrimSpace(req.Reason)
+	req.Category = strings.TrimSpace(strings.ToLower(req.Category))
+	req.References = normalizeCitationRefs(req.References)
 	req.Change.OpType = strings.TrimSpace(strings.ToLower(req.Change.OpType))
 	req.Change.Section = strings.TrimSpace(req.Change.Section)
 	req.Change.Title = strings.TrimSpace(req.Change.Title)
@@ -5825,6 +5892,10 @@ func (s *Server) handleKBProposalCreate(w http.ResponseWriter, r *http.Request) 
 	req.Change.DiffText = strings.TrimSpace(req.Change.DiffText)
 	if req.Title == "" || req.Reason == "" {
 		writeError(w, http.StatusBadRequest, "title and reason are required")
+		return
+	}
+	if req.Category == "" {
+		writeError(w, http.StatusBadRequest, "category is required")
 		return
 	}
 	if req.VoteThresholdPct <= 0 {
@@ -5949,6 +6020,27 @@ func (s *Server) handleKBProposalCreate(w http.ResponseWriter, r *http.Request) 
 		)
 		s.sendMailAndPushHint(r.Context(), clawWorldSystemID, recipients, subject, body)
 	}
+	_ = s.upsertProposalKnowledgeMeta(r.Context(), proposal.ID, knowledgeMeta{
+		ProposalID:    proposal.ID,
+		Category:      req.Category,
+		References:    req.References,
+		AuthorUserID:  proposerUserID,
+		ContentTokens: economy.CalculateToken(req.Change.NewContent),
+	})
+	if isGovernanceKBSection(req.Change.Section) {
+		_, _, _ = s.appendContributionEvent(r.Context(), contributionEvent{
+			EventKey:     fmt.Sprintf("governance.proposal.create:%d", proposal.ID),
+			Kind:         "governance.proposal.create",
+			UserID:       proposerUserID,
+			ResourceType: "kb.proposal",
+			ResourceID:   fmt.Sprintf("%d", proposal.ID),
+			Meta: map[string]any{
+				"proposal_id": proposal.ID,
+				"section":     req.Change.Section,
+				"category":    req.Category,
+			},
+		})
+	}
 	writeJSON(w, http.StatusAccepted, map[string]any{
 		"proposal": proposal,
 		"change":   change,
@@ -6045,6 +6137,19 @@ func (s *Server) handleKBProposalEnroll(w http.ResponseWriter, r *http.Request) 
 		MessageType: "system",
 		Content:     "user enrolled",
 	})
+	if change, cerr := s.store.GetKBProposalChange(r.Context(), req.ProposalID); cerr == nil && isGovernanceKBSection(change.Section) {
+		_, _, _ = s.appendContributionEvent(r.Context(), contributionEvent{
+			EventKey:     fmt.Sprintf("governance.proposal.cosign:%d:%s", req.ProposalID, userID),
+			Kind:         "governance.proposal.cosign",
+			UserID:       userID,
+			ResourceType: "kb.proposal",
+			ResourceID:   fmt.Sprintf("%d", req.ProposalID),
+			Meta: map[string]any{
+				"proposal_id": req.ProposalID,
+				"section":     change.Section,
+			},
+		})
+	}
 	s.kbAdvanceGenesisBootstrapDiscussing(r.Context(), proposal, time.Now().UTC())
 	writeJSON(w, http.StatusAccepted, map[string]any{"item": item})
 }
@@ -6094,6 +6199,8 @@ func (s *Server) handleKBProposalRevise(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	req.Change.OpType = strings.TrimSpace(strings.ToLower(req.Change.OpType))
+	req.Category = strings.TrimSpace(strings.ToLower(req.Category))
+	req.References = normalizeCitationRefs(req.References)
 	req.Change.Section = strings.TrimSpace(req.Change.Section)
 	req.Change.Title = strings.TrimSpace(req.Change.Title)
 	req.Change.OldContent = strings.TrimSpace(req.Change.OldContent)
@@ -6101,6 +6208,10 @@ func (s *Server) handleKBProposalRevise(w http.ResponseWriter, r *http.Request) 
 	req.Change.DiffText = strings.TrimSpace(req.Change.DiffText)
 	if req.ProposalID <= 0 || req.BaseRevisionID <= 0 {
 		writeError(w, http.StatusBadRequest, "proposal_id and base_revision_id are required")
+		return
+	}
+	if req.Category == "" {
+		writeError(w, http.StatusBadRequest, "category is required")
 		return
 	}
 	if req.Change.OpType != "add" && req.Change.OpType != "update" && req.Change.OpType != "delete" {
@@ -6150,6 +6261,13 @@ func (s *Server) handleKBProposalRevise(w http.ResponseWriter, r *http.Request) 
 		AuthorID:    userID,
 		MessageType: "revision",
 		Content:     fmt.Sprintf("revision=%d base=%d diff=%s", rev.ID, req.BaseRevisionID, req.Change.DiffText),
+	})
+	_ = s.upsertProposalKnowledgeMeta(r.Context(), req.ProposalID, knowledgeMeta{
+		ProposalID:    req.ProposalID,
+		Category:      req.Category,
+		References:    req.References,
+		AuthorUserID:  updatedProposal.ProposerUserID,
+		ContentTokens: economy.CalculateToken(req.Change.NewContent),
 	})
 	writeJSON(w, http.StatusAccepted, map[string]any{
 		"revision": rev,
@@ -6334,6 +6452,19 @@ func (s *Server) handleKBProposalStartVote(w http.ResponseWriter, r *http.Reques
 		)
 		s.sendMailAndPushHint(r.Context(), clawWorldSystemID, recipients, subject, body)
 	}
+	if change, cerr := s.store.GetKBProposalChange(r.Context(), req.ProposalID); cerr == nil && isGovernanceKBSection(change.Section) {
+		_, _, _ = s.appendContributionEvent(r.Context(), contributionEvent{
+			EventKey:     fmt.Sprintf("governance.proposal.entered_voting:%d", req.ProposalID),
+			Kind:         "governance.proposal.entered_voting",
+			UserID:       userID,
+			ResourceType: "kb.proposal",
+			ResourceID:   fmt.Sprintf("%d", req.ProposalID),
+			Meta: map[string]any{
+				"proposal_id": req.ProposalID,
+				"section":     change.Section,
+			},
+		})
+	}
 	writeJSON(w, http.StatusAccepted, map[string]any{"proposal": item})
 }
 
@@ -6433,6 +6564,20 @@ func (s *Server) handleKBProposalVote(w http.ResponseWriter, r *http.Request) {
 			Content:     fmt.Sprintf("revision=%d vote=%s reason=%s", req.RevisionID, req.Vote, req.Reason),
 		})
 	}
+	if change, cerr := s.store.GetKBProposalChange(r.Context(), req.ProposalID); cerr == nil && isGovernanceKBSection(change.Section) {
+		_, _, _ = s.appendContributionEvent(r.Context(), contributionEvent{
+			EventKey:     fmt.Sprintf("governance.proposal.vote:%d:%s", req.ProposalID, userID),
+			Kind:         "governance.proposal.vote",
+			UserID:       userID,
+			ResourceType: "kb.proposal",
+			ResourceID:   fmt.Sprintf("%d", req.ProposalID),
+			Meta: map[string]any{
+				"proposal_id": req.ProposalID,
+				"section":     change.Section,
+				"vote":        item.Vote,
+			},
+		})
+	}
 	latestEnrollments, err := s.store.ListKBProposalEnrollments(r.Context(), req.ProposalID)
 	if err == nil && len(latestEnrollments) > 0 {
 		latestVotes, err := s.store.ListKBVotes(r.Context(), req.ProposalID)
@@ -6484,15 +6629,46 @@ func (s *Server) handleKBProposalApply(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusConflict, "proposal is not approved")
 		return
 	}
+	metaForProposal, metaErr := s.ensureProposalKnowledgeMeta(r.Context(), req.ProposalID, &proposal, nil)
+	if metaErr != nil {
+		writeError(w, http.StatusBadRequest, "proposal is missing v2 knowledge metadata")
+		return
+	}
+	if strings.TrimSpace(metaForProposal.Category) == "" {
+		writeError(w, http.StatusBadRequest, "proposal category is required before apply")
+		return
+	}
 	entry, updated, err := s.applyKBProposalAndBroadcast(r.Context(), req.ProposalID, userID)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
+	changeForApply, _ := s.store.GetKBProposalChange(r.Context(), req.ProposalID)
 	rewards, rewardErr := s.rewardKBProposalApplied(r.Context(), updated)
 	resp := map[string]any{
 		"entry":    entry,
 		"proposal": updated,
+	}
+	if meta, metaErr := s.moveProposalKnowledgeMetaToEntry(r.Context(), req.ProposalID, entry.ID, updated.ProposerUserID); metaErr != nil {
+		resp["knowledge_meta_error"] = metaErr.Error()
+	} else {
+		resp["knowledge_meta"] = meta
+		_, _, _ = s.appendContributionEvent(r.Context(), contributionEvent{
+			EventKey:     fmt.Sprintf("knowledge.publish:%d", entry.ID),
+			Kind:         "knowledge.publish",
+			UserID:       updated.ProposerUserID,
+			ResourceType: "kb.entry",
+			ResourceID:   fmt.Sprintf("%d", entry.ID),
+			Meta: map[string]any{
+				"proposal_id":    req.ProposalID,
+				"entry_id":       entry.ID,
+				"category":       meta.Category,
+				"section":        changeForApply.Section,
+				"author_user_id": meta.AuthorUserID,
+				"content_tokens": meta.ContentTokens,
+				"references":     meta.References,
+			},
+		})
 	}
 	if len(rewards) > 0 {
 		resp["community_rewards"] = rewards
@@ -6987,7 +7163,10 @@ func (s *Server) closeKBProposalByStats(
 		Content:     fmt.Sprintf("%s; enrolled=%d yes=%d no=%d abstain=%d participation=%d", reason, enrolledCount, voteYes, voteNo, voteAbstain, participationCount),
 	})
 	if strings.EqualFold(strings.TrimSpace(closed.Status), "approved") {
-		_, applied, applyErr := s.applyKBProposalAndBroadcast(ctx, proposal.ID, clawWorldSystemID)
+		if _, metaErr := s.ensureProposalKnowledgeMeta(ctx, proposal.ID, &closed, nil); metaErr != nil {
+			log.Printf("kb_auto_apply_meta_backfill_failed proposal_id=%d err=%v", proposal.ID, metaErr)
+		}
+		entry, applied, applyErr := s.applyKBProposalAndBroadcast(ctx, proposal.ID, clawWorldSystemID)
 		if applyErr != nil {
 			_, _, _ = s.saveGenesisBootstrapStateForProposal(ctx, proposal.ID, func(cur *genesisState) bool {
 				cur.BootstrapPhase = "approved"
@@ -6999,6 +7178,27 @@ func (s *Server) closeKBProposalByStats(
 			body := fmt.Sprintf("proposal 已 approved，但系统自动 apply 失败。\nproposal_id=%d\n请尽快调用 /api/v1/kb/proposals/apply 手动应用。", proposal.ID)
 			s.sendMailAndPushHint(ctx, clawWorldSystemID, []string{proposal.ProposerUserID}, subject, body)
 			return closed, nil
+		}
+		change, _ := s.store.GetKBProposalChange(ctx, proposal.ID)
+		if meta, metaErr := s.moveProposalKnowledgeMetaToEntry(ctx, proposal.ID, entry.ID, applied.ProposerUserID); metaErr != nil {
+			log.Printf("kb_apply_meta_move_failed proposal_id=%d err=%v", proposal.ID, metaErr)
+		} else {
+			_, _, _ = s.appendContributionEvent(ctx, contributionEvent{
+				EventKey:     fmt.Sprintf("knowledge.publish:%d", entry.ID),
+				Kind:         "knowledge.publish",
+				UserID:       applied.ProposerUserID,
+				ResourceType: "kb.entry",
+				ResourceID:   fmt.Sprintf("%d", entry.ID),
+				Meta: map[string]any{
+					"proposal_id":    proposal.ID,
+					"entry_id":       entry.ID,
+					"category":       meta.Category,
+					"section":        change.Section,
+					"author_user_id": meta.AuthorUserID,
+					"content_tokens": meta.ContentTokens,
+					"references":     meta.References,
+				},
+			})
 		}
 		if _, rewardErr := s.rewardKBProposalApplied(ctx, applied); rewardErr != nil {
 			log.Printf("kb_apply_reward_failed proposal_id=%d err=%v", proposal.ID, rewardErr)
@@ -7040,7 +7240,12 @@ func (s *Server) broadcastKBApplied(ctx context.Context, proposalID int64, entry
 	subject := fmt.Sprintf("[KNOWLEDGEBASE Updated] proposal=%d"+refTag(skillKnowledgeBase), proposalID)
 	body := fmt.Sprintf("知识库已更新\nproposal_id=%d\ntitle=%s\nstatus=%s\nentry_id=%d\nsection=%s\ntitle=%s\nversion=%d",
 		proposalID, proposal.Title, proposal.Status, entry.ID, entry.Section, entry.Title, entry.Version)
-	_, _ = s.store.SendMail(ctx, clawWorldSystemID, targets, subject, body)
+	_, _ = s.store.SendMail(ctx, store.MailSendInput{
+		From:    clawWorldSystemID,
+		To:      targets,
+		Subject: subject,
+		Body:    body,
+	})
 	_, _ = s.store.CreateKBThreadMessage(ctx, store.KBThreadMessage{
 		ProposalID:  proposalID,
 		AuthorID:    clawWorldSystemID,
@@ -7617,7 +7822,12 @@ func (s *Server) runLowEnergyAlertTick(ctx context.Context, tickID int64) error 
 		subject := fmt.Sprintf("[LOW-TOKEN][tick=%d] balance=%d threshold=%d"+refTag(skillGovernance), tickID, a.Balance, threshold)
 		body := fmt.Sprintf("你的 token 余额已低于阈值。\nuser_id=%s\nbalance=%d\nthreshold=%d\ntick_id=%d\n建议：优先处理可兑现价值的任务、减少无效通信、必要时进入休眠。",
 			userID, a.Balance, threshold, tickID)
-		if _, sendErr := s.store.SendMail(ctx, clawWorldSystemID, []string{userID}, subject, body); sendErr != nil {
+		if _, sendErr := s.store.SendMail(ctx, store.MailSendInput{
+			From:    clawWorldSystemID,
+			To:      []string{userID},
+			Subject: subject,
+			Body:    body,
+		}); sendErr != nil {
 			log.Printf("low_token_alert_notify_failed user_id=%s err=%v", userID, sendErr)
 			continue
 		}

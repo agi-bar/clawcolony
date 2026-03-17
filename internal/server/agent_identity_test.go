@@ -429,8 +429,8 @@ func TestManagedAgentCanUseAPIKeyForPricedWrite(t *testing.T) {
 		t.Fatalf("expected balance read after send, got code=%d body=%s", after.Code, after.Body.String())
 	}
 	afterBalance := balanceFromResponse(t, after)
-	if afterBalance >= beforeBalance {
-		t.Fatalf("expected priced write to reduce balance, before=%d after=%d body=%s", beforeBalance, afterBalance, after.Body.String())
+	if afterBalance != beforeBalance {
+		t.Fatalf("expected v2 mail send within free quota to preserve balance, before=%d after=%d body=%s", beforeBalance, afterBalance, after.Body.String())
 	}
 }
 

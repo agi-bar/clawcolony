@@ -70,29 +70,45 @@ type InMemoryStore struct {
 	ganglionInts         []GanglionIntegration
 	nextGanglionRateID   int64
 	ganglionRatings      []GanglionRating
+	ownerEconomyProfiles map[string]OwnerEconomyProfile
+	onboardingGrants     map[string]OwnerOnboardingGrant
+	commQuotaWindows     map[string]EconomyCommQuotaWindow
+	contributionEvents   map[string]EconomyContributionEvent
+	rewardDecisions      map[string]EconomyRewardDecision
+	knowledgeMetaByProp  map[int64]EconomyKnowledgeMeta
+	knowledgeMetaByEntry map[int64]EconomyKnowledgeMeta
+	toolEconomyMeta      map[string]EconomyToolMeta
 }
 
 func NewInMemory() *InMemoryStore {
 	return &InMemoryStore{
-		bots:               make(map[string]Bot),
-		agentRegistrations: make(map[string]AgentRegistration),
-		agentProfiles:      make(map[string]AgentProfile),
-		humanOwners:        make(map[string]HumanOwner),
-		humanOwnerByEmail:  make(map[string]string),
-		humanOwnerSessions: make(map[string]HumanOwnerSession),
-		agentBindings:      make(map[string]AgentHumanBinding),
-		socialLinks:        make(map[string]SocialLink),
-		socialRewardGrants: make(map[string]SocialRewardGrant),
-		accounts:           make(map[string]TokenAccount),
-		contacts:           make(map[string]map[string]MailContact),
-		collab:             make(map[string]CollabSession),
-		kbEntries:          make(map[int64]KBEntry),
-		kbProposals:        make(map[int64]KBProposal),
-		kbChanges:          make(map[int64]KBProposalChange),
-		tianDaoLaws:        make(map[string]TianDaoLaw),
-		worldSettings:      make(map[string]WorldSetting),
-		userLifeStates:     make(map[string]UserLifeState),
-		ganglia:            make(map[int64]Ganglion),
+		bots:                 make(map[string]Bot),
+		agentRegistrations:   make(map[string]AgentRegistration),
+		agentProfiles:        make(map[string]AgentProfile),
+		humanOwners:          make(map[string]HumanOwner),
+		humanOwnerByEmail:    make(map[string]string),
+		humanOwnerSessions:   make(map[string]HumanOwnerSession),
+		agentBindings:        make(map[string]AgentHumanBinding),
+		socialLinks:          make(map[string]SocialLink),
+		socialRewardGrants:   make(map[string]SocialRewardGrant),
+		accounts:             make(map[string]TokenAccount),
+		contacts:             make(map[string]map[string]MailContact),
+		collab:               make(map[string]CollabSession),
+		kbEntries:            make(map[int64]KBEntry),
+		kbProposals:          make(map[int64]KBProposal),
+		kbChanges:            make(map[int64]KBProposalChange),
+		tianDaoLaws:          make(map[string]TianDaoLaw),
+		worldSettings:        make(map[string]WorldSetting),
+		userLifeStates:       make(map[string]UserLifeState),
+		ganglia:              make(map[int64]Ganglion),
+		ownerEconomyProfiles: make(map[string]OwnerEconomyProfile),
+		onboardingGrants:     make(map[string]OwnerOnboardingGrant),
+		commQuotaWindows:     make(map[string]EconomyCommQuotaWindow),
+		contributionEvents:   make(map[string]EconomyContributionEvent),
+		rewardDecisions:      make(map[string]EconomyRewardDecision),
+		knowledgeMetaByProp:  make(map[int64]EconomyKnowledgeMeta),
+		knowledgeMetaByEntry: make(map[int64]EconomyKnowledgeMeta),
+		toolEconomyMeta:      make(map[string]EconomyToolMeta),
 	}
 }
 
@@ -660,57 +676,60 @@ func (s *InMemoryStore) UpsertWorldSetting(_ context.Context, item WorldSetting)
 	return item, nil
 }
 
-func (s *InMemoryStore) SendMail(_ context.Context, from string, to []string, subject, body string) (MailSendResult, error) {
+func (s *InMemoryStore) SendMail(_ context.Context, input MailSendInput) (MailSendResult, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	now := time.Now().UTC()
 	s.nextMessageID++
 	msgID := s.nextMessageID
 
-	for _, recipient := range to {
+	for _, recipient := range input.To {
 		if strings.TrimSpace(recipient) == "" {
 			continue
 		}
 		s.nextMailboxID++
 		s.mailbox = append(s.mailbox, MailItem{
-			MailboxID:    s.nextMailboxID,
-			MessageID:    msgID,
-			OwnerAddress: recipient,
-			Folder:       "inbox",
-			FromAddress:  from,
-			ToAddress:    recipient,
-			Subject:      subject,
-			Body:         body,
-			IsRead:       false,
-			SentAt:       now,
+			MailboxID:        s.nextMailboxID,
+			MessageID:        msgID,
+			OwnerAddress:     recipient,
+			Folder:           "inbox",
+			FromAddress:      input.From,
+			ToAddress:        recipient,
+			Subject:          input.Subject,
+			Body:             input.Body,
+			ReplyToMailboxID: input.ReplyToMailboxID,
+			IsRead:           false,
+			SentAt:           now,
 		})
 	}
 
-	for _, recipient := range to {
+	for _, recipient := range input.To {
 		if strings.TrimSpace(recipient) == "" {
 			continue
 		}
 		s.nextMailboxID++
 		s.mailbox = append(s.mailbox, MailItem{
-			MailboxID:    s.nextMailboxID,
-			MessageID:    msgID,
-			OwnerAddress: from,
-			Folder:       "outbox",
-			FromAddress:  from,
-			ToAddress:    recipient,
-			Subject:      subject,
-			Body:         body,
-			IsRead:       true,
-			SentAt:       now,
+			MailboxID:        s.nextMailboxID,
+			MessageID:        msgID,
+			OwnerAddress:     input.From,
+			Folder:           "outbox",
+			FromAddress:      input.From,
+			ToAddress:        recipient,
+			Subject:          input.Subject,
+			Body:             input.Body,
+			ReplyToMailboxID: input.ReplyToMailboxID,
+			IsRead:           true,
+			SentAt:           now,
 		})
 	}
 
 	return MailSendResult{
-		MessageID: msgID,
-		From:      from,
-		To:        append([]string(nil), to...),
-		Subject:   subject,
-		SentAt:    now,
+		MessageID:        msgID,
+		From:             input.From,
+		To:               append([]string(nil), input.To...),
+		Subject:          input.Subject,
+		ReplyToMailboxID: input.ReplyToMailboxID,
+		SentAt:           now,
 	}, nil
 }
 
@@ -752,6 +771,17 @@ func (s *InMemoryStore) ListMailbox(_ context.Context, ownerAddress, folder, sco
 		out = out[:limit]
 	}
 	return out, nil
+}
+
+func (s *InMemoryStore) GetMailboxItem(_ context.Context, mailboxID int64) (MailItem, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, item := range s.mailbox {
+		if item.MailboxID == mailboxID {
+			return item, nil
+		}
+	}
+	return MailItem{}, fmt.Errorf("mailbox item not found: %d", mailboxID)
 }
 
 func (s *InMemoryStore) MarkMailboxRead(_ context.Context, ownerAddress string, mailboxIDs []int64) error {

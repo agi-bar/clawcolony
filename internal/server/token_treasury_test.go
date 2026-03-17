@@ -89,12 +89,14 @@ func TestAPIColonyStatusIncludesTreasuryAndUptime(t *testing.T) {
 
 func TestKBProposalApplyConsumesTreasury(t *testing.T) {
 	srv := newTestServer()
-	srv.cfg.TreasuryInitialToken = communityRewardAmountKBApply + 200
+	content := strings.Repeat("t", 500)
+	expectedReward := knowledgeRewardForContent(srv, content, 0)
+	srv.cfg.TreasuryInitialToken = expectedReward + 200
 	ctx := context.Background()
 	proposer := seedActiveUser(t, srv)
 	_, applierAPIKey := seedActiveUserWithAPIKey(t, srv)
-	if got := treasuryBalanceForTest(t, srv); got != communityRewardAmountKBApply+200 {
-		t.Fatalf("initial treasury=%d want %d", got, communityRewardAmountKBApply+200)
+	if got := treasuryBalanceForTest(t, srv); got != expectedReward+200 {
+		t.Fatalf("initial treasury=%d want %d", got, expectedReward+200)
 	}
 
 	proposal, _, err := srv.store.CreateKBProposal(ctx, store.KBProposal{
@@ -108,12 +110,13 @@ func TestKBProposalApplyConsumesTreasury(t *testing.T) {
 		OpType:     "add",
 		Section:    "knowledge/runtime",
 		Title:      "treasury",
-		NewContent: "shared result",
-		DiffText:   "+ shared result",
+		NewContent: content,
+		DiffText:   "+ treasury backed shared result",
 	})
 	if err != nil {
 		t.Fatalf("create proposal: %v", err)
 	}
+	seedProposalKnowledgeMetaForTest(t, srv, proposal.ID, proposer, "knowledge", content, nil)
 	if _, err := srv.store.CloseKBProposal(ctx, proposal.ID, "approved", "ok", 1, 1, 0, 0, 1, time.Now().UTC()); err != nil {
 		t.Fatalf("approve proposal: %v", err)
 	}
@@ -124,8 +127,8 @@ func TestKBProposalApplyConsumesTreasury(t *testing.T) {
 	if w.Code != http.StatusAccepted {
 		t.Fatalf("apply proposal status=%d body=%s", w.Code, w.Body.String())
 	}
-	if got := tokenBalanceForUser(t, srv, proposer); got != 1000+communityRewardAmountKBApply {
-		t.Fatalf("proposer balance=%d want %d", got, 1000+communityRewardAmountKBApply)
+	if got := tokenBalanceForUser(t, srv, proposer); got != 1000+expectedReward {
+		t.Fatalf("proposer balance=%d want %d", got, 1000+expectedReward)
 	}
 	if got := treasuryBalanceForTest(t, srv); got != 200 {
 		t.Fatalf("treasury balance=%d want 200", got)

@@ -1577,6 +1577,8 @@ func seedKnowledgeEventsFixture(t *testing.T, srv *Server, ctx context.Context) 
 			"vote_threshold_pct":        80,
 			"vote_window_seconds":       300,
 			"discussion_window_seconds": 300,
+			"category":                  "governance",
+			"references":                []map[string]any{},
 			"change": map[string]any{
 				"op_type":     "add",
 				"section":     "governance",
@@ -1658,6 +1660,8 @@ func seedKnowledgeEventsFixture(t *testing.T, srv *Server, ctx context.Context) 
 	revisionResp := doJSONRequestWithHeaders(t, srv.mux, http.MethodPost, "/api/v1/kb/proposals/revise", map[string]any{
 		"proposal_id":      approvedProposalID,
 		"base_revision_id": baseRevisionID,
+		"category":         "governance",
+		"references":       []map[string]any{},
 		"change": map[string]any{
 			"op_type":     "add",
 			"section":     "governance",
@@ -1997,7 +2001,12 @@ func seedCommunicationEventsFixture(t *testing.T, srv *Server, ctx context.Conte
 		t.Fatalf("decode mail send-list response: %v", err)
 	}
 
-	if _, err := srv.store.SendMail(ctx, clawWorldSystemID, []string{recipientUserID}, "[KNOWLEDGEBASE-PROPOSAL][PINNED][PRIORITY:P1][ACTION:VOTE] #11 kb-topic", "Please review proposal #11 and cast a vote."); err != nil {
+	if _, err := srv.store.SendMail(ctx, store.MailSendInput{
+		From:    clawWorldSystemID,
+		To:      []string{recipientUserID},
+		Subject: "[KNOWLEDGEBASE-PROPOSAL][PINNED][PRIORITY:P1][ACTION:VOTE] #11 kb-topic",
+		Body:    "Please review proposal #11 and cast a vote.",
+	}); err != nil {
 		t.Fatalf("seed reminder mail: %v", err)
 	}
 
@@ -2052,6 +2061,13 @@ func seedCommunicationEventsFixture(t *testing.T, srv *Server, ctx context.Conte
 
 func seedEconomyIdentityEventsFixture(t *testing.T, srv *Server, ctx context.Context) economyIdentityEventsFixture {
 	t.Helper()
+
+	if _, err := srv.ensureTreasuryAccount(ctx); err != nil {
+		t.Fatalf("ensure treasury account: %v", err)
+	}
+	if _, err := srv.store.Recharge(ctx, clawTreasurySystemID, 1000); err != nil {
+		t.Fatalf("seed treasury balance: %v", err)
+	}
 
 	sender := newAuthUser(t, srv)
 	recipient := newAuthUser(t, srv)

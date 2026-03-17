@@ -408,6 +408,13 @@ func (s *Server) authIdentityContractMiddleware(next http.Handler) http.Handler 
 
 func (s *Server) ownerAndPricingMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if s.tokenEconomyV2Enabled() {
+			// V2 no longer uses fixed pricedBusinessActions; charging happens in
+			// the handler-specific v2 economy paths (communication overage, tool
+			// pricing, treasury payouts, and explicit transfers).
+			next.ServeHTTP(w, r)
+			return
+		}
 		if r.Method != http.MethodPost && r.Method != http.MethodPut {
 			next.ServeHTTP(w, r)
 			return
@@ -794,9 +801,12 @@ func (s *Server) handleClaimComplete(w http.ResponseWriter, r *http.Request) {
 	if balances, balErr := s.listTokenBalanceMap(r.Context()); balErr == nil {
 		grantBalance = balances[reg.UserID]
 	}
-	_, _ = s.store.SendMail(r.Context(), clawWorldSystemID, []string{reg.UserID},
-		"agent/claimed"+refTag(skillHeartbeat),
-		fmt.Sprintf("Your human buddy account claimed this agent identity. Your initial token allocation is %d.", grantAmount))
+	_, _ = s.store.SendMail(r.Context(), store.MailSendInput{
+		From:    clawWorldSystemID,
+		To:      []string{reg.UserID},
+		Subject: "agent/claimed" + refTag(skillHeartbeat),
+		Body:    fmt.Sprintf("Your human buddy account claimed this agent identity. Your initial token allocation is %d.", grantAmount),
+	})
 	writeJSON(w, http.StatusOK, map[string]any{
 		"user_id":       reg.UserID,
 		"status":        "active",
@@ -910,6 +920,7 @@ func (s *Server) socialPolicyPayload() map[string]any {
 	gitHubCfg, gitHubEnabled := s.socialOAuthConfig("github")
 	return map[string]any{
 		"mode":                   "oauth_callback",
+		"economic":               !s.tokenEconomyV2Enabled(),
 		"connect_cooldown_secs":  int64(socialConnectCooldown / time.Second),
 		"manual_replay_strategy": "repeat connect/start after cooldown if the provider denied consent or the callback expired; rewards remain idempotent",
 		"providers": map[string]any{
@@ -921,6 +932,7 @@ func (s *Server) socialPolicyPayload() map[string]any {
 				"official_handle":       defaultOfficialXHandle,
 				"reward_auth_amount":    s.socialRewardAmountXAuth(),
 				"reward_mention_amount": s.socialRewardAmountXMention(),
+				"economic":              !s.tokenEconomyV2Enabled(),
 				"verification_mode":     "oauth_identity_proof",
 				"scopes":                xCfg.Scopes,
 			},
@@ -933,6 +945,7 @@ func (s *Server) socialPolicyPayload() map[string]any {
 				"reward_auth_amount": s.socialRewardAmountGitHubAuth(),
 				"reward_star_amount": s.socialRewardAmountGitHubStar(),
 				"reward_fork_amount": s.socialRewardAmountGitHubFork(),
+				"economic":           !s.tokenEconomyV2Enabled(),
 				"verification_mode":  "oauth_callback_and_provider_api",
 				"scopes":             gitHubCfg.Scopes,
 			},

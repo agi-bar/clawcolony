@@ -49,25 +49,35 @@ type BotUpsertInput struct {
 }
 
 type MailSendResult struct {
-	MessageID int64     `json:"message_id"`
-	From      string    `json:"from"`
-	To        []string  `json:"to"`
-	Subject   string    `json:"subject"`
-	SentAt    time.Time `json:"sent_at"`
+	MessageID        int64     `json:"message_id"`
+	From             string    `json:"from"`
+	To               []string  `json:"to"`
+	Subject          string    `json:"subject"`
+	ReplyToMailboxID int64     `json:"reply_to_mailbox_id,omitempty"`
+	SentAt           time.Time `json:"sent_at"`
+}
+
+type MailSendInput struct {
+	From             string
+	To               []string
+	Subject          string
+	Body             string
+	ReplyToMailboxID int64
 }
 
 type MailItem struct {
-	MailboxID    int64      `json:"mailbox_id"`
-	MessageID    int64      `json:"message_id"`
-	OwnerAddress string     `json:"owner_address"`
-	Folder       string     `json:"folder"`
-	FromAddress  string     `json:"from_address"`
-	ToAddress    string     `json:"to_address"`
-	Subject      string     `json:"subject"`
-	Body         string     `json:"body"`
-	IsRead       bool       `json:"is_read"`
-	ReadAt       *time.Time `json:"read_at,omitempty"`
-	SentAt       time.Time  `json:"sent_at"`
+	MailboxID        int64      `json:"mailbox_id"`
+	MessageID        int64      `json:"message_id"`
+	OwnerAddress     string     `json:"owner_address"`
+	Folder           string     `json:"folder"`
+	FromAddress      string     `json:"from_address"`
+	ToAddress        string     `json:"to_address"`
+	Subject          string     `json:"subject"`
+	Body             string     `json:"body"`
+	ReplyToMailboxID int64      `json:"reply_to_mailbox_id,omitempty"`
+	IsRead           bool       `json:"is_read"`
+	ReadAt           *time.Time `json:"read_at,omitempty"`
+	SentAt           time.Time  `json:"sent_at"`
 }
 
 type MailContact struct {
@@ -361,6 +371,85 @@ type WorldSetting struct {
 	UpdatedAt time.Time `json:"updated_at"`
 }
 
+type OwnerEconomyProfile struct {
+	OwnerID        string     `json:"owner_id"`
+	GitHubUserID   string     `json:"github_user_id,omitempty"`
+	GitHubUsername string     `json:"github_username,omitempty"`
+	Activated      bool       `json:"activated"`
+	ActivatedAt    *time.Time `json:"activated_at,omitempty"`
+	CreatedAt      time.Time  `json:"created_at"`
+	UpdatedAt      time.Time  `json:"updated_at"`
+}
+
+type OwnerOnboardingGrant struct {
+	GrantKey        string    `json:"grant_key"`
+	OwnerID         string    `json:"owner_id"`
+	GrantType       string    `json:"grant_type"`
+	RecipientUserID string    `json:"recipient_user_id"`
+	Amount          int64     `json:"amount"`
+	DecisionKey     string    `json:"decision_key"`
+	GitHubUserID    string    `json:"github_user_id,omitempty"`
+	GitHubUsername  string    `json:"github_username,omitempty"`
+	CreatedAt       time.Time `json:"created_at"`
+}
+
+type EconomyCommQuotaWindow struct {
+	UserID          string    `json:"user_id"`
+	WindowStartTick int64     `json:"window_start_tick"`
+	UsedFreeTokens  int64     `json:"used_free_tokens"`
+	UpdatedAt       time.Time `json:"updated_at"`
+}
+
+type EconomyContributionEvent struct {
+	EventKey         string     `json:"event_key"`
+	Kind             string     `json:"kind"`
+	UserID           string     `json:"user_id"`
+	ResourceType     string     `json:"resource_type"`
+	ResourceID       string     `json:"resource_id"`
+	MetaJSON         string     `json:"meta_json,omitempty"`
+	CreatedAt        time.Time  `json:"created_at"`
+	ProcessedAt      *time.Time `json:"processed_at,omitempty"`
+	DecisionKeysJSON string     `json:"decision_keys_json,omitempty"`
+}
+
+type EconomyRewardDecision struct {
+	DecisionKey     string     `json:"decision_key"`
+	RuleKey         string     `json:"rule_key"`
+	ResourceType    string     `json:"resource_type"`
+	ResourceID      string     `json:"resource_id"`
+	RecipientUserID string     `json:"recipient_user_id"`
+	Amount          int64      `json:"amount"`
+	Priority        int        `json:"priority"`
+	Status          string     `json:"status"`
+	QueueReason     string     `json:"queue_reason,omitempty"`
+	LedgerID        int64      `json:"ledger_id,omitempty"`
+	BalanceAfter    int64      `json:"balance_after,omitempty"`
+	MetaJSON        string     `json:"meta_json,omitempty"`
+	CreatedAt       time.Time  `json:"created_at"`
+	UpdatedAt       time.Time  `json:"updated_at"`
+	AppliedAt       *time.Time `json:"applied_at,omitempty"`
+	EnqueuedAt      *time.Time `json:"enqueued_at,omitempty"`
+}
+
+type EconomyKnowledgeMeta struct {
+	ProposalID     int64     `json:"proposal_id,omitempty"`
+	EntryID        int64     `json:"entry_id,omitempty"`
+	Category       string    `json:"category"`
+	ReferencesJSON string    `json:"references_json,omitempty"`
+	AuthorUserID   string    `json:"author_user_id"`
+	ContentTokens  int64     `json:"content_tokens"`
+	UpdatedAt      time.Time `json:"updated_at"`
+}
+
+type EconomyToolMeta struct {
+	ToolID               string    `json:"tool_id"`
+	AuthorUserID         string    `json:"author_user_id"`
+	CategoryHint         string    `json:"category_hint,omitempty"`
+	FunctionalClusterKey string    `json:"functional_cluster_key,omitempty"`
+	PriceToken           int64     `json:"price_token,omitempty"`
+	UpdatedAt            time.Time `json:"updated_at"`
+}
+
 type WorldTickRecord struct {
 	ID             int64     `json:"id"`
 	TickID         int64     `json:"tick_id"`
@@ -447,6 +536,22 @@ type UserLifeStateAuditMeta struct {
 	ActorUserID  string
 }
 
+type EconomyRewardDecisionFilter struct {
+	Status          string
+	RecipientUserID string
+	RuleKey         string
+	Limit           int
+}
+
+type EconomyContributionEventFilter struct {
+	Kind         string
+	UserID       string
+	ResourceType string
+	ResourceID   string
+	Processed    string
+	Limit        int
+}
+
 type Store interface {
 	ListBots(ctx context.Context) ([]Bot, error)
 	GetBot(ctx context.Context, botID string) (Bot, error)
@@ -495,7 +600,8 @@ type Store interface {
 	AppendCostEvent(ctx context.Context, item CostEvent) (CostEvent, error)
 	ListCostEvents(ctx context.Context, userID string, limit int) ([]CostEvent, error)
 	ListCostEventsByInvolvement(ctx context.Context, userID string, limit int) ([]CostEvent, error)
-	SendMail(ctx context.Context, from string, to []string, subject, body string) (MailSendResult, error)
+	SendMail(ctx context.Context, input MailSendInput) (MailSendResult, error)
+	GetMailboxItem(ctx context.Context, mailboxID int64) (MailItem, error)
 	ListMailbox(ctx context.Context, ownerAddress, folder, scope, keyword string, fromTime, toTime *time.Time, limit int) ([]MailItem, error)
 	MarkMailboxRead(ctx context.Context, ownerAddress string, mailboxIDs []int64) error
 	UpsertMailContact(ctx context.Context, c MailContact) (MailContact, error)
@@ -550,5 +656,25 @@ type Store interface {
 	RateGanglion(ctx context.Context, item GanglionRating) (GanglionRating, Ganglion, error)
 	ListGanglionRatings(ctx context.Context, ganglionID int64, limit int) ([]GanglionRating, error)
 	UpdateGanglionLifeState(ctx context.Context, ganglionID int64, lifeState string) (Ganglion, error)
+	GetOwnerEconomyProfile(ctx context.Context, ownerID string) (OwnerEconomyProfile, error)
+	ListOwnerEconomyProfiles(ctx context.Context, limit int) ([]OwnerEconomyProfile, error)
+	UpsertOwnerEconomyProfile(ctx context.Context, item OwnerEconomyProfile) (OwnerEconomyProfile, error)
+	UpsertOwnerOnboardingGrant(ctx context.Context, item OwnerOnboardingGrant) (OwnerOnboardingGrant, bool, error)
+	ListOwnerOnboardingGrants(ctx context.Context, ownerID string) ([]OwnerOnboardingGrant, error)
+	GetEconomyCommQuotaWindow(ctx context.Context, userID string) (EconomyCommQuotaWindow, error)
+	UpsertEconomyCommQuotaWindow(ctx context.Context, item EconomyCommQuotaWindow) (EconomyCommQuotaWindow, error)
+	GetEconomyContributionEvent(ctx context.Context, eventKey string) (EconomyContributionEvent, error)
+	UpsertEconomyContributionEvent(ctx context.Context, item EconomyContributionEvent) (EconomyContributionEvent, error)
+	ListEconomyContributionEvents(ctx context.Context, filter EconomyContributionEventFilter) ([]EconomyContributionEvent, error)
+	GetEconomyRewardDecision(ctx context.Context, decisionKey string) (EconomyRewardDecision, error)
+	UpsertEconomyRewardDecision(ctx context.Context, item EconomyRewardDecision) (EconomyRewardDecision, error)
+	ListEconomyRewardDecisions(ctx context.Context, filter EconomyRewardDecisionFilter) ([]EconomyRewardDecision, error)
+	UpsertEconomyKnowledgeMeta(ctx context.Context, item EconomyKnowledgeMeta) (EconomyKnowledgeMeta, error)
+	GetEconomyKnowledgeMetaByProposal(ctx context.Context, proposalID int64) (EconomyKnowledgeMeta, error)
+	GetEconomyKnowledgeMetaByEntry(ctx context.Context, entryID int64) (EconomyKnowledgeMeta, error)
+	ListEconomyKnowledgeMeta(ctx context.Context, limit int) ([]EconomyKnowledgeMeta, error)
+	UpsertEconomyToolMeta(ctx context.Context, item EconomyToolMeta) (EconomyToolMeta, error)
+	GetEconomyToolMeta(ctx context.Context, toolID string) (EconomyToolMeta, error)
+	ListEconomyToolMeta(ctx context.Context, limit int) ([]EconomyToolMeta, error)
 	Close() error
 }

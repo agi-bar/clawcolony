@@ -16,6 +16,7 @@ import (
 )
 
 const (
+	storeMigrationStateKey      = "token_economy_v2_store_migration_complete"
 	ownerEconomyStateKey        = "token_economy_v2_owner_profiles"
 	commQuotaStateKey           = "token_economy_v2_comm_quota"
 	rewardDecisionStateKey      = "token_economy_v2_reward_decisions"
@@ -150,6 +151,11 @@ type economyDashboardSnapshot struct {
 	UpdatedAt          time.Time      `json:"updated_at"`
 }
 
+type tokenEconomyStoreMigrationState struct {
+	Completed bool      `json:"completed"`
+	UpdatedAt time.Time `json:"updated_at"`
+}
+
 var toolManifestPricePattern = regexp.MustCompile(`(?i)(?:price|token_price)\s*["':= ]+\s*([0-9]+)`)
 
 func (s *Server) tokenPolicy() economy.Policy {
@@ -164,7 +170,441 @@ func (s *Server) initTokenEconomyV2(ctx context.Context) error {
 	if !s.tokenEconomyV2Enabled() {
 		return nil
 	}
-	return s.backfillOwnerEconomyProfiles(ctx)
+	if err := s.migrateTokenEconomyV2State(ctx); err != nil {
+		return err
+	}
+	if err := s.backfillOwnerEconomyProfiles(ctx); err != nil {
+		return err
+	}
+	return s.backfillProposalKnowledgeMeta(ctx)
+}
+
+func isEconomyRecordMissing(err error) bool {
+	if err == nil {
+		return false
+	}
+	return strings.Contains(strings.ToLower(strings.TrimSpace(err.Error())), "not found")
+}
+
+func decodeMetaJSON(raw string) map[string]any {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return nil
+	}
+	var out map[string]any
+	if err := json.Unmarshal([]byte(raw), &out); err != nil {
+		return nil
+	}
+	return out
+}
+
+func encodeMetaJSON(meta map[string]any) string {
+	if len(meta) == 0 {
+		return ""
+	}
+	raw, err := json.Marshal(meta)
+	if err != nil {
+		return ""
+	}
+	return string(raw)
+}
+
+func decodeDecisionKeysJSON(raw string) []string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return nil
+	}
+	var out []string
+	if err := json.Unmarshal([]byte(raw), &out); err != nil {
+		return nil
+	}
+	return out
+}
+
+func encodeDecisionKeysJSON(keys []string) string {
+	if len(keys) == 0 {
+		return ""
+	}
+	raw, err := json.Marshal(keys)
+	if err != nil {
+		return ""
+	}
+	return string(raw)
+}
+
+func decodeCitationRefsJSON(raw string) []citationRef {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return nil
+	}
+	var out []citationRef
+	if err := json.Unmarshal([]byte(raw), &out); err != nil {
+		return nil
+	}
+	return out
+}
+
+func encodeCitationRefsJSON(refs []citationRef) string {
+	if len(refs) == 0 {
+		return ""
+	}
+	raw, err := json.Marshal(refs)
+	if err != nil {
+		return ""
+	}
+	return string(raw)
+}
+
+func toStoreOwnerEconomyProfile(item ownerEconomyProfile) store.OwnerEconomyProfile {
+	return store.OwnerEconomyProfile{
+		OwnerID:        strings.TrimSpace(item.OwnerID),
+		GitHubUserID:   strings.TrimSpace(item.GitHubUserID),
+		GitHubUsername: strings.TrimSpace(item.GitHubUsername),
+		Activated:      item.Activated,
+		ActivatedAt:    item.ActivatedAt,
+		CreatedAt:      item.CreatedAt,
+		UpdatedAt:      item.UpdatedAt,
+	}
+}
+
+func fromStoreOwnerEconomyProfile(item store.OwnerEconomyProfile) ownerEconomyProfile {
+	return ownerEconomyProfile{
+		OwnerID:        item.OwnerID,
+		GitHubUserID:   item.GitHubUserID,
+		GitHubUsername: item.GitHubUsername,
+		Activated:      item.Activated,
+		ActivatedAt:    item.ActivatedAt,
+		CreatedAt:      item.CreatedAt,
+		UpdatedAt:      item.UpdatedAt,
+	}
+}
+
+func toStoreRewardDecision(item economyRewardDecision) store.EconomyRewardDecision {
+	return store.EconomyRewardDecision{
+		DecisionKey:     strings.TrimSpace(item.DecisionKey),
+		RuleKey:         strings.TrimSpace(item.RuleKey),
+		ResourceType:    strings.TrimSpace(item.ResourceType),
+		ResourceID:      strings.TrimSpace(item.ResourceID),
+		RecipientUserID: strings.TrimSpace(item.RecipientUserID),
+		Amount:          item.Amount,
+		Priority:        item.Priority,
+		Status:          strings.TrimSpace(item.Status),
+		QueueReason:     strings.TrimSpace(item.QueueReason),
+		LedgerID:        item.LedgerID,
+		BalanceAfter:    item.BalanceAfter,
+		MetaJSON:        encodeMetaJSON(item.Meta),
+		CreatedAt:       item.CreatedAt,
+		UpdatedAt:       item.UpdatedAt,
+		AppliedAt:       item.AppliedAt,
+		EnqueuedAt:      item.EnqueuedAt,
+	}
+}
+
+func fromStoreRewardDecision(item store.EconomyRewardDecision) economyRewardDecision {
+	return economyRewardDecision{
+		DecisionKey:     item.DecisionKey,
+		RuleKey:         item.RuleKey,
+		ResourceType:    item.ResourceType,
+		ResourceID:      item.ResourceID,
+		RecipientUserID: item.RecipientUserID,
+		Amount:          item.Amount,
+		Priority:        item.Priority,
+		Status:          item.Status,
+		QueueReason:     item.QueueReason,
+		LedgerID:        item.LedgerID,
+		BalanceAfter:    item.BalanceAfter,
+		Meta:            decodeMetaJSON(item.MetaJSON),
+		CreatedAt:       item.CreatedAt,
+		UpdatedAt:       item.UpdatedAt,
+		AppliedAt:       item.AppliedAt,
+		EnqueuedAt:      item.EnqueuedAt,
+	}
+}
+
+func toStoreContributionEvent(item contributionEvent) store.EconomyContributionEvent {
+	return store.EconomyContributionEvent{
+		EventKey:         strings.TrimSpace(item.EventKey),
+		Kind:             strings.TrimSpace(item.Kind),
+		UserID:           strings.TrimSpace(item.UserID),
+		ResourceType:     strings.TrimSpace(item.ResourceType),
+		ResourceID:       strings.TrimSpace(item.ResourceID),
+		MetaJSON:         encodeMetaJSON(item.Meta),
+		CreatedAt:        item.CreatedAt,
+		ProcessedAt:      item.ProcessedAt,
+		DecisionKeysJSON: encodeDecisionKeysJSON(item.DecisionKeys),
+	}
+}
+
+func fromStoreContributionEvent(item store.EconomyContributionEvent) contributionEvent {
+	return contributionEvent{
+		EventKey:     item.EventKey,
+		Kind:         item.Kind,
+		UserID:       item.UserID,
+		ResourceType: item.ResourceType,
+		ResourceID:   item.ResourceID,
+		Meta:         decodeMetaJSON(item.MetaJSON),
+		CreatedAt:    item.CreatedAt,
+		ProcessedAt:  item.ProcessedAt,
+		DecisionKeys: decodeDecisionKeysJSON(item.DecisionKeysJSON),
+	}
+}
+
+func toStoreKnowledgeMeta(item knowledgeMeta) store.EconomyKnowledgeMeta {
+	return store.EconomyKnowledgeMeta{
+		ProposalID:     item.ProposalID,
+		EntryID:        item.EntryID,
+		Category:       strings.TrimSpace(strings.ToLower(item.Category)),
+		ReferencesJSON: encodeCitationRefsJSON(item.References),
+		AuthorUserID:   strings.TrimSpace(item.AuthorUserID),
+		ContentTokens:  item.ContentTokens,
+		UpdatedAt:      item.UpdatedAt,
+	}
+}
+
+func fromStoreKnowledgeMeta(item store.EconomyKnowledgeMeta) knowledgeMeta {
+	return knowledgeMeta{
+		ProposalID:    item.ProposalID,
+		EntryID:       item.EntryID,
+		Category:      item.Category,
+		References:    decodeCitationRefsJSON(item.ReferencesJSON),
+		AuthorUserID:  item.AuthorUserID,
+		ContentTokens: item.ContentTokens,
+		UpdatedAt:     item.UpdatedAt,
+	}
+}
+
+func toStoreToolEconomyMeta(item toolEconomyMeta) store.EconomyToolMeta {
+	return store.EconomyToolMeta{
+		ToolID:               strings.TrimSpace(strings.ToLower(item.ToolID)),
+		AuthorUserID:         strings.TrimSpace(item.AuthorUserID),
+		CategoryHint:         strings.TrimSpace(strings.ToLower(item.CategoryHint)),
+		FunctionalClusterKey: strings.TrimSpace(strings.ToLower(item.FunctionalClusterKey)),
+		PriceToken:           item.PriceToken,
+		UpdatedAt:            item.UpdatedAt,
+	}
+}
+
+func fromStoreToolEconomyMeta(item store.EconomyToolMeta) toolEconomyMeta {
+	return toolEconomyMeta{
+		ToolID:               item.ToolID,
+		AuthorUserID:         item.AuthorUserID,
+		CategoryHint:         item.CategoryHint,
+		FunctionalClusterKey: item.FunctionalClusterKey,
+		PriceToken:           item.PriceToken,
+		UpdatedAt:            item.UpdatedAt,
+	}
+}
+
+func normalizeCitationRefs(refs []citationRef) []citationRef {
+	if len(refs) == 0 {
+		return nil
+	}
+	out := make([]citationRef, 0, len(refs))
+	seen := map[string]struct{}{}
+	for _, ref := range refs {
+		ref.RefType = strings.TrimSpace(strings.ToLower(ref.RefType))
+		ref.RefID = strings.TrimSpace(ref.RefID)
+		if ref.RefType == "" || ref.RefID == "" {
+			continue
+		}
+		key := ref.RefType + ":" + ref.RefID
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		out = append(out, ref)
+	}
+	return out
+}
+
+func isGovernanceKBSection(section string) bool {
+	return strings.HasPrefix(strings.TrimSpace(strings.ToLower(section)), "governance")
+}
+
+func (s *Server) migrateTokenEconomyV2State(ctx context.Context) error {
+	migrationState := tokenEconomyStoreMigrationState{}
+	if found, _, err := s.getSettingJSON(ctx, storeMigrationStateKey, &migrationState); err != nil {
+		return err
+	} else if found && migrationState.Completed {
+		return nil
+	}
+	if err := s.migrateLegacyOwnerEconomyState(ctx); err != nil {
+		return err
+	}
+	if err := s.migrateLegacyCommQuotaState(ctx); err != nil {
+		return err
+	}
+	if err := s.migrateLegacyRewardDecisionState(ctx); err != nil {
+		return err
+	}
+	if err := s.migrateLegacyRewardQueueState(ctx); err != nil {
+		return err
+	}
+	if err := s.migrateLegacyContributionEventState(ctx); err != nil {
+		return err
+	}
+	if err := s.migrateLegacyKnowledgeMetaState(ctx); err != nil {
+		return err
+	}
+	if err := s.migrateLegacyToolEconomyState(ctx); err != nil {
+		return err
+	}
+	_, err := s.putSettingJSON(ctx, storeMigrationStateKey, tokenEconomyStoreMigrationState{
+		Completed: true,
+		UpdatedAt: time.Now().UTC(),
+	})
+	return err
+}
+
+func (s *Server) migrateLegacyOwnerEconomyState(ctx context.Context) error {
+	state := ownerEconomyState{Profiles: map[string]ownerEconomyProfile{}}
+	if _, _, err := s.getSettingJSON(ctx, ownerEconomyStateKey, &state); err != nil {
+		return err
+	}
+	for _, profile := range state.Profiles {
+		saved, err := s.store.UpsertOwnerEconomyProfile(ctx, toStoreOwnerEconomyProfile(profile))
+		if err != nil {
+			return err
+		}
+		if profile.GitHubBindGranted {
+			_, _, err = s.store.UpsertOwnerOnboardingGrant(ctx, store.OwnerOnboardingGrant{
+				GrantKey:        fmt.Sprintf("onboarding-grant:%s:bind", saved.OwnerID),
+				OwnerID:         saved.OwnerID,
+				GrantType:       "bind",
+				RecipientUserID: "",
+				Amount:          50000,
+				DecisionKey:     fmt.Sprintf("onboarding:github:bind:%s", saved.OwnerID),
+				GitHubUserID:    saved.GitHubUserID,
+				GitHubUsername:  saved.GitHubUsername,
+			})
+			if err != nil {
+				return err
+			}
+		}
+		if profile.GitHubStarGranted {
+			_, _, err = s.store.UpsertOwnerOnboardingGrant(ctx, store.OwnerOnboardingGrant{
+				GrantKey:        fmt.Sprintf("onboarding-grant:%s:star", saved.OwnerID),
+				OwnerID:         saved.OwnerID,
+				GrantType:       "star",
+				RecipientUserID: "",
+				Amount:          500000,
+				DecisionKey:     fmt.Sprintf("onboarding:github:star:%s", saved.OwnerID),
+				GitHubUserID:    saved.GitHubUserID,
+				GitHubUsername:  saved.GitHubUsername,
+			})
+			if err != nil {
+				return err
+			}
+		}
+		if profile.GitHubForkGranted {
+			_, _, err = s.store.UpsertOwnerOnboardingGrant(ctx, store.OwnerOnboardingGrant{
+				GrantKey:        fmt.Sprintf("onboarding-grant:%s:fork", saved.OwnerID),
+				OwnerID:         saved.OwnerID,
+				GrantType:       "fork",
+				RecipientUserID: "",
+				Amount:          200000,
+				DecisionKey:     fmt.Sprintf("onboarding:github:fork:%s", saved.OwnerID),
+				GitHubUserID:    saved.GitHubUserID,
+				GitHubUsername:  saved.GitHubUsername,
+			})
+			if err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+func (s *Server) migrateLegacyCommQuotaState(ctx context.Context) error {
+	state := commQuotaState{Users: map[string]commQuotaWindow{}}
+	if _, _, err := s.getSettingJSON(ctx, commQuotaStateKey, &state); err != nil {
+		return err
+	}
+	for _, item := range state.Users {
+		if _, err := s.store.UpsertEconomyCommQuotaWindow(ctx, store.EconomyCommQuotaWindow{
+			UserID:          strings.TrimSpace(item.UserID),
+			WindowStartTick: item.WindowStartTick,
+			UsedFreeTokens:  item.UsedFreeTokens,
+			UpdatedAt:       item.UpdatedAt,
+		}); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (s *Server) migrateLegacyRewardDecisionState(ctx context.Context) error {
+	state := rewardDecisionState{Items: map[string]economyRewardDecision{}}
+	if _, _, err := s.getSettingJSON(ctx, rewardDecisionStateKey, &state); err != nil {
+		return err
+	}
+	for _, item := range state.Items {
+		if _, err := s.store.UpsertEconomyRewardDecision(ctx, toStoreRewardDecision(item)); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (s *Server) migrateLegacyRewardQueueState(ctx context.Context) error {
+	state := rewardQueueState{Items: []economyRewardDecision{}}
+	if _, _, err := s.getSettingJSON(ctx, rewardQueueStateKey, &state); err != nil {
+		return err
+	}
+	for _, item := range state.Items {
+		item.Status = "queued"
+		if _, err := s.store.UpsertEconomyRewardDecision(ctx, toStoreRewardDecision(item)); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (s *Server) migrateLegacyContributionEventState(ctx context.Context) error {
+	state := contributionEventState{Items: map[string]contributionEvent{}}
+	if _, _, err := s.getSettingJSON(ctx, contributionEventStateKey, &state); err != nil {
+		return err
+	}
+	for _, item := range state.Items {
+		if _, err := s.store.UpsertEconomyContributionEvent(ctx, toStoreContributionEvent(item)); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (s *Server) migrateLegacyKnowledgeMetaState(ctx context.Context) error {
+	state := knowledgeMetaState{
+		ByProposal: map[string]knowledgeMeta{},
+		ByEntry:    map[string]knowledgeMeta{},
+	}
+	if _, _, err := s.getSettingJSON(ctx, knowledgeMetaStateKey, &state); err != nil {
+		return err
+	}
+	for _, item := range state.ByProposal {
+		if _, err := s.store.UpsertEconomyKnowledgeMeta(ctx, toStoreKnowledgeMeta(item)); err != nil {
+			return err
+		}
+	}
+	for _, item := range state.ByEntry {
+		if _, err := s.store.UpsertEconomyKnowledgeMeta(ctx, toStoreKnowledgeMeta(item)); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (s *Server) migrateLegacyToolEconomyState(ctx context.Context) error {
+	state := toolEconomyState{Items: map[string]toolEconomyMeta{}}
+	if _, _, err := s.getSettingJSON(ctx, toolEconomyStateKey, &state); err != nil {
+		return err
+	}
+	for _, item := range state.Items {
+		if _, err := s.store.UpsertEconomyToolMeta(ctx, toStoreToolEconomyMeta(item)); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (s *Server) getOwnerEconomyState(ctx context.Context) (ownerEconomyState, error) {
@@ -329,16 +769,11 @@ func (s *Server) backfillOwnerEconomyProfiles(ctx context.Context) error {
 	genesisStateMu.Lock()
 	defer genesisStateMu.Unlock()
 
-	state, err := s.getOwnerEconomyState(ctx)
-	if err != nil {
-		return err
-	}
 	bots, err := s.store.ListBots(ctx)
 	if err != nil {
 		return err
 	}
 	now := time.Now().UTC()
-	changed := false
 	for _, b := range bots {
 		userID := strings.TrimSpace(b.BotID)
 		if userID == "" || isExcludedTokenUserID(userID) {
@@ -352,15 +787,19 @@ func (s *Server) backfillOwnerEconomyProfiles(ctx context.Context) error {
 		if err != nil {
 			continue
 		}
-		profile := state.Profiles[owner.OwnerID]
-		if profile.OwnerID == "" {
-			profile.OwnerID = owner.OwnerID
-			profile.CreatedAt = now
+		profile, err := s.store.GetOwnerEconomyProfile(ctx, strings.TrimSpace(owner.OwnerID))
+		if err != nil && !isEconomyRecordMissing(err) {
+			return err
 		}
-		profile.GitHubUserID = strings.TrimSpace(owner.GitHubUserID)
-		profile.GitHubUsername = strings.TrimSpace(owner.GitHubUsername)
-		profile.UpdatedAt = now
-		if profile.GitHubUserID != "" && !profile.Activated {
+		item := fromStoreOwnerEconomyProfile(profile)
+		if item.OwnerID == "" {
+			item.OwnerID = owner.OwnerID
+			item.CreatedAt = now
+		}
+		item.GitHubUserID = strings.TrimSpace(owner.GitHubUserID)
+		item.GitHubUsername = strings.TrimSpace(owner.GitHubUsername)
+		item.UpdatedAt = now
+		if item.GitHubUserID != "" && !item.Activated {
 			if grants, gerr := s.store.ListSocialRewardGrants(ctx, userID); gerr == nil {
 				for _, grant := range grants {
 					if !strings.EqualFold(strings.TrimSpace(grant.Provider), "github") {
@@ -368,25 +807,23 @@ func (s *Server) backfillOwnerEconomyProfiles(ctx context.Context) error {
 					}
 					switch strings.ToLower(strings.TrimSpace(grant.RewardType)) {
 					case "auth_callback", "bind":
-						profile.GitHubBindGranted = true
+						item.GitHubBindGranted = true
 					case "star":
-						profile.GitHubStarGranted = true
-						profile.Activated = true
+						item.GitHubStarGranted = true
+						item.Activated = true
 						grantedAt := grant.GrantedAt
-						profile.ActivatedAt = &grantedAt
+						item.ActivatedAt = &grantedAt
 					case "fork":
-						profile.GitHubForkGranted = true
+						item.GitHubForkGranted = true
 					}
 				}
 			}
 		}
-		state.Profiles[profile.OwnerID] = profile
-		changed = true
+		if _, err := s.store.UpsertOwnerEconomyProfile(ctx, toStoreOwnerEconomyProfile(item)); err != nil {
+			return err
+		}
 	}
-	if !changed {
-		return nil
-	}
-	return s.saveOwnerEconomyState(ctx, state)
+	return nil
 }
 
 func (s *Server) ownerEconomyProfileForUser(ctx context.Context, userID string) (ownerEconomyProfile, bool, error) {
@@ -394,76 +831,63 @@ func (s *Server) ownerEconomyProfileForUser(ctx context.Context, userID string) 
 	if err != nil {
 		return ownerEconomyProfile{}, false, nil
 	}
-	genesisStateMu.Lock()
-	defer genesisStateMu.Unlock()
-	state, err := s.getOwnerEconomyState(ctx)
+	item, err := s.store.GetOwnerEconomyProfile(ctx, strings.TrimSpace(binding.OwnerID))
 	if err != nil {
+		if isEconomyRecordMissing(err) {
+			return ownerEconomyProfile{}, false, nil
+		}
 		return ownerEconomyProfile{}, false, err
 	}
-	profile, ok := state.Profiles[strings.TrimSpace(binding.OwnerID)]
-	return profile, ok, nil
+	return fromStoreOwnerEconomyProfile(item), true, nil
 }
 
 func (s *Server) syncOwnerEconomyProfile(ctx context.Context, owner store.HumanOwner) (ownerEconomyProfile, error) {
-	genesisStateMu.Lock()
-	defer genesisStateMu.Unlock()
-
-	state, err := s.getOwnerEconomyState(ctx)
+	now := time.Now().UTC()
+	item, err := s.store.GetOwnerEconomyProfile(ctx, strings.TrimSpace(owner.OwnerID))
+	if err != nil && !isEconomyRecordMissing(err) {
+		return ownerEconomyProfile{}, err
+	}
+	local := fromStoreOwnerEconomyProfile(item)
+	if local.OwnerID == "" {
+		local.OwnerID = strings.TrimSpace(owner.OwnerID)
+		local.CreatedAt = now
+	}
+	local.GitHubUserID = strings.TrimSpace(owner.GitHubUserID)
+	local.GitHubUsername = strings.TrimSpace(owner.GitHubUsername)
+	local.UpdatedAt = now
+	saved, err := s.store.UpsertOwnerEconomyProfile(ctx, toStoreOwnerEconomyProfile(local))
 	if err != nil {
 		return ownerEconomyProfile{}, err
 	}
-	now := time.Now().UTC()
-	item := state.Profiles[strings.TrimSpace(owner.OwnerID)]
-	if item.OwnerID == "" {
-		item.OwnerID = strings.TrimSpace(owner.OwnerID)
-		item.CreatedAt = now
-	}
-	item.GitHubUserID = strings.TrimSpace(owner.GitHubUserID)
-	item.GitHubUsername = strings.TrimSpace(owner.GitHubUsername)
-	item.UpdatedAt = now
-	state.Profiles[item.OwnerID] = item
-	if err := s.saveOwnerEconomyState(ctx, state); err != nil {
-		return ownerEconomyProfile{}, err
-	}
-	return item, nil
+	return fromStoreOwnerEconomyProfile(saved), nil
 }
 
 func (s *Server) markOwnerActivated(ctx context.Context, owner store.HumanOwner) (ownerEconomyProfile, error) {
-	genesisStateMu.Lock()
-	defer genesisStateMu.Unlock()
-
-	state, err := s.getOwnerEconomyState(ctx)
+	now := time.Now().UTC()
+	item, err := s.store.GetOwnerEconomyProfile(ctx, strings.TrimSpace(owner.OwnerID))
+	if err != nil && !isEconomyRecordMissing(err) {
+		return ownerEconomyProfile{}, err
+	}
+	local := fromStoreOwnerEconomyProfile(item)
+	if local.OwnerID == "" {
+		local.OwnerID = strings.TrimSpace(owner.OwnerID)
+		local.CreatedAt = now
+	}
+	local.GitHubUserID = strings.TrimSpace(owner.GitHubUserID)
+	local.GitHubUsername = strings.TrimSpace(owner.GitHubUsername)
+	local.UpdatedAt = now
+	if !local.Activated {
+		local.Activated = true
+		local.ActivatedAt = &now
+	}
+	saved, err := s.store.UpsertOwnerEconomyProfile(ctx, toStoreOwnerEconomyProfile(local))
 	if err != nil {
 		return ownerEconomyProfile{}, err
 	}
-	now := time.Now().UTC()
-	item := state.Profiles[strings.TrimSpace(owner.OwnerID)]
-	if item.OwnerID == "" {
-		item.OwnerID = strings.TrimSpace(owner.OwnerID)
-		item.CreatedAt = now
-	}
-	item.GitHubUserID = strings.TrimSpace(owner.GitHubUserID)
-	item.GitHubUsername = strings.TrimSpace(owner.GitHubUsername)
-	item.UpdatedAt = now
-	if !item.Activated {
-		item.Activated = true
-		item.ActivatedAt = &now
-	}
-	state.Profiles[item.OwnerID] = item
-	if err := s.saveOwnerEconomyState(ctx, state); err != nil {
-		return ownerEconomyProfile{}, err
-	}
-	return item, nil
+	return fromStoreOwnerEconomyProfile(saved), nil
 }
 
 func (s *Server) saveOwnerEconomyProfile(ctx context.Context, item ownerEconomyProfile) (ownerEconomyProfile, error) {
-	genesisStateMu.Lock()
-	defer genesisStateMu.Unlock()
-
-	state, err := s.getOwnerEconomyState(ctx)
-	if err != nil {
-		return ownerEconomyProfile{}, err
-	}
 	if item.OwnerID == "" {
 		return ownerEconomyProfile{}, fmt.Errorf("owner_id is required")
 	}
@@ -471,11 +895,11 @@ func (s *Server) saveOwnerEconomyProfile(ctx context.Context, item ownerEconomyP
 		item.CreatedAt = time.Now().UTC()
 	}
 	item.UpdatedAt = time.Now().UTC()
-	state.Profiles[item.OwnerID] = item
-	if err := s.saveOwnerEconomyState(ctx, state); err != nil {
+	saved, err := s.store.UpsertOwnerEconomyProfile(ctx, toStoreOwnerEconomyProfile(item))
+	if err != nil {
 		return ownerEconomyProfile{}, err
 	}
-	return item, nil
+	return fromStoreOwnerEconomyProfile(saved), nil
 }
 
 func (s *Server) isActivatedUser(ctx context.Context, userID string) bool {
@@ -582,15 +1006,12 @@ func (s *Server) previewCommunicationCharge(ctx context.Context, userID string, 
 	policy := s.tokenPolicy()
 	activated := s.isActivatedUser(ctx, userID)
 	currentTick := s.currentTickID()
-	genesisStateMu.Lock()
-	defer genesisStateMu.Unlock()
-	state, err := s.getCommQuotaState(ctx)
+	window, err := s.store.GetEconomyCommQuotaWindow(ctx, userID)
 	if err != nil {
-		return commChargePreview{}, err
-	}
-	window := state.Users[userID]
-	if window.UserID == "" {
-		window = commQuotaWindow{
+		if !isEconomyRecordMissing(err) {
+			return commChargePreview{}, err
+		}
+		window = store.EconomyCommQuotaWindow{
 			UserID:          userID,
 			WindowStartTick: currentTick,
 		}
@@ -634,16 +1055,13 @@ func (s *Server) commitCommunicationCharge(ctx context.Context, preview commChar
 	if strings.TrimSpace(preview.UserID) == "" || preview.Tokens <= 0 {
 		return nil
 	}
-	genesisStateMu.Lock()
-	defer genesisStateMu.Unlock()
-	state, err := s.getCommQuotaState(ctx)
-	if err != nil {
-		return err
-	}
 	policy := s.tokenPolicy()
-	window := state.Users[preview.UserID]
-	if window.UserID == "" {
-		window = commQuotaWindow{
+	window, err := s.store.GetEconomyCommQuotaWindow(ctx, preview.UserID)
+	if err != nil {
+		if !isEconomyRecordMissing(err) {
+			return err
+		}
+		window = store.EconomyCommQuotaWindow{
 			UserID:          preview.UserID,
 			WindowStartTick: preview.WindowStartTick,
 		}
@@ -658,8 +1076,7 @@ func (s *Server) commitCommunicationCharge(ctx context.Context, preview commChar
 		window.UsedFreeTokens = allowance
 	}
 	window.UpdatedAt = time.Now().UTC()
-	state.Users[preview.UserID] = window
-	if err := s.saveCommQuotaState(ctx, state); err != nil {
+	if _, err := s.store.UpsertEconomyCommQuotaWindow(ctx, window); err != nil {
 		return err
 	}
 	var ledger store.TokenLedger
@@ -690,20 +1107,6 @@ func (s *Server) commitCommunicationCharge(ctx context.Context, preview commChar
 		MetaJSON: string(metaRaw),
 	})
 	return err
-}
-
-func (s *Server) queueRewardDecision(ctx context.Context, item economyRewardDecision, reason string) error {
-	queue, err := s.getRewardQueueState(ctx)
-	if err != nil {
-		return err
-	}
-	item.Status = "queued"
-	item.QueueReason = strings.TrimSpace(reason)
-	now := time.Now().UTC()
-	item.UpdatedAt = now
-	item.EnqueuedAt = &now
-	queue.Items = append(queue.Items, item)
-	return s.saveRewardQueueState(ctx, queue)
 }
 
 func (s *Server) canPayoutReward(ctx context.Context, priority int, amount int64) (bool, string, error) {
@@ -761,14 +1164,12 @@ func (s *Server) applyRewardDecision(ctx context.Context, item economyRewardDeci
 	if item.DecisionKey == "" {
 		return economyRewardDecision{}, fmt.Errorf("decision_key is required")
 	}
-	genesisStateMu.Lock()
-	defer genesisStateMu.Unlock()
-	state, err := s.getRewardDecisionState(ctx)
-	if err != nil {
-		return economyRewardDecision{}, err
+	existing, err := s.store.GetEconomyRewardDecision(ctx, item.DecisionKey)
+	if err == nil {
+		return fromStoreRewardDecision(existing), nil
 	}
-	if existing, ok := state.Items[item.DecisionKey]; ok {
-		return existing, nil
+	if !isEconomyRecordMissing(err) {
+		return economyRewardDecision{}, err
 	}
 	now := time.Now().UTC()
 	item.CreatedAt = now
@@ -790,69 +1191,67 @@ func (s *Server) applyRewardDecision(ctx context.Context, item economyRewardDeci
 			item.LedgerID = credit.ID
 			item.BalanceAfter = credit.BalanceAfter
 			item.AppliedAt = &now
-			state.Items[item.DecisionKey] = item
-			if err := s.saveRewardDecisionState(ctx, state); err != nil {
+			saved, err := s.store.UpsertEconomyRewardDecision(ctx, toStoreRewardDecision(item))
+			if err != nil {
 				return economyRewardDecision{}, err
 			}
 			if reviveErr := s.maybeReviveUserAfterCredit(ctx, item.RecipientUserID, "reward_paid"); reviveErr != nil {
 				log.Printf("token_economy_v2 revive after reward failed user=%s err=%v", item.RecipientUserID, reviveErr)
 			}
-			return item, nil
+			return fromStoreRewardDecision(saved), nil
 		}
 	}
 	item.Status = "queued"
 	item.QueueReason = reason
 	enqueuedAt := now
 	item.EnqueuedAt = &enqueuedAt
-	state.Items[item.DecisionKey] = item
-	if err := s.saveRewardDecisionState(ctx, state); err != nil {
+	saved, err := s.store.UpsertEconomyRewardDecision(ctx, toStoreRewardDecision(item))
+	if err != nil {
 		return economyRewardDecision{}, err
 	}
-	if err := s.queueRewardDecision(ctx, item, reason); err != nil {
-		return economyRewardDecision{}, err
-	}
-	return item, nil
+	return fromStoreRewardDecision(saved), nil
 }
 
 func (s *Server) flushRewardQueue(ctx context.Context) (int, error) {
 	if !s.tokenEconomyV2Enabled() {
 		return 0, nil
 	}
-	genesisStateMu.Lock()
-	defer genesisStateMu.Unlock()
-	queue, err := s.getRewardQueueState(ctx)
+	queue, err := s.store.ListEconomyRewardDecisions(ctx, store.EconomyRewardDecisionFilter{
+		Status: "queued",
+		Limit:  10000,
+	})
 	if err != nil {
 		return 0, err
 	}
-	if len(queue.Items) == 0 {
+	if len(queue) == 0 {
 		return 0, nil
 	}
-	state, err := s.getRewardDecisionState(ctx)
-	if err != nil {
-		return 0, err
-	}
-	sort.SliceStable(queue.Items, func(i, j int) bool {
-		if queue.Items[i].Priority != queue.Items[j].Priority {
-			return queue.Items[i].Priority < queue.Items[j].Priority
+	sort.SliceStable(queue, func(i, j int) bool {
+		if queue[i].Priority != queue[j].Priority {
+			return queue[i].Priority < queue[j].Priority
 		}
-		return queue.Items[i].CreatedAt.Before(queue.Items[j].CreatedAt)
+		return queue[i].CreatedAt.Before(queue[j].CreatedAt)
 	})
 	applied := 0
-	remaining := make([]economyRewardDecision, 0, len(queue.Items))
-	for _, item := range queue.Items {
+	for _, raw := range queue {
+		item := fromStoreRewardDecision(raw)
 		canPay, reason, err := s.canPayoutReward(ctx, item.Priority, item.Amount)
 		if err != nil {
 			return applied, err
 		}
 		if !canPay {
 			item.QueueReason = reason
-			remaining = append(remaining, item)
+			if _, err := s.store.UpsertEconomyRewardDecision(ctx, toStoreRewardDecision(item)); err != nil {
+				return applied, err
+			}
 			continue
 		}
 		_, credit, err := s.transferFromTreasury(ctx, item.RecipientUserID, item.Amount)
 		if err != nil {
 			item.QueueReason = err.Error()
-			remaining = append(remaining, item)
+			if _, upsertErr := s.store.UpsertEconomyRewardDecision(ctx, toStoreRewardDecision(item)); upsertErr != nil {
+				return applied, upsertErr
+			}
 			continue
 		}
 		now := time.Now().UTC()
@@ -862,18 +1261,13 @@ func (s *Server) flushRewardQueue(ctx context.Context) (int, error) {
 		item.BalanceAfter = credit.BalanceAfter
 		item.AppliedAt = &now
 		item.UpdatedAt = now
-		state.Items[item.DecisionKey] = item
+		if _, err := s.store.UpsertEconomyRewardDecision(ctx, toStoreRewardDecision(item)); err != nil {
+			return applied, err
+		}
 		applied++
 		if reviveErr := s.maybeReviveUserAfterCredit(ctx, item.RecipientUserID, "reward_queue_paid"); reviveErr != nil {
 			log.Printf("token_economy_v2 revive after queued reward failed user=%s err=%v", item.RecipientUserID, reviveErr)
 		}
-	}
-	queue.Items = remaining
-	if err := s.saveRewardDecisionState(ctx, state); err != nil {
-		return applied, err
-	}
-	if err := s.saveRewardQueueState(ctx, queue); err != nil {
-		return applied, err
 	}
 	return applied, nil
 }
@@ -882,96 +1276,145 @@ func (s *Server) appendContributionEvent(ctx context.Context, item contributionE
 	if item.EventKey == "" {
 		return contributionEvent{}, false, fmt.Errorf("event_key is required")
 	}
-	genesisStateMu.Lock()
-	defer genesisStateMu.Unlock()
-	state, err := s.getContributionEventState(ctx)
+	existing, err := s.store.GetEconomyContributionEvent(ctx, item.EventKey)
+	if err == nil {
+		return fromStoreContributionEvent(existing), false, nil
+	}
+	if !isEconomyRecordMissing(err) {
+		return contributionEvent{}, false, err
+	}
+	item.CreatedAt = time.Now().UTC()
+	saved, err := s.store.UpsertEconomyContributionEvent(ctx, toStoreContributionEvent(item))
 	if err != nil {
 		return contributionEvent{}, false, err
 	}
-	if existing, ok := state.Items[item.EventKey]; ok {
-		return existing, false, nil
+	local := fromStoreContributionEvent(saved)
+	if evalErr := s.evaluateContributionEvent(ctx, local); evalErr != nil {
+		log.Printf("token_economy_v2 contribution evaluation failed event_key=%s kind=%s err=%v", local.EventKey, local.Kind, evalErr)
 	}
-	item.CreatedAt = time.Now().UTC()
-	state.Items[item.EventKey] = item
-	if err := s.saveContributionEventState(ctx, state); err != nil {
-		return contributionEvent{}, false, err
-	}
-	return item, true, nil
+	return local, true, nil
 }
 
 func (s *Server) markContributionEventProcessed(ctx context.Context, eventKey string, decisionKeys []string) error {
-	genesisStateMu.Lock()
-	defer genesisStateMu.Unlock()
-	state, err := s.getContributionEventState(ctx)
+	item, err := s.store.GetEconomyContributionEvent(ctx, strings.TrimSpace(eventKey))
 	if err != nil {
+		if isEconomyRecordMissing(err) {
+			return nil
+		}
 		return err
 	}
-	item, ok := state.Items[strings.TrimSpace(eventKey)]
-	if !ok {
+	local := fromStoreContributionEvent(item)
+	if local.EventKey == "" {
 		return nil
 	}
 	now := time.Now().UTC()
-	item.ProcessedAt = &now
-	item.DecisionKeys = append([]string(nil), decisionKeys...)
-	state.Items[item.EventKey] = item
-	return s.saveContributionEventState(ctx, state)
+	local.ProcessedAt = &now
+	local.DecisionKeys = append([]string(nil), decisionKeys...)
+	_, err = s.store.UpsertEconomyContributionEvent(ctx, toStoreContributionEvent(local))
+	return err
 }
 
 func (s *Server) upsertProposalKnowledgeMeta(ctx context.Context, proposalID int64, item knowledgeMeta) error {
-	genesisStateMu.Lock()
-	defer genesisStateMu.Unlock()
-	state, err := s.getKnowledgeMetaState(ctx)
-	if err != nil {
-		return err
-	}
 	item.ProposalID = proposalID
 	item.Category = strings.TrimSpace(strings.ToLower(item.Category))
 	item.UpdatedAt = time.Now().UTC()
-	state.ByProposal[strconv.FormatInt(proposalID, 10)] = item
-	return s.saveKnowledgeMetaState(ctx, state)
+	_, err := s.store.UpsertEconomyKnowledgeMeta(ctx, toStoreKnowledgeMeta(item))
+	return err
 }
 
-func (s *Server) moveProposalKnowledgeMetaToEntry(ctx context.Context, proposalID, entryID int64, authorUserID string) (knowledgeMeta, error) {
-	genesisStateMu.Lock()
-	defer genesisStateMu.Unlock()
-	state, err := s.getKnowledgeMetaState(ctx)
-	if err != nil {
+func deriveProposalKnowledgeMeta(proposal store.KBProposal, change store.KBProposalChange) knowledgeMeta {
+	category := strings.TrimSpace(strings.ToLower(change.Section))
+	if idx := strings.Index(category, "/"); idx >= 0 {
+		category = category[:idx]
+	}
+	if category == "" {
+		category = "knowledge"
+	}
+	return knowledgeMeta{
+		ProposalID:    proposal.ID,
+		Category:      category,
+		AuthorUserID:  strings.TrimSpace(proposal.ProposerUserID),
+		ContentTokens: economy.CalculateToken(change.NewContent),
+	}
+}
+
+func (s *Server) ensureProposalKnowledgeMeta(ctx context.Context, proposalID int64, proposal *store.KBProposal, change *store.KBProposalChange) (knowledgeMeta, error) {
+	item, err := s.store.GetEconomyKnowledgeMetaByProposal(ctx, proposalID)
+	if err == nil {
+		return fromStoreKnowledgeMeta(item), nil
+	}
+	if !isEconomyRecordMissing(err) {
 		return knowledgeMeta{}, err
 	}
-	key := strconv.FormatInt(proposalID, 10)
-	item := state.ByProposal[key]
-	item.ProposalID = proposalID
-	item.EntryID = entryID
-	if strings.TrimSpace(authorUserID) != "" {
-		item.AuthorUserID = strings.TrimSpace(authorUserID)
+	localProposal := store.KBProposal{}
+	if proposal != nil {
+		localProposal = *proposal
+	} else {
+		localProposal, err = s.store.GetKBProposal(ctx, proposalID)
+		if err != nil {
+			return knowledgeMeta{}, err
+		}
 	}
-	item.UpdatedAt = time.Now().UTC()
-	state.ByEntry[strconv.FormatInt(entryID, 10)] = item
-	state.ByProposal[key] = item
-	if err := s.saveKnowledgeMetaState(ctx, state); err != nil {
+	localChange := store.KBProposalChange{}
+	if change != nil {
+		localChange = *change
+	} else {
+		localChange, err = s.store.GetKBProposalChange(ctx, proposalID)
+		if err != nil {
+			return knowledgeMeta{}, err
+		}
+	}
+	derived := deriveProposalKnowledgeMeta(localProposal, localChange)
+	if err := s.upsertProposalKnowledgeMeta(ctx, proposalID, derived); err != nil {
 		return knowledgeMeta{}, err
 	}
-	return item, nil
+	return derived, nil
 }
 
-func (s *Server) knowledgeMetaForEntry(ctx context.Context, entryID int64) (knowledgeMeta, bool, error) {
-	genesisStateMu.Lock()
-	defer genesisStateMu.Unlock()
-	state, err := s.getKnowledgeMetaState(ctx)
-	if err != nil {
-		return knowledgeMeta{}, false, err
-	}
-	item, ok := state.ByEntry[strconv.FormatInt(entryID, 10)]
-	return item, ok, nil
-}
-
-func (s *Server) upsertToolEconomyMeta(ctx context.Context, item toolEconomyMeta) error {
-	genesisStateMu.Lock()
-	defer genesisStateMu.Unlock()
-	state, err := s.getToolEconomyState(ctx)
+func (s *Server) backfillProposalKnowledgeMeta(ctx context.Context) error {
+	proposals, err := s.store.ListKBProposals(ctx, "", 1000)
 	if err != nil {
 		return err
 	}
+	for _, proposal := range proposals {
+		if _, err := s.ensureProposalKnowledgeMeta(ctx, proposal.ID, &proposal, nil); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (s *Server) moveProposalKnowledgeMetaToEntry(ctx context.Context, proposalID, entryID int64, authorUserID string) (knowledgeMeta, error) {
+	item, err := s.store.GetEconomyKnowledgeMetaByProposal(ctx, proposalID)
+	if err != nil && !isEconomyRecordMissing(err) {
+		return knowledgeMeta{}, err
+	}
+	local := fromStoreKnowledgeMeta(item)
+	local.ProposalID = proposalID
+	local.EntryID = entryID
+	if strings.TrimSpace(authorUserID) != "" {
+		local.AuthorUserID = strings.TrimSpace(authorUserID)
+	}
+	local.UpdatedAt = time.Now().UTC()
+	saved, err := s.store.UpsertEconomyKnowledgeMeta(ctx, toStoreKnowledgeMeta(local))
+	if err != nil {
+		return knowledgeMeta{}, err
+	}
+	return fromStoreKnowledgeMeta(saved), nil
+}
+
+func (s *Server) knowledgeMetaForEntry(ctx context.Context, entryID int64) (knowledgeMeta, bool, error) {
+	item, err := s.store.GetEconomyKnowledgeMetaByEntry(ctx, entryID)
+	if err != nil {
+		if isEconomyRecordMissing(err) {
+			return knowledgeMeta{}, false, nil
+		}
+		return knowledgeMeta{}, false, err
+	}
+	return fromStoreKnowledgeMeta(item), true, nil
+}
+
+func (s *Server) upsertToolEconomyMeta(ctx context.Context, item toolEconomyMeta) error {
 	item.ToolID = strings.TrimSpace(strings.ToLower(item.ToolID))
 	if item.ToolID == "" {
 		return fmt.Errorf("tool_id is required")
@@ -980,19 +1423,19 @@ func (s *Server) upsertToolEconomyMeta(ctx context.Context, item toolEconomyMeta
 	item.FunctionalClusterKey = strings.TrimSpace(strings.ToLower(item.FunctionalClusterKey))
 	item.AuthorUserID = strings.TrimSpace(item.AuthorUserID)
 	item.UpdatedAt = time.Now().UTC()
-	state.Items[item.ToolID] = item
-	return s.saveToolEconomyState(ctx, state)
+	_, err := s.store.UpsertEconomyToolMeta(ctx, toStoreToolEconomyMeta(item))
+	return err
 }
 
 func (s *Server) toolEconomyMetaForID(ctx context.Context, toolID string) (toolEconomyMeta, bool, error) {
-	genesisStateMu.Lock()
-	defer genesisStateMu.Unlock()
-	state, err := s.getToolEconomyState(ctx)
+	item, err := s.store.GetEconomyToolMeta(ctx, strings.TrimSpace(strings.ToLower(toolID)))
 	if err != nil {
+		if isEconomyRecordMissing(err) {
+			return toolEconomyMeta{}, false, nil
+		}
 		return toolEconomyMeta{}, false, err
 	}
-	item, ok := state.Items[strings.TrimSpace(strings.ToLower(toolID))]
-	return item, ok, nil
+	return fromStoreToolEconomyMeta(item), true, nil
 }
 
 func parseToolManifestPrice(manifest string) int64 {
@@ -1052,7 +1495,10 @@ func (s *Server) constitutionPassed(ctx context.Context) bool {
 
 func (s *Server) refreshEconomyDashboardSnapshot(ctx context.Context) (economyDashboardSnapshot, error) {
 	policy := s.tokenPolicy()
-	queue, err := s.getRewardQueueState(ctx)
+	queue, err := s.store.ListEconomyRewardDecisions(ctx, store.EconomyRewardDecisionFilter{
+		Status: "queued",
+		Limit:  10000,
+	})
 	if err != nil {
 		return economyDashboardSnapshot{}, err
 	}
@@ -1073,17 +1519,483 @@ func (s *Server) refreshEconomyDashboardSnapshot(ctx context.Context) (economyDa
 		pop[normalizeLifeStateForServer(it.State)]++
 	}
 	queueAmounts := map[int]int64{}
-	for _, it := range queue.Items {
+	for _, it := range queue {
 		queueAmounts[it.Priority] += it.Amount
 	}
 	snapshot := economyDashboardSnapshot{
 		PoolBalance:        balance,
 		SafeBalance:        policy.SafeTreasuryBalance(),
-		RewardQueueDepth:   len(queue.Items),
+		RewardQueueDepth:   len(queue),
 		RewardQueueAmounts: queueAmounts,
 		PopulationByState:  pop,
 		UpdatedAt:          time.Now().UTC(),
 	}
 	_, err = s.putSettingJSON(ctx, dashboardEconomySnapshotKey, snapshot)
 	return snapshot, err
+}
+
+func sameUTCDay(a, b time.Time) bool {
+	au := a.UTC()
+	bu := b.UTC()
+	return au.Year() == bu.Year() && au.YearDay() == bu.YearDay()
+}
+
+func (s *Server) persistRewardDecisionStatus(ctx context.Context, item economyRewardDecision) (economyRewardDecision, error) {
+	if item.DecisionKey == "" {
+		return economyRewardDecision{}, fmt.Errorf("decision_key is required")
+	}
+	if item.CreatedAt.IsZero() {
+		item.CreatedAt = time.Now().UTC()
+	}
+	item.UpdatedAt = time.Now().UTC()
+	saved, err := s.store.UpsertEconomyRewardDecision(ctx, toStoreRewardDecision(item))
+	if err != nil {
+		return economyRewardDecision{}, err
+	}
+	return fromStoreRewardDecision(saved), nil
+}
+
+func (s *Server) runContributionEvaluationTick(ctx context.Context, tickID int64) error {
+	_ = tickID
+	if !s.tokenEconomyV2Enabled() {
+		return nil
+	}
+	items, err := s.store.ListEconomyContributionEvents(ctx, store.EconomyContributionEventFilter{
+		Processed: "pending",
+		Limit:     10000,
+	})
+	if err != nil {
+		return err
+	}
+	var firstErr error
+	for _, raw := range items {
+		if err := s.evaluateContributionEvent(ctx, fromStoreContributionEvent(raw)); err != nil && firstErr == nil {
+			firstErr = err
+		}
+	}
+	return firstErr
+}
+
+func (s *Server) evaluateContributionEvent(ctx context.Context, item contributionEvent) error {
+	if item.ProcessedAt != nil {
+		return nil
+	}
+	decisions, err := s.rewardDecisionsForContributionEvent(ctx, item)
+	if err != nil {
+		return err
+	}
+	decisionKeys := make([]string, 0, len(decisions))
+	for _, decision := range decisions {
+		var saved economyRewardDecision
+		switch strings.TrimSpace(strings.ToLower(decision.Status)) {
+		case "pending_review", "skipped":
+			saved, err = s.persistRewardDecisionStatus(ctx, decision)
+		default:
+			saved, err = s.applyRewardDecision(ctx, decision)
+		}
+		if err != nil {
+			return err
+		}
+		decisionKeys = append(decisionKeys, saved.DecisionKey)
+	}
+	return s.markContributionEventProcessed(ctx, item.EventKey, decisionKeys)
+}
+
+func (s *Server) rewardDecisionsForContributionEvent(ctx context.Context, item contributionEvent) ([]economyRewardDecision, error) {
+	switch item.Kind {
+	case "ganglion.forge":
+		decision, ok, err := s.ganglionForgeRewardDecision(ctx, item)
+		if err != nil || !ok {
+			return nil, err
+		}
+		return []economyRewardDecision{decision}, nil
+	case "ganglion.integrate.royalty":
+		decision, ok := s.ganglionIntegrateRoyaltyDecision(item)
+		if !ok {
+			return nil, nil
+		}
+		return []economyRewardDecision{decision}, nil
+	case "tool.approve":
+		decision, ok, err := s.toolApproveRewardDecision(ctx, item)
+		if err != nil || !ok {
+			return nil, err
+		}
+		return []economyRewardDecision{decision}, nil
+	case "knowledge.publish":
+		return s.knowledgePublishRewardDecisions(ctx, item)
+	case "governance.proposal.create", "governance.proposal.cosign", "governance.proposal.vote", "governance.proposal.entered_voting":
+		return s.governanceRewardDecisions(ctx, item), nil
+	case "community.help.reply":
+		decision, ok, err := s.communityDailyRewardDecision(ctx, item, "community.help.reply", s.tokenPolicy().RewardHelpReply, s.tokenPolicy().MaxDailyHelpRewards)
+		if err != nil || !ok {
+			return nil, err
+		}
+		return []economyRewardDecision{decision}, nil
+	case "community.rate.ganglion":
+		decision, ok, err := s.communityDailyRewardDecision(ctx, item, "community.rate.ganglion", s.tokenPolicy().RewardRateContent, s.tokenPolicy().MaxDailyRateRewards)
+		if err != nil || !ok {
+			return nil, err
+		}
+		return []economyRewardDecision{decision}, nil
+	case "community.review.tool":
+		decision, ok, err := s.communityDailyRewardDecision(ctx, item, "community.review.tool", s.tokenPolicy().RewardReviewTool, s.tokenPolicy().MaxDailyReviewRewards)
+		if err != nil || !ok {
+			return nil, err
+		}
+		return []economyRewardDecision{decision}, nil
+	default:
+		return nil, nil
+	}
+}
+
+func (s *Server) ganglionForgeRewardDecision(ctx context.Context, item contributionEvent) (economyRewardDecision, bool, error) {
+	ganglionID := parseInt64(item.ResourceID)
+	if ganglionID <= 0 {
+		return economyRewardDecision{}, false, nil
+	}
+	ganglion, err := s.store.GetGanglion(ctx, ganglionID)
+	if err != nil {
+		return economyRewardDecision{}, false, err
+	}
+	others, err := s.store.ListGanglia(ctx, ganglion.GanglionType, "", "", 10000)
+	if err != nil {
+		return economyRewardDecision{}, false, err
+	}
+	existingCount := 0
+	for _, other := range others {
+		if other.ID != ganglion.ID {
+			existingCount++
+		}
+	}
+	userEvents, err := s.store.ListEconomyContributionEvents(ctx, store.EconomyContributionEventFilter{
+		Kind:   "ganglion.forge",
+		UserID: item.UserID,
+		Limit:  10000,
+	})
+	if err != nil {
+		return economyRewardDecision{}, false, err
+	}
+	type rankedEvent struct {
+		CreatedAt time.Time
+		EventKey  string
+	}
+	ranked := make([]rankedEvent, 0, len(userEvents))
+	for _, raw := range userEvents {
+		event := fromStoreContributionEvent(raw)
+		if !sameUTCDay(event.CreatedAt, item.CreatedAt) {
+			continue
+		}
+		if strings.TrimSpace(fmt.Sprintf("%v", event.Meta["ganglion_type"])) != ganglion.GanglionType {
+			continue
+		}
+		ranked = append(ranked, rankedEvent{CreatedAt: event.CreatedAt, EventKey: event.EventKey})
+	}
+	sort.SliceStable(ranked, func(i, j int) bool {
+		if ranked[i].CreatedAt.Equal(ranked[j].CreatedAt) {
+			return ranked[i].EventKey < ranked[j].EventKey
+		}
+		return ranked[i].CreatedAt.Before(ranked[j].CreatedAt)
+	})
+	ordinal := 0
+	for idx, rankedEvent := range ranked {
+		if rankedEvent.EventKey == item.EventKey {
+			ordinal = idx + 1
+			break
+		}
+	}
+	if ordinal == 0 {
+		ordinal = len(ranked) + 1
+	}
+	dailyMilli := int64(0)
+	switch {
+	case ordinal <= 2:
+		dailyMilli = 1000
+	case ordinal <= 5:
+		dailyMilli = 500
+	default:
+		dailyMilli = 0
+	}
+	amount := (s.tokenPolicy().BaseGanglionReward * economy.ScarcityMultiplier(existingCount) * dailyMilli) / 1_000_000
+	decision := economyRewardDecision{
+		DecisionKey:     fmt.Sprintf("ganglion.forge:%d", ganglion.ID),
+		RuleKey:         "ganglion.forge",
+		ResourceType:    "ganglion",
+		ResourceID:      fmt.Sprintf("%d", ganglion.ID),
+		RecipientUserID: strings.TrimSpace(ganglion.AuthorUserID),
+		Amount:          amount,
+		Priority:        economy.RewardPriorityContribution,
+		Meta: map[string]any{
+			"ganglion_id":          ganglion.ID,
+			"ganglion_type":        ganglion.GanglionType,
+			"existing_same_type":   existingCount,
+			"daily_same_type_rank": ordinal,
+		},
+	}
+	if amount <= 0 {
+		decision.Status = "skipped"
+		decision.QueueReason = "daily_ganglion_cap_reached"
+	}
+	return decision, true, nil
+}
+
+func (s *Server) ganglionIntegrateRoyaltyDecision(item contributionEvent) (economyRewardDecision, bool) {
+	recipient := strings.TrimSpace(item.UserID)
+	integrationUserID := strings.TrimSpace(fmt.Sprintf("%v", item.Meta["integration_user_id"]))
+	if recipient == "" || isExcludedTokenUserID(recipient) || recipient == integrationUserID {
+		return economyRewardDecision{}, false
+	}
+	return economyRewardDecision{
+		DecisionKey:     item.EventKey,
+		RuleKey:         "ganglion.integrate.royalty",
+		ResourceType:    item.ResourceType,
+		ResourceID:      item.ResourceID,
+		RecipientUserID: recipient,
+		Amount:          s.tokenPolicy().GanglionIntegrationRoyalty,
+		Priority:        economy.RewardPriorityContribution,
+		Meta:            cloneMap(item.Meta),
+	}, true
+}
+
+func cloneMap(in map[string]any) map[string]any {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make(map[string]any, len(in))
+	for k, v := range in {
+		out[k] = v
+	}
+	return out
+}
+
+func (s *Server) toolApproveRewardDecision(ctx context.Context, item contributionEvent) (economyRewardDecision, bool, error) {
+	meta, ok, err := s.toolEconomyMetaForID(ctx, item.ResourceID)
+	if err != nil || !ok {
+		return economyRewardDecision{}, false, err
+	}
+	if strings.TrimSpace(meta.FunctionalClusterKey) == "" {
+		return economyRewardDecision{}, false, nil
+	}
+	genesisStateMu.Lock()
+	registry, regErr := s.getToolRegistryState(ctx)
+	genesisStateMu.Unlock()
+	if regErr != nil {
+		return economyRewardDecision{}, false, regErr
+	}
+	tier := "T0"
+	existingSameClass := 0
+	for _, tool := range registry.Items {
+		if tool.ToolID == strings.TrimSpace(strings.ToLower(item.ResourceID)) {
+			tier = tool.Tier
+			continue
+		}
+		if strings.TrimSpace(strings.ToLower(tool.Status)) != "active" {
+			continue
+		}
+		toolMeta, ok, metaErr := s.toolEconomyMetaForID(ctx, tool.ToolID)
+		if metaErr != nil || !ok {
+			continue
+		}
+		if toolMeta.FunctionalClusterKey == meta.FunctionalClusterKey {
+			existingSameClass++
+		}
+	}
+	amount := (s.tokenPolicy().BaseToolReward * economy.ToolTierMultiplierMilli(tier) * economy.ToolNoveltyMultiplierMilli(existingSameClass)) / 1_000_000
+	return economyRewardDecision{
+		DecisionKey:     fmt.Sprintf("tool.approve:%s", strings.TrimSpace(strings.ToLower(item.ResourceID))),
+		RuleKey:         "tool.approve",
+		ResourceType:    "tool",
+		ResourceID:      strings.TrimSpace(strings.ToLower(item.ResourceID)),
+		RecipientUserID: strings.TrimSpace(meta.AuthorUserID),
+		Amount:          amount,
+		Priority:        economy.RewardPriorityContribution,
+		Meta: map[string]any{
+			"tool_id":                item.ResourceID,
+			"tier":                   tier,
+			"functional_cluster_key": meta.FunctionalClusterKey,
+			"existing_same_cluster":  existingSameClass,
+		},
+	}, true, nil
+}
+
+func (s *Server) knowledgePublishRewardDecisions(ctx context.Context, item contributionEvent) ([]economyRewardDecision, error) {
+	entryID := parseInt64(item.ResourceID)
+	if entryID <= 0 {
+		return nil, nil
+	}
+	meta, ok, err := s.knowledgeMetaForEntry(ctx, entryID)
+	if err != nil || !ok {
+		return nil, err
+	}
+	allMeta, err := s.store.ListEconomyKnowledgeMeta(ctx, 10000)
+	if err != nil {
+		return nil, err
+	}
+	existingSameCategory := 0
+	for _, raw := range allMeta {
+		if raw.EntryID <= 0 || raw.EntryID == entryID {
+			continue
+		}
+		if strings.TrimSpace(strings.ToLower(raw.Category)) == strings.TrimSpace(strings.ToLower(meta.Category)) {
+			existingSameCategory++
+		}
+	}
+	lengthMilli := (meta.ContentTokens * 1000) / 2000
+	if lengthMilli > 3000 {
+		lengthMilli = 3000
+	}
+	mainDecision := economyRewardDecision{
+		DecisionKey:     fmt.Sprintf("knowledge.publish:%d", entryID),
+		RuleKey:         "knowledge.publish",
+		ResourceType:    "kb.entry",
+		ResourceID:      fmt.Sprintf("%d", entryID),
+		RecipientUserID: strings.TrimSpace(meta.AuthorUserID),
+		Amount:          (s.tokenPolicy().BaseKnowledgeReward * lengthMilli * economy.ScarcityMultiplier(existingSameCategory)) / 1_000_000,
+		Priority:        economy.RewardPriorityContribution,
+		Meta: map[string]any{
+			"entry_id":                 entryID,
+			"category":                 meta.Category,
+			"content_tokens":           meta.ContentTokens,
+			"existing_same_category":   existingSameCategory,
+			"knowledge_length_milli":   lengthMilli,
+			"knowledge_scarcity_milli": economy.ScarcityMultiplier(existingSameCategory),
+		},
+	}
+	if meta.ContentTokens < s.tokenPolicy().MinKnowledgeTokenLength {
+		mainDecision.Status = "skipped"
+		mainDecision.QueueReason = "knowledge_too_short"
+		mainDecision.Amount = 0
+	}
+	decisions := []economyRewardDecision{mainDecision}
+	for _, ref := range meta.References {
+		recipient := ""
+		switch strings.TrimSpace(strings.ToLower(ref.RefType)) {
+		case "entry", "kb_entry", "knowledge":
+			refEntryID := parseInt64(ref.RefID)
+			if refEntryID <= 0 {
+				continue
+			}
+			refMeta, ok, err := s.knowledgeMetaForEntry(ctx, refEntryID)
+			if err != nil || !ok {
+				continue
+			}
+			recipient = strings.TrimSpace(refMeta.AuthorUserID)
+		case "ganglion":
+			refGanglionID := parseInt64(ref.RefID)
+			if refGanglionID <= 0 {
+				continue
+			}
+			ganglion, err := s.store.GetGanglion(ctx, refGanglionID)
+			if err != nil {
+				continue
+			}
+			recipient = strings.TrimSpace(ganglion.AuthorUserID)
+		default:
+			continue
+		}
+		if recipient == "" || recipient == strings.TrimSpace(meta.AuthorUserID) || isExcludedTokenUserID(recipient) {
+			continue
+		}
+		decisions = append(decisions, economyRewardDecision{
+			DecisionKey:     fmt.Sprintf("knowledge.citation:%d:%s:%s", entryID, ref.RefType, ref.RefID),
+			RuleKey:         "knowledge.citation",
+			ResourceType:    "kb.entry",
+			ResourceID:      fmt.Sprintf("%d", entryID),
+			RecipientUserID: recipient,
+			Amount:          s.tokenPolicy().KnowledgeCitationReward,
+			Priority:        economy.RewardPriorityContribution,
+			Meta: map[string]any{
+				"entry_id":  entryID,
+				"ref_type":  ref.RefType,
+				"ref_id":    ref.RefID,
+				"author_id": meta.AuthorUserID,
+			},
+		})
+	}
+	return decisions, nil
+}
+
+func (s *Server) governanceRewardDecisions(ctx context.Context, item contributionEvent) []economyRewardDecision {
+	baseAmount := int64(0)
+	switch item.Kind {
+	case "governance.proposal.create", "governance.proposal.entered_voting":
+		baseAmount = s.tokenPolicy().RewardProposal
+	case "governance.proposal.cosign":
+		baseAmount = s.tokenPolicy().RewardCosign
+	case "governance.proposal.vote":
+		baseAmount = s.tokenPolicy().RewardVote
+	}
+	if baseAmount <= 0 || isExcludedTokenUserID(item.UserID) {
+		return nil
+	}
+	decisions := []economyRewardDecision{{
+		DecisionKey:     item.EventKey,
+		RuleKey:         item.Kind,
+		ResourceType:    item.ResourceType,
+		ResourceID:      item.ResourceID,
+		RecipientUserID: strings.TrimSpace(item.UserID),
+		Amount:          baseAmount,
+		Priority:        economy.RewardPriorityGovernance,
+		Meta:            cloneMap(item.Meta),
+	}}
+	if !s.constitutionPassed(ctx) {
+		decisions = append(decisions, economyRewardDecision{
+			DecisionKey:     item.EventKey + ":constitution-participation",
+			RuleKey:         "governance.constitution.participation",
+			ResourceType:    item.ResourceType,
+			ResourceID:      item.ResourceID,
+			RecipientUserID: strings.TrimSpace(item.UserID),
+			Amount:          s.tokenPolicy().RewardConstitutionParticipation,
+			Priority:        economy.RewardPriorityGovernance,
+			Meta:            cloneMap(item.Meta),
+		})
+	}
+	return decisions
+}
+
+func (s *Server) dailyRewardDecisionCount(ctx context.Context, userID, ruleKey string, anchor time.Time) (int, error) {
+	items, err := s.store.ListEconomyRewardDecisions(ctx, store.EconomyRewardDecisionFilter{
+		RecipientUserID: strings.TrimSpace(userID),
+		RuleKey:         strings.TrimSpace(ruleKey),
+		Limit:           10000,
+	})
+	if err != nil {
+		return 0, err
+	}
+	count := 0
+	for _, item := range items {
+		if item.Status == "skipped" {
+			continue
+		}
+		if sameUTCDay(item.CreatedAt, anchor) {
+			count++
+		}
+	}
+	return count, nil
+}
+
+func (s *Server) communityDailyRewardDecision(ctx context.Context, item contributionEvent, ruleKey string, amount int64, maxPerDay int) (economyRewardDecision, bool, error) {
+	recipient := strings.TrimSpace(item.UserID)
+	if recipient == "" || amount <= 0 || isExcludedTokenUserID(recipient) {
+		return economyRewardDecision{}, false, nil
+	}
+	count, err := s.dailyRewardDecisionCount(ctx, recipient, ruleKey, item.CreatedAt)
+	if err != nil {
+		return economyRewardDecision{}, false, err
+	}
+	decision := economyRewardDecision{
+		DecisionKey:     item.EventKey,
+		RuleKey:         ruleKey,
+		ResourceType:    item.ResourceType,
+		ResourceID:      item.ResourceID,
+		RecipientUserID: recipient,
+		Amount:          amount,
+		Priority:        economy.RewardPriorityContribution,
+		Meta:            cloneMap(item.Meta),
+	}
+	if maxPerDay > 0 && count >= maxPerDay {
+		decision.Status = "skipped"
+		decision.QueueReason = "daily_cap_reached"
+		decision.Amount = 0
+	}
+	return decision, true, nil
 }

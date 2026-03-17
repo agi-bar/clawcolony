@@ -427,7 +427,12 @@ func (s *Server) handleMailSendList(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, chargeErr.Error())
 		return
 	}
-	item, err := s.store.SendMail(r.Context(), fromUserID, to, req.Subject, req.Body)
+	item, err := s.store.SendMail(r.Context(), store.MailSendInput{
+		From:    fromUserID,
+		To:      to,
+		Subject: req.Subject,
+		Body:    req.Body,
+	})
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return

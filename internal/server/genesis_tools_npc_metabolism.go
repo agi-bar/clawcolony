@@ -26,9 +26,10 @@ type toolRegisterRequest struct {
 }
 
 type toolReviewRequest struct {
-	ToolID     string `json:"tool_id"`
-	Decision   string `json:"decision"` // approve|reject
-	ReviewNote string `json:"review_note"`
+	ToolID               string `json:"tool_id"`
+	Decision             string `json:"decision"` // approve|reject
+	ReviewNote           string `json:"review_note"`
+	FunctionalClusterKey string `json:"functional_cluster_key,omitempty"`
 }
 
 type toolInvokeRequest struct {
@@ -305,6 +306,7 @@ func (s *Server) handleToolReview(w http.ResponseWriter, r *http.Request) {
 	req.ToolID = strings.TrimSpace(strings.ToLower(req.ToolID))
 	req.Decision = strings.TrimSpace(strings.ToLower(req.Decision))
 	req.ReviewNote = strings.TrimSpace(req.ReviewNote)
+	req.FunctionalClusterKey = strings.TrimSpace(strings.ToLower(req.FunctionalClusterKey))
 	if req.ToolID == "" || (req.Decision != "approve" && req.Decision != "reject") {
 		writeError(w, http.StatusBadRequest, "tool_id and decision(approve/reject) are required")
 		return
@@ -334,6 +336,60 @@ func (s *Server) handleToolReview(w http.ResponseWriter, r *http.Request) {
 		if err := s.saveToolRegistryState(r.Context(), state); err != nil {
 			writeError(w, http.StatusInternalServerError, err.Error())
 			return
+		}
+		meta, _, _ := s.toolEconomyMetaForID(r.Context(), req.ToolID)
+		meta.ToolID = req.ToolID
+		if strings.TrimSpace(meta.AuthorUserID) == "" {
+			meta.AuthorUserID = strings.TrimSpace(state.Items[i].AuthorUserID)
+		}
+		if meta.PriceToken <= 0 {
+			meta.PriceToken = parseToolManifestPrice(state.Items[i].Manifest)
+		}
+		if req.FunctionalClusterKey != "" {
+			meta.FunctionalClusterKey = req.FunctionalClusterKey
+		}
+		_ = s.upsertToolEconomyMeta(r.Context(), meta)
+		if req.Decision == "approve" {
+			if req.FunctionalClusterKey == "" {
+				now := time.Now().UTC()
+				_, _ = s.store.UpsertEconomyRewardDecision(r.Context(), store.EconomyRewardDecision{
+					DecisionKey:     fmt.Sprintf("tool.approve.pending:%s", req.ToolID),
+					RuleKey:         "tool.approve",
+					ResourceType:    "tool",
+					ResourceID:      req.ToolID,
+					RecipientUserID: strings.TrimSpace(state.Items[i].AuthorUserID),
+					Status:          "pending_review",
+					QueueReason:     "functional_cluster_key_required",
+					CreatedAt:       now,
+					UpdatedAt:       now,
+					MetaJSON:        mustMarshalJSON(map[string]any{"tool_id": req.ToolID}),
+				})
+			} else {
+				_, _, _ = s.appendContributionEvent(r.Context(), contributionEvent{
+					EventKey:     fmt.Sprintf("tool.approve:%s", req.ToolID),
+					Kind:         "tool.approve",
+					UserID:       strings.TrimSpace(state.Items[i].AuthorUserID),
+					ResourceType: "tool",
+					ResourceID:   req.ToolID,
+					Meta: map[string]any{
+						"tool_id":                req.ToolID,
+						"tier":                   state.Items[i].Tier,
+						"reviewer_user_id":       reviewerUserID,
+						"functional_cluster_key": req.FunctionalClusterKey,
+					},
+				})
+				_, _, _ = s.appendContributionEvent(r.Context(), contributionEvent{
+					EventKey:     fmt.Sprintf("community.review.tool:%s:%s", req.ToolID, reviewerUserID),
+					Kind:         "community.review.tool",
+					UserID:       reviewerUserID,
+					ResourceType: "tool",
+					ResourceID:   req.ToolID,
+					Meta: map[string]any{
+						"tool_id":          req.ToolID,
+						"reviewer_user_id": reviewerUserID,
+					},
+				})
+			}
 		}
 		writeJSON(w, http.StatusAccepted, map[string]any{"item": state.Items[i]})
 		return

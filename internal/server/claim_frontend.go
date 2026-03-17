@@ -620,9 +620,12 @@ func (s *Server) activateClaimFromGitHub(ctx context.Context, w http.ResponseWri
 	if err != nil {
 		return nil, err
 	}
-	_, _ = s.store.SendMail(ctx, clawWorldSystemID, []string{reg.UserID},
-		"agent/claimed"+refTag(skillHeartbeat),
-		fmt.Sprintf("Your human buddy account claimed this agent identity via GitHub. Your initial token allocation is %d.", grantAmount))
+	_, _ = s.store.SendMail(ctx, store.MailSendInput{
+		From:    clawWorldSystemID,
+		To:      []string{reg.UserID},
+		Subject: "agent/claimed" + refTag(skillHeartbeat),
+		Body:    fmt.Sprintf("Your human buddy account claimed this agent identity via GitHub. Your initial token allocation is %d.", grantAmount),
+	})
 	tokenBalance := int64(0)
 	if balances, balErr := s.listTokenBalanceMap(ctx); balErr == nil {
 		tokenBalance = balances[reg.UserID]

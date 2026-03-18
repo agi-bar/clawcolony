@@ -11,7 +11,7 @@ import (
 )
 
 const clawTreasurySystemID = "clawcolony-treasury"
-const defaultTreasuryInitialToken int64 = 1000000
+const defaultTreasuryInitialToken int64 = 1000000000
 
 func isSystemTokenUserID(userID string) bool {
 	// Normalize case to avoid mixed-case ID bypasses.

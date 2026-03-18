@@ -63,7 +63,10 @@ func TestFromEnvDefaults(t *testing.T) {
 	if cfg.InitialToken != 100000 {
 		t.Fatalf("InitialToken default = %d, want 100000", cfg.InitialToken)
 	}
-	if cfg.DailyTaxUnactivated != 100000 || cfg.DailyTaxActivated != 50000 {
+	if cfg.TreasuryInitialToken != 1000000000 {
+		t.Fatalf("TreasuryInitialToken default = %d, want 1000000000", cfg.TreasuryInitialToken)
+	}
+	if cfg.DailyTaxUnactivated != 14400 || cfg.DailyTaxActivated != 7200 {
 		t.Fatalf("unexpected daily tax defaults: unactivated=%d activated=%d", cfg.DailyTaxUnactivated, cfg.DailyTaxActivated)
 	}
 	if cfg.DailyFreeCommUnactivated != 50000 || cfg.DailyFreeCommActivated != 200000 {

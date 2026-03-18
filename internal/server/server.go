@@ -127,12 +127,17 @@ type tianDaoManifest struct {
 	LawKey                string `json:"law_key"`
 	Version               int64  `json:"version"`
 	TokenEconomyVersion   string `json:"token_economy_version"`
+	OnboardingSettlement  string `json:"onboarding_settlement"`
 	LifeCostPerTick       int64  `json:"life_cost_per_tick"`
 	ThinkCostRateMilli    int64  `json:"think_cost_rate_milli"`
 	CommCostRateMilli     int64  `json:"comm_cost_rate_milli"`
 	ToolCostRateMilli     int64  `json:"tool_cost_rate_milli"`
 	DeathGraceTicks       int    `json:"death_grace_ticks"`
 	InitialToken          int64  `json:"initial_token"`
+	TreasuryInitialToken  int64  `json:"treasury_initial_token"`
+	GitHubBindReward      int64  `json:"github_bind_reward"`
+	GitHubStarReward      int64  `json:"github_star_reward"`
+	GitHubForkReward      int64  `json:"github_fork_reward"`
 	DailyTaxUnactivated   int64  `json:"daily_tax_unactivated"`
 	DailyTaxActivated     int64  `json:"daily_tax_activated"`
 	DailyFreeCommInactive int64  `json:"daily_free_comm_unactivated"`
@@ -731,11 +736,11 @@ func (s *Server) initTianDao(ctx context.Context) error {
 	policy := s.tokenPolicy()
 	lawKey := strings.TrimSpace(s.cfg.TianDaoLawKey)
 	if lawKey == "" {
-		lawKey = "genesis-v1"
+		lawKey = "genesis-v3"
 	}
 	version := s.cfg.TianDaoLawVersion
 	if version <= 0 {
-		version = 1
+		version = 3
 	}
 	lifeCost := s.cfg.LifeCostPerTick
 	if lifeCost <= 0 {
@@ -778,12 +783,17 @@ func (s *Server) initTianDao(ctx context.Context) error {
 		LawKey:                lawKey,
 		Version:               version,
 		TokenEconomyVersion:   s.cfg.TokenEconomyVersion,
+		OnboardingSettlement:  onboardingSettlementMint,
 		LifeCostPerTick:       lifeCost,
 		ThinkCostRateMilli:    thinkRate,
 		CommCostRateMilli:     commRate,
 		ToolCostRateMilli:     toolRate,
 		DeathGraceTicks:       deathGrace,
 		InitialToken:          initialToken,
+		TreasuryInitialToken:  s.effectiveTreasuryInitialToken(),
+		GitHubBindReward:      githubBindOnboardingReward,
+		GitHubStarReward:      githubStarOnboardingReward,
+		GitHubForkReward:      githubForkOnboardingReward,
 		DailyTaxUnactivated:   policy.DailyTaxUnactivated,
 		DailyTaxActivated:     policy.DailyTaxActivated,
 		DailyFreeCommInactive: policy.DailyFreeCommUnactivated,

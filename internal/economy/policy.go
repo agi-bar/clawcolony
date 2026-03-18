@@ -58,8 +58,8 @@ func PolicyFromConfig(cfg config.Config) Policy {
 	return Policy{
 		Version:                         normalizedVersion(cfg.TokenEconomyVersion),
 		InitialToken:                    positiveOr(cfg.InitialToken, 100000),
-		DailyTaxUnactivated:             positiveOr(cfg.DailyTaxUnactivated, 100000),
-		DailyTaxActivated:               positiveOr(cfg.DailyTaxActivated, 50000),
+		DailyTaxUnactivated:             positiveOr(cfg.DailyTaxUnactivated, 14400),
+		DailyTaxActivated:               positiveOr(cfg.DailyTaxActivated, 7200),
 		DailyFreeCommUnactivated:        positiveOr(cfg.DailyFreeCommUnactivated, 50000),
 		DailyFreeCommActivated:          positiveOr(cfg.DailyFreeCommActivated, 200000),
 		CommOverageRateMilli:            positiveOr(cfg.CommOverageRateMilli, 1000),

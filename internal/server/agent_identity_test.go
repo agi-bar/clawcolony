@@ -807,6 +807,66 @@ func TestTokenPricingIsSorted(t *testing.T) {
 	}
 }
 
+func TestTokenPricingV2IncludesOnboardingMintAndUpdatedLifeParameters(t *testing.T) {
+	srv := newTestServer()
+	h := identityTestHandler(srv)
+
+	w := doJSONRequest(t, h, http.MethodGet, "/api/v1/token/pricing", nil)
+	if w.Code != http.StatusOK {
+		t.Fatalf("token pricing status=%d body=%s", w.Code, w.Body.String())
+	}
+	body := parseJSONBody(t, w)
+	items, ok := body["items"].([]any)
+	if !ok {
+		t.Fatalf("expected pricing items, got body=%s", w.Body.String())
+	}
+	byPath := map[string]map[string]any{}
+	for _, raw := range items {
+		item, ok := raw.(map[string]any)
+		if !ok {
+			t.Fatalf("expected item object, got %#v", raw)
+		}
+		path, _ := item["path"].(string)
+		byPath[path] = item
+	}
+
+	register := byPath["/api/v1/users/register"]
+	if register["mode"] != "direct_mint" || register["settlement_source"] != onboardingSettlementMint {
+		t.Fatalf("unexpected register pricing item=%v", register)
+	}
+	if got := int64(register["initial_tokens"].(float64)); got != srv.tokenPolicy().InitialToken {
+		t.Fatalf("register initial_tokens=%d want %d", got, srv.tokenPolicy().InitialToken)
+	}
+
+	github := byPath["/api/v1/claims/github/complete"]
+	if github["mode"] != "owner_onboarding_direct_mint" || github["settlement_source"] != onboardingSettlementMint {
+		t.Fatalf("unexpected github onboarding pricing item=%v", github)
+	}
+	if got := int64(github["github_bind_tokens"].(float64)); got != githubBindOnboardingReward {
+		t.Fatalf("github bind reward=%d want %d", got, githubBindOnboardingReward)
+	}
+	if got := int64(github["github_star_tokens"].(float64)); got != githubStarOnboardingReward {
+		t.Fatalf("github star reward=%d want %d", got, githubStarOnboardingReward)
+	}
+	if got := int64(github["github_fork_tokens"].(float64)); got != githubForkOnboardingReward {
+		t.Fatalf("github fork reward=%d want %d", got, githubForkOnboardingReward)
+	}
+
+	life := byPath["/api/v1/life/tax"]
+	if got := int64(life["activated_tokens_per_tick"].(float64)); got != 5 {
+		t.Fatalf("activated tax per tick=%d want 5", got)
+	}
+	if got := int64(life["unactivated_tokens_per_tick"].(float64)); got != 10 {
+		t.Fatalf("unactivated tax per tick=%d want 10", got)
+	}
+	if got := int64(life["hibernation_period_ticks"].(float64)); got != 1440 {
+		t.Fatalf("hibernation ticks=%d want 1440", got)
+	}
+	if got := int64(life["min_revival_balance"].(float64)); got != 50000 {
+		t.Fatalf("min revival balance=%d want 50000", got)
+	}
+}
+
 func TestClaimAlreadyClaimedAgentConflicts(t *testing.T) {
 	srv := newTestServer()
 	h := identityTestHandler(srv)
@@ -1015,6 +1075,7 @@ func TestClaimGitHubFrontendFlowActivatesAgentAndSetsOwnerSession(t *testing.T) 
 	defer gh.Close()
 
 	srv := newTestServer()
+	srv.cfg.TreasuryInitialToken = 0
 	h := identityTestHandler(srv)
 
 	userID, apiKey, claimLink := registerAgentForTest(t, h, "github-claim-agent", "oss")
@@ -1136,6 +1197,30 @@ func TestClaimGitHubFrontendFlowActivatesAgentAndSetsOwnerSession(t *testing.T) 
 	expectedBalance := srv.tokenPolicy().InitialToken + 50000 + 500000 + 200000
 	if got := balanceFromResponse(t, balance); got != expectedBalance {
 		t.Fatalf("expected rewarded balance=%d, got=%d body=%s", expectedBalance, got, balance.Body.String())
+	}
+	ownerID, _ := owner["owner_id"].(string)
+	for _, decisionKey := range []string{
+		"onboarding:initial:" + userID,
+		"onboarding:github:bind:" + ownerID,
+		"onboarding:github:star:" + ownerID,
+		"onboarding:github:fork:" + ownerID,
+	} {
+		decision, err := srv.store.GetEconomyRewardDecision(t.Context(), decisionKey)
+		if err != nil {
+			t.Fatalf("get onboarding decision %s: %v", decisionKey, err)
+		}
+		if decision.Status != "applied" {
+			t.Fatalf("decision %s status=%s want applied", decisionKey, decision.Status)
+		}
+	}
+	accounts, err := srv.store.ListTokenAccounts(t.Context())
+	if err != nil {
+		t.Fatalf("list token accounts: %v", err)
+	}
+	for _, account := range accounts {
+		if account.BotID == clawTreasurySystemID && account.Balance != 0 {
+			t.Fatalf("expected treasury to stay untouched during onboarding mint, got=%d", account.Balance)
+		}
 	}
 
 	repeat := doJSONRequestWithHeaders(t, h, http.MethodPost, "/api/v1/claims/github/complete", map[string]any{
@@ -1274,10 +1359,8 @@ func TestClaimGitHubFrontendFlowUsesDynamicLocalGitHubMockIdentity(t *testing.T)
 	t.Setenv("CLAWCOLONY_GITHUB_OAUTH_AUTHORIZE_URL", "https://github.mock.test/login/oauth/authorize")
 
 	srv := newTestServer()
+	srv.cfg.TreasuryInitialToken = 0
 	h := identityTestHandler(srv)
-	if _, err := srv.store.Recharge(t.Context(), clawTreasurySystemID, 2_000_000); err != nil {
-		t.Fatalf("top up treasury for dynamic github mock test: %v", err)
-	}
 
 	claimWithCode := func(agentUsername, code, expectedLogin string) {
 		t.Helper()

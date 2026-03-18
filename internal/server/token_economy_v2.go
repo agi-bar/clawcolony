@@ -16,15 +16,22 @@ import (
 )
 
 const (
-	storeMigrationStateKey      = "token_economy_v2_store_migration_complete"
-	ownerEconomyStateKey        = "token_economy_v2_owner_profiles"
-	commQuotaStateKey           = "token_economy_v2_comm_quota"
-	rewardDecisionStateKey      = "token_economy_v2_reward_decisions"
-	rewardQueueStateKey         = "token_economy_v2_reward_queue"
-	contributionEventStateKey   = "token_economy_v2_contribution_events"
-	knowledgeMetaStateKey       = "token_economy_v2_knowledge_meta"
-	toolEconomyStateKey         = "token_economy_v2_tool_meta"
-	dashboardEconomySnapshotKey = "token_economy_v2_dashboard_snapshot"
+	storeMigrationStateKey        = "token_economy_v2_store_migration_complete"
+	initialTopupMigrationStateKey = "token_economy_v2_initial_token_topup_v2_complete"
+	ownerEconomyStateKey          = "token_economy_v2_owner_profiles"
+	commQuotaStateKey             = "token_economy_v2_comm_quota"
+	rewardDecisionStateKey        = "token_economy_v2_reward_decisions"
+	rewardQueueStateKey           = "token_economy_v2_reward_queue"
+	contributionEventStateKey     = "token_economy_v2_contribution_events"
+	knowledgeMetaStateKey         = "token_economy_v2_knowledge_meta"
+	toolEconomyStateKey           = "token_economy_v2_tool_meta"
+	dashboardEconomySnapshotKey   = "token_economy_v2_dashboard_snapshot"
+
+	onboardingSettlementMint         = "mint"
+	legacyInitialTokenGrant    int64 = 10000
+	githubBindOnboardingReward       = 50000
+	githubStarOnboardingReward       = 500000
+	githubForkOnboardingReward       = 200000
 )
 
 type ownerEconomyProfile struct {
@@ -174,6 +181,9 @@ func (s *Server) initTokenEconomyV2(ctx context.Context) error {
 		return err
 	}
 	if err := s.backfillOwnerEconomyProfiles(ctx); err != nil {
+		return err
+	}
+	if err := s.migrateHistoricalInitialTokenTopups(ctx); err != nil {
 		return err
 	}
 	return s.backfillProposalKnowledgeMeta(ctx)
@@ -456,6 +466,99 @@ func (s *Server) migrateTokenEconomyV2State(ctx context.Context) error {
 	return err
 }
 
+func (s *Server) migrateHistoricalInitialTokenTopups(ctx context.Context) error {
+	migrationState := tokenEconomyStoreMigrationState{}
+	if found, _, err := s.getSettingJSON(ctx, initialTopupMigrationStateKey, &migrationState); err != nil {
+		return err
+	} else if found && migrationState.Completed {
+		return nil
+	}
+
+	if err := s.mintQueuedOnboardingDecisions(ctx); err != nil {
+		return err
+	}
+
+	topupAmount := s.tokenPolicy().InitialToken - legacyInitialTokenGrant
+	if topupAmount > 0 {
+		registrations, err := s.store.ListAgentRegistrations(ctx)
+		if err != nil {
+			return err
+		}
+		for _, reg := range registrations {
+			userID := strings.TrimSpace(reg.UserID)
+			if isExcludedTokenUserID(userID) {
+				continue
+			}
+			if reg.ActivatedAt == nil && reg.ClaimedAt == nil && !strings.EqualFold(strings.TrimSpace(reg.Status), "active") {
+				continue
+			}
+			if current, err := s.store.GetEconomyRewardDecision(ctx, fmt.Sprintf("onboarding:initial:%s", userID)); err == nil {
+				if current.Status == "applied" {
+					continue
+				}
+				if _, err := s.applyMintRewardDecision(ctx, fromStoreRewardDecision(current), true); err != nil {
+					return err
+				}
+				continue
+			} else if !isEconomyRecordMissing(err) {
+				return err
+			}
+			if _, err := s.applyMintRewardDecision(ctx, economyRewardDecision{
+				DecisionKey:     fmt.Sprintf("migration:onboarding:initial-topup:%s", userID),
+				RuleKey:         "migration.onboarding.initial_topup",
+				ResourceType:    "user",
+				ResourceID:      userID,
+				RecipientUserID: userID,
+				Amount:          topupAmount,
+				Priority:        economy.RewardPriorityInitial,
+				Meta: map[string]any{
+					"user_id":              userID,
+					"legacy_initial_token": legacyInitialTokenGrant,
+					"target_initial_token": s.tokenPolicy().InitialToken,
+					"migration":            "historical_initial_topup",
+				},
+			}, false); err != nil {
+				return err
+			}
+		}
+	}
+
+	_, err := s.putSettingJSON(ctx, initialTopupMigrationStateKey, tokenEconomyStoreMigrationState{
+		Completed: true,
+		UpdatedAt: time.Now().UTC(),
+	})
+	return err
+}
+
+func (s *Server) mintQueuedOnboardingDecisions(ctx context.Context) error {
+	for {
+		items, err := s.store.ListEconomyRewardDecisions(ctx, store.EconomyRewardDecisionFilter{
+			Status: "queued",
+			Limit:  500,
+		})
+		if err != nil {
+			return err
+		}
+		if len(items) == 0 {
+			return nil
+		}
+		processed := 0
+		for _, raw := range items {
+			item := fromStoreRewardDecision(raw)
+			if !strings.HasPrefix(strings.TrimSpace(item.RuleKey), "onboarding.") {
+				continue
+			}
+			if _, err := s.applyMintRewardDecision(ctx, item, true); err != nil {
+				return err
+			}
+			processed++
+		}
+		if processed == 0 {
+			return nil
+		}
+	}
+}
+
 func (s *Server) migrateLegacyOwnerEconomyState(ctx context.Context) error {
 	state := ownerEconomyState{Profiles: map[string]ownerEconomyProfile{}}
 	if _, _, err := s.getSettingJSON(ctx, ownerEconomyStateKey, &state); err != nil {
@@ -472,7 +575,7 @@ func (s *Server) migrateLegacyOwnerEconomyState(ctx context.Context) error {
 				OwnerID:         saved.OwnerID,
 				GrantType:       "bind",
 				RecipientUserID: "",
-				Amount:          50000,
+				Amount:          githubBindOnboardingReward,
 				DecisionKey:     fmt.Sprintf("onboarding:github:bind:%s", saved.OwnerID),
 				GitHubUserID:    saved.GitHubUserID,
 				GitHubUsername:  saved.GitHubUsername,
@@ -487,7 +590,7 @@ func (s *Server) migrateLegacyOwnerEconomyState(ctx context.Context) error {
 				OwnerID:         saved.OwnerID,
 				GrantType:       "star",
 				RecipientUserID: "",
-				Amount:          500000,
+				Amount:          githubStarOnboardingReward,
 				DecisionKey:     fmt.Sprintf("onboarding:github:star:%s", saved.OwnerID),
 				GitHubUserID:    saved.GitHubUserID,
 				GitHubUsername:  saved.GitHubUsername,
@@ -502,7 +605,7 @@ func (s *Server) migrateLegacyOwnerEconomyState(ctx context.Context) error {
 				OwnerID:         saved.OwnerID,
 				GrantType:       "fork",
 				RecipientUserID: "",
-				Amount:          200000,
+				Amount:          githubForkOnboardingReward,
 				DecisionKey:     fmt.Sprintf("onboarding:github:fork:%s", saved.OwnerID),
 				GitHubUserID:    saved.GitHubUserID,
 				GitHubUsername:  saved.GitHubUsername,
@@ -909,7 +1012,7 @@ func (s *Server) isActivatedUser(ctx context.Context, userID string) bool {
 
 func (s *Server) grantInitialTokenDecision(ctx context.Context, userID string) (economyRewardDecision, error) {
 	policy := s.tokenPolicy()
-	return s.applyRewardDecision(ctx, economyRewardDecision{
+	return s.applyMintRewardDecision(ctx, economyRewardDecision{
 		DecisionKey:     fmt.Sprintf("onboarding:initial:%s", strings.TrimSpace(userID)),
 		RuleKey:         "onboarding.initial",
 		ResourceType:    "user",
@@ -920,7 +1023,7 @@ func (s *Server) grantInitialTokenDecision(ctx context.Context, userID string) (
 		Meta: map[string]any{
 			"user_id": strings.TrimSpace(userID),
 		},
-	})
+	}, true)
 }
 
 func (s *Server) grantGitHubOnboardingRewards(ctx context.Context, owner store.HumanOwner, userID string, starred, forked bool, source string) ([]map[string]any, ownerEconomyProfile, error) {
@@ -931,7 +1034,7 @@ func (s *Server) grantGitHubOnboardingRewards(ctx context.Context, owner store.H
 	events := make([]map[string]any, 0, 3)
 	policy := s.tokenPolicy()
 	record := func(rewardType string, amount int64, priority int) error {
-		decision, err := s.applyRewardDecision(ctx, economyRewardDecision{
+		decision, err := s.applyMintRewardDecision(ctx, economyRewardDecision{
 			DecisionKey:     fmt.Sprintf("onboarding:github:%s:%s", rewardType, strings.TrimSpace(owner.OwnerID)),
 			RuleKey:         fmt.Sprintf("onboarding.github.%s", rewardType),
 			ResourceType:    "owner",
@@ -946,8 +1049,20 @@ func (s *Server) grantGitHubOnboardingRewards(ctx context.Context, owner store.H
 				"github_username": strings.TrimSpace(owner.GitHubUsername),
 				"source":          strings.TrimSpace(source),
 			},
-		})
+		}, true)
 		if err != nil {
+			return err
+		}
+		if _, _, err := s.store.UpsertOwnerOnboardingGrant(ctx, store.OwnerOnboardingGrant{
+			GrantKey:        fmt.Sprintf("onboarding-grant:%s:%s", strings.TrimSpace(owner.OwnerID), rewardType),
+			OwnerID:         strings.TrimSpace(owner.OwnerID),
+			GrantType:       rewardType,
+			RecipientUserID: strings.TrimSpace(userID),
+			Amount:          amount,
+			DecisionKey:     decision.DecisionKey,
+			GitHubUserID:    strings.TrimSpace(owner.GitHubUserID),
+			GitHubUsername:  strings.TrimSpace(owner.GitHubUsername),
+		}); err != nil {
 			return err
 		}
 		events = append(events, map[string]any{
@@ -960,13 +1075,13 @@ func (s *Server) grantGitHubOnboardingRewards(ctx context.Context, owner store.H
 		return nil
 	}
 	if profile.GitHubUserID != "" && !profile.GitHubBindGranted {
-		if err := record("bind", 50000, economy.RewardPriorityOnboarding); err != nil {
+		if err := record("bind", githubBindOnboardingReward, economy.RewardPriorityOnboarding); err != nil {
 			return nil, ownerEconomyProfile{}, err
 		}
 		profile.GitHubBindGranted = true
 	}
 	if starred && !profile.GitHubStarGranted {
-		if err := record("star", 500000, economy.RewardPriorityOnboarding); err != nil {
+		if err := record("star", githubStarOnboardingReward, economy.RewardPriorityOnboarding); err != nil {
 			return nil, ownerEconomyProfile{}, err
 		}
 		profile.GitHubStarGranted = true
@@ -977,7 +1092,7 @@ func (s *Server) grantGitHubOnboardingRewards(ctx context.Context, owner store.H
 		}
 	}
 	if forked && !profile.GitHubForkGranted {
-		if err := record("fork", 200000, economy.RewardPriorityOnboarding); err != nil {
+		if err := record("fork", githubForkOnboardingReward, economy.RewardPriorityOnboarding); err != nil {
 			return nil, ownerEconomyProfile{}, err
 		}
 		profile.GitHubForkGranted = true
@@ -1159,6 +1274,27 @@ func (s *Server) maybeReviveUserAfterCredit(ctx context.Context, userID string, 
 		SourceModule: "token.economy.revival",
 	})
 	return err
+}
+
+func (s *Server) applyMintRewardDecision(ctx context.Context, item economyRewardDecision, revive bool) (economyRewardDecision, error) {
+	if item.DecisionKey == "" {
+		return economyRewardDecision{}, fmt.Errorf("decision_key is required")
+	}
+	if item.Meta == nil {
+		item.Meta = map[string]any{}
+	}
+	item.Meta["settlement_source"] = onboardingSettlementMint
+	saved, minted, err := s.store.ApplyMintRewardDecision(ctx, toStoreRewardDecision(item))
+	if err != nil {
+		return economyRewardDecision{}, err
+	}
+	local := fromStoreRewardDecision(saved)
+	if revive && minted {
+		if reviveErr := s.maybeReviveUserAfterCredit(ctx, local.RecipientUserID, "reward_minted"); reviveErr != nil {
+			log.Printf("token_economy_v2 revive after minted reward failed user=%s err=%v", local.RecipientUserID, reviveErr)
+		}
+	}
+	return local, nil
 }
 
 func (s *Server) applyRewardDecision(ctx context.Context, item economyRewardDecision) (economyRewardDecision, error) {

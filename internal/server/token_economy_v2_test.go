@@ -5,6 +5,7 @@ import (
 	"testing"
 	"time"
 
+	"clawcolony/internal/economy"
 	"clawcolony/internal/store"
 )
 
@@ -231,6 +232,166 @@ func TestTokenEconomyV2MigrationMovesLegacySettingsIntoStore(t *testing.T) {
 	}
 	if toolMeta.FunctionalClusterKey != "cluster.ops" || toolMeta.PriceToken != 42 {
 		t.Fatalf("unexpected tool meta: %+v", toolMeta)
+	}
+}
+
+func TestHistoricalInitialTokenTopupMigrationMintsLegacyUsersAndLeavesStateIntact(t *testing.T) {
+	srv := newTestServer()
+	srv.cfg.TreasuryInitialToken = 0
+	ctx := context.Background()
+
+	seedClaimedUser := func(userID string, balance int64) {
+		t.Helper()
+		if _, err := srv.store.UpsertBot(ctx, store.BotUpsertInput{
+			BotID:       userID,
+			Name:        userID,
+			Provider:    "runtime",
+			Status:      "running",
+			Initialized: true,
+		}); err != nil {
+			t.Fatalf("upsert bot %s: %v", userID, err)
+		}
+		if _, err := srv.store.CreateAgentRegistration(ctx, store.AgentRegistrationInput{
+			UserID:            userID,
+			RequestedUsername: userID,
+			GoodAt:            "migration",
+			Status:            "active",
+		}); err != nil {
+			t.Fatalf("create registration %s: %v", userID, err)
+		}
+		if _, err := srv.store.Recharge(ctx, userID, balance); err != nil {
+			t.Fatalf("seed balance %s: %v", userID, err)
+		}
+	}
+
+	legacyUser := "legacy-topup-user"
+	hibernatingUser := "legacy-hibernating-user"
+	queuedV2User := "queued-onboarding-user"
+	currentV2User := "current-v2-user"
+	registrationOnlyUser := "registration-only-user"
+
+	seedClaimedUser(legacyUser, legacyInitialTokenGrant)
+	seedClaimedUser(hibernatingUser, legacyInitialTokenGrant)
+	seedClaimedUser(queuedV2User, 0)
+	seedClaimedUser(currentV2User, srv.tokenPolicy().InitialToken)
+	if _, err := srv.store.CreateAgentRegistration(ctx, store.AgentRegistrationInput{
+		UserID:            registrationOnlyUser,
+		RequestedUsername: registrationOnlyUser,
+		GoodAt:            "migration",
+		Status:            "active",
+	}); err != nil {
+		t.Fatalf("create registration-only user: %v", err)
+	}
+
+	if _, err := srv.store.UpsertUserLifeState(ctx, store.UserLifeState{
+		UserID:         hibernatingUser,
+		State:          economy.LifeStateHibernating,
+		DyingSinceTick: 10,
+		DeadAtTick:     0,
+		Reason:         "migration-test",
+	}); err != nil {
+		t.Fatalf("seed hibernating life state: %v", err)
+	}
+	queuedNow := time.Now().UTC()
+	if _, err := srv.store.UpsertEconomyRewardDecision(ctx, store.EconomyRewardDecision{
+		DecisionKey:     "onboarding:initial:" + queuedV2User,
+		RuleKey:         "onboarding.initial",
+		ResourceType:    "user",
+		ResourceID:      queuedV2User,
+		RecipientUserID: queuedV2User,
+		Amount:          srv.tokenPolicy().InitialToken,
+		Priority:        economy.RewardPriorityInitial,
+		Status:          "queued",
+		QueueReason:     "treasury_insufficient",
+		CreatedAt:       queuedNow,
+		UpdatedAt:       queuedNow,
+		EnqueuedAt:      &queuedNow,
+	}); err != nil {
+		t.Fatalf("seed queued onboarding decision: %v", err)
+	}
+	currentNow := time.Now().UTC()
+	if _, err := srv.store.UpsertEconomyRewardDecision(ctx, store.EconomyRewardDecision{
+		DecisionKey:     "onboarding:initial:" + currentV2User,
+		RuleKey:         "onboarding.initial",
+		ResourceType:    "user",
+		ResourceID:      currentV2User,
+		RecipientUserID: currentV2User,
+		Amount:          srv.tokenPolicy().InitialToken,
+		Priority:        economy.RewardPriorityInitial,
+		Status:          "applied",
+		LedgerID:        77,
+		BalanceAfter:    srv.tokenPolicy().InitialToken,
+		CreatedAt:       currentNow,
+		UpdatedAt:       currentNow,
+		AppliedAt:       &currentNow,
+	}); err != nil {
+		t.Fatalf("seed current onboarding decision: %v", err)
+	}
+	if _, err := srv.putSettingJSON(ctx, initialTopupMigrationStateKey, tokenEconomyStoreMigrationState{}); err != nil {
+		t.Fatalf("reset initial topup migration marker: %v", err)
+	}
+
+	if err := srv.migrateHistoricalInitialTokenTopups(ctx); err != nil {
+		t.Fatalf("migrate historical initial topups: %v", err)
+	}
+	if err := srv.migrateHistoricalInitialTokenTopups(ctx); err != nil {
+		t.Fatalf("re-run historical initial topups idempotently: %v", err)
+	}
+
+	if got := tokenBalanceForUser(t, srv, legacyUser); got != srv.tokenPolicy().InitialToken {
+		t.Fatalf("legacy user balance=%d want %d", got, srv.tokenPolicy().InitialToken)
+	}
+	if got := tokenBalanceForUser(t, srv, hibernatingUser); got != srv.tokenPolicy().InitialToken {
+		t.Fatalf("hibernating user balance=%d want %d", got, srv.tokenPolicy().InitialToken)
+	}
+	if got := tokenBalanceForUser(t, srv, queuedV2User); got != srv.tokenPolicy().InitialToken {
+		t.Fatalf("queued onboarding user balance=%d want %d", got, srv.tokenPolicy().InitialToken)
+	}
+	if got := tokenBalanceForUser(t, srv, currentV2User); got != srv.tokenPolicy().InitialToken {
+		t.Fatalf("current v2 user balance=%d want %d", got, srv.tokenPolicy().InitialToken)
+	}
+	if got := tokenBalanceForUser(t, srv, registrationOnlyUser); got != srv.tokenPolicy().InitialToken-legacyInitialTokenGrant {
+		t.Fatalf("registration-only user balance=%d want %d", got, srv.tokenPolicy().InitialToken-legacyInitialTokenGrant)
+	}
+
+	hibernatingLife, err := srv.store.GetUserLifeState(ctx, hibernatingUser)
+	if err != nil {
+		t.Fatalf("get hibernating life state: %v", err)
+	}
+	if normalizeLifeStateForServer(hibernatingLife.State) != economy.LifeStateHibernating {
+		t.Fatalf("hibernating user state=%s want %s", hibernatingLife.State, economy.LifeStateHibernating)
+	}
+
+	topupDecision, err := srv.store.GetEconomyRewardDecision(ctx, "migration:onboarding:initial-topup:"+legacyUser)
+	if err != nil {
+		t.Fatalf("get legacy topup decision: %v", err)
+	}
+	if topupDecision.Status != "applied" || topupDecision.Amount != srv.tokenPolicy().InitialToken-legacyInitialTokenGrant {
+		t.Fatalf("unexpected legacy topup decision: %+v", topupDecision)
+	}
+	hibernatingDecision, err := srv.store.GetEconomyRewardDecision(ctx, "migration:onboarding:initial-topup:"+hibernatingUser)
+	if err != nil {
+		t.Fatalf("get hibernating topup decision: %v", err)
+	}
+	if hibernatingDecision.Status != "applied" {
+		t.Fatalf("unexpected hibernating topup decision: %+v", hibernatingDecision)
+	}
+	queuedDecision, err := srv.store.GetEconomyRewardDecision(ctx, "onboarding:initial:"+queuedV2User)
+	if err != nil {
+		t.Fatalf("get queued onboarding decision after migration: %v", err)
+	}
+	if queuedDecision.Status != "applied" || queuedDecision.QueueReason != "" {
+		t.Fatalf("queued onboarding decision should be minted and applied: %+v", queuedDecision)
+	}
+	regOnlyDecision, err := srv.store.GetEconomyRewardDecision(ctx, "migration:onboarding:initial-topup:"+registrationOnlyUser)
+	if err != nil {
+		t.Fatalf("get registration-only topup decision: %v", err)
+	}
+	if regOnlyDecision.Status != "applied" {
+		t.Fatalf("registration-only topup decision should be applied: %+v", regOnlyDecision)
+	}
+	if _, err := srv.store.GetEconomyRewardDecision(ctx, "migration:onboarding:initial-topup:"+currentV2User); err == nil {
+		t.Fatalf("current v2 user should not receive historical topup")
 	}
 }
 

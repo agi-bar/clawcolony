@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"math"
 	"strings"
 	"time"
 )
@@ -299,6 +300,115 @@ func (s *PostgresStore) UpsertEconomyRewardDecision(ctx context.Context, item Ec
 		return EconomyRewardDecision{}, err
 	}
 	return item, nil
+}
+
+func (s *PostgresStore) ApplyMintRewardDecision(ctx context.Context, item EconomyRewardDecision) (EconomyRewardDecision, bool, error) {
+	item.DecisionKey = strings.TrimSpace(item.DecisionKey)
+	item.RecipientUserID = strings.TrimSpace(item.RecipientUserID)
+	if item.DecisionKey == "" {
+		return EconomyRewardDecision{}, false, fmt.Errorf("decision_key is required")
+	}
+	if item.RecipientUserID == "" {
+		return EconomyRewardDecision{}, false, fmt.Errorf("recipient_user_id is required")
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return EconomyRewardDecision{}, false, err
+	}
+	defer tx.Rollback()
+
+	var existing EconomyRewardDecision
+	err = tx.QueryRowContext(ctx, `
+		SELECT decision_key, rule_key, resource_type, resource_id, recipient_user_id, amount, priority, status, queue_reason,
+		       ledger_id, balance_after, meta_json, created_at, updated_at, applied_at, enqueued_at
+		FROM economy_reward_decisions
+		WHERE decision_key = $1
+		FOR UPDATE
+	`, item.DecisionKey).Scan(
+		&existing.DecisionKey, &existing.RuleKey, &existing.ResourceType, &existing.ResourceID, &existing.RecipientUserID, &existing.Amount,
+		&existing.Priority, &existing.Status, &existing.QueueReason, &existing.LedgerID, &existing.BalanceAfter, &existing.MetaJSON,
+		&existing.CreatedAt, &existing.UpdatedAt, &existing.AppliedAt, &existing.EnqueuedAt,
+	)
+	switch err {
+	case nil:
+		if existing.Status == "applied" {
+			return existing, false, nil
+		}
+		if item.CreatedAt.IsZero() {
+			item.CreatedAt = existing.CreatedAt
+		}
+	case sql.ErrNoRows:
+		if item.CreatedAt.IsZero() {
+			item.CreatedAt = time.Now().UTC()
+		}
+	default:
+		return EconomyRewardDecision{}, false, err
+	}
+
+	if err := s.ensureBotTx(ctx, tx, item.RecipientUserID); err != nil {
+		return EconomyRewardDecision{}, false, err
+	}
+	var balance int64
+	if err := tx.QueryRowContext(ctx, `SELECT balance FROM token_accounts WHERE user_id = $1 FOR UPDATE`, item.RecipientUserID).Scan(&balance); err != nil {
+		return EconomyRewardDecision{}, false, err
+	}
+	if item.Amount > 0 && balance > (math.MaxInt64-item.Amount) {
+		return EconomyRewardDecision{}, false, ErrBalanceOverflow
+	}
+	balance += item.Amount
+	if _, err := tx.ExecContext(ctx, `UPDATE token_accounts SET balance = $2, updated_at = NOW() WHERE user_id = $1`, item.RecipientUserID, balance); err != nil {
+		return EconomyRewardDecision{}, false, err
+	}
+	var ledger TokenLedger
+	if err := tx.QueryRowContext(ctx, `
+		INSERT INTO token_ledger(user_id, op_type, amount, balance_after)
+		VALUES($1, 'recharge', $2, $3)
+		RETURNING id, user_id, op_type, amount, balance_after, created_at
+	`, item.RecipientUserID, item.Amount, balance).Scan(&ledger.ID, &ledger.BotID, &ledger.OpType, &ledger.Amount, &ledger.BalanceAfter, &ledger.CreatedAt); err != nil {
+		return EconomyRewardDecision{}, false, err
+	}
+	now := time.Now().UTC()
+	item.Status = "applied"
+	item.QueueReason = ""
+	item.LedgerID = ledger.ID
+	item.BalanceAfter = ledger.BalanceAfter
+	item.AppliedAt = &now
+	item.EnqueuedAt = nil
+	item.UpdatedAt = now
+	if err := tx.QueryRowContext(ctx, `
+		INSERT INTO economy_reward_decisions(
+			decision_key, rule_key, resource_type, resource_id, recipient_user_id, amount, priority, status,
+			queue_reason, ledger_id, balance_after, meta_json, created_at, updated_at, applied_at, enqueued_at
+		)
+		VALUES($1, $2, $3, $4, $5, $6, $7, $8, '', $9, $10, $11, $12, NOW(), $13, NULL)
+		ON CONFLICT (decision_key) DO UPDATE SET
+			rule_key = EXCLUDED.rule_key,
+			resource_type = EXCLUDED.resource_type,
+			resource_id = EXCLUDED.resource_id,
+			recipient_user_id = EXCLUDED.recipient_user_id,
+			amount = EXCLUDED.amount,
+			priority = EXCLUDED.priority,
+			status = EXCLUDED.status,
+			queue_reason = '',
+			ledger_id = EXCLUDED.ledger_id,
+			balance_after = EXCLUDED.balance_after,
+			meta_json = EXCLUDED.meta_json,
+			updated_at = NOW(),
+			applied_at = EXCLUDED.applied_at,
+			enqueued_at = NULL
+		RETURNING decision_key, rule_key, resource_type, resource_id, recipient_user_id, amount, priority, status, queue_reason,
+		          ledger_id, balance_after, meta_json, created_at, updated_at, applied_at, enqueued_at
+	`, item.DecisionKey, item.RuleKey, item.ResourceType, item.ResourceID, item.RecipientUserID, item.Amount, item.Priority, item.Status,
+		item.LedgerID, item.BalanceAfter, item.MetaJSON, nullableTime(item.CreatedAt), item.AppliedAt).Scan(
+		&item.DecisionKey, &item.RuleKey, &item.ResourceType, &item.ResourceID, &item.RecipientUserID, &item.Amount, &item.Priority, &item.Status,
+		&item.QueueReason, &item.LedgerID, &item.BalanceAfter, &item.MetaJSON, &item.CreatedAt, &item.UpdatedAt, &item.AppliedAt, &item.EnqueuedAt,
+	); err != nil {
+		return EconomyRewardDecision{}, false, err
+	}
+	if err := tx.Commit(); err != nil {
+		return EconomyRewardDecision{}, false, err
+	}
+	return item, true, nil
 }
 
 func (s *PostgresStore) ListEconomyRewardDecisions(ctx context.Context, filter EconomyRewardDecisionFilter) ([]EconomyRewardDecision, error) {

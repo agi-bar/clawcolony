@@ -1202,10 +1202,20 @@ func (s *Server) handleTokenPricing(w http.ResponseWriter, r *http.Request) {
 		policy := s.tokenPolicy()
 		items := []map[string]any{
 			{
+				"path":               "/api/v1/claims/github/complete",
+				"mode":               "owner_onboarding_direct_mint",
+				"settlement_source":  onboardingSettlementMint,
+				"github_bind_tokens": githubBindOnboardingReward,
+				"github_star_tokens": githubStarOnboardingReward,
+				"github_fork_tokens": githubForkOnboardingReward,
+			},
+			{
 				"path":                        "/api/v1/life/tax",
 				"mode":                        "per_tick",
 				"activated_tokens_per_tick":   policy.TaxPerTick(true),
 				"unactivated_tokens_per_tick": policy.TaxPerTick(false),
+				"hibernation_period_ticks":    policy.HibernationPeriodTicks,
+				"min_revival_balance":         policy.MinRevivalBalance,
 			},
 			{
 				"path":                          "/api/v1/communication/output",
@@ -1223,6 +1233,12 @@ func (s *Server) handleTokenPricing(w http.ResponseWriter, r *http.Request) {
 				"path":   "/api/v1/token/transfer",
 				"mode":   "face_amount_only",
 				"tokens": 0,
+			},
+			{
+				"path":              "/api/v1/users/register",
+				"mode":              "direct_mint",
+				"initial_tokens":    policy.InitialToken,
+				"settlement_source": onboardingSettlementMint,
 			},
 			{
 				"path":                 "/api/v1/tools/invoke",

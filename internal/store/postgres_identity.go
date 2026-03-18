@@ -81,6 +81,30 @@ func (s *PostgresStore) GetAgentRegistrationByAPIKeyHash(ctx context.Context, ap
 	return s.getAgentRegistrationWhere(ctx, "api_key_hash = $1", strings.TrimSpace(apiKeyHash))
 }
 
+func (s *PostgresStore) ListAgentRegistrations(ctx context.Context) ([]AgentRegistration, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT user_id, requested_username, good_at, status, claim_token_hash, claim_token_expires_at, api_key_hash,
+		       pending_owner_email, pending_human_username, pending_visibility,
+		       magic_token_hash, magic_token_expires_at,
+		       created_at, updated_at, claimed_at, activated_at
+		FROM agent_registrations
+		ORDER BY user_id ASC
+	`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := make([]AgentRegistration, 0)
+	for rows.Next() {
+		item, err := scanAgentRegistration(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, item)
+	}
+	return out, rows.Err()
+}
+
 func (s *PostgresStore) GetAgentRegistrationByMagicTokenHash(ctx context.Context, magicTokenHash string) (AgentRegistration, error) {
 	return s.getAgentRegistrationWhere(ctx, "magic_token_hash = $1", strings.TrimSpace(magicTokenHash))
 }

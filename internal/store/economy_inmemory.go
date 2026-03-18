@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"fmt"
+	"math"
 	"sort"
 	"strings"
 	"time"
@@ -208,6 +209,57 @@ func (s *InMemoryStore) UpsertEconomyRewardDecision(_ context.Context, item Econ
 	item.UpdatedAt = now
 	s.rewardDecisions[item.DecisionKey] = item
 	return item, nil
+}
+
+func (s *InMemoryStore) ApplyMintRewardDecision(_ context.Context, item EconomyRewardDecision) (EconomyRewardDecision, bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	item.DecisionKey = strings.TrimSpace(item.DecisionKey)
+	item.RecipientUserID = strings.TrimSpace(item.RecipientUserID)
+	if item.DecisionKey == "" {
+		return EconomyRewardDecision{}, false, fmt.Errorf("decision_key is required")
+	}
+	if item.RecipientUserID == "" {
+		return EconomyRewardDecision{}, false, fmt.Errorf("recipient_user_id is required")
+	}
+	if existing, ok := s.rewardDecisions[item.DecisionKey]; ok && existing.Status == "applied" {
+		return existing, false, nil
+	}
+	now := time.Now().UTC()
+	current := s.rewardDecisions[item.DecisionKey]
+	if current.DecisionKey != "" && item.CreatedAt.IsZero() {
+		item.CreatedAt = current.CreatedAt
+	}
+	if item.CreatedAt.IsZero() {
+		item.CreatedAt = now
+	}
+	s.ensureBot(item.RecipientUserID)
+	account := s.accounts[item.RecipientUserID]
+	if item.Amount > 0 && account.Balance > (math.MaxInt64-item.Amount) {
+		return EconomyRewardDecision{}, false, ErrBalanceOverflow
+	}
+	account.Balance += item.Amount
+	account.UpdatedAt = now
+	s.accounts[item.RecipientUserID] = account
+	s.nextLedgerID++
+	ledger := TokenLedger{
+		ID:           s.nextLedgerID,
+		BotID:        item.RecipientUserID,
+		OpType:       "recharge",
+		Amount:       item.Amount,
+		BalanceAfter: account.Balance,
+		CreatedAt:    now,
+	}
+	s.ledger = append(s.ledger, ledger)
+	item.Status = "applied"
+	item.QueueReason = ""
+	item.LedgerID = ledger.ID
+	item.BalanceAfter = ledger.BalanceAfter
+	item.AppliedAt = &now
+	item.EnqueuedAt = nil
+	item.UpdatedAt = now
+	s.rewardDecisions[item.DecisionKey] = item
+	return item, true, nil
 }
 
 func (s *InMemoryStore) ListEconomyRewardDecisions(_ context.Context, filter EconomyRewardDecisionFilter) ([]EconomyRewardDecision, error) {

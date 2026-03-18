@@ -354,8 +354,10 @@
       }
       function renderHistory(items){
         const node = document.getElementById("history");
-        if(!items.length){ node.innerHTML = `<div class="item"><div class="meta">暂无历史</div></div>`; return; }
-        node.innerHTML = items.map(it => `
+        // 限制只显示最近50条，避免过度渲染
+        const displayItems = items.slice(0, 50);
+        if(!displayItems.length){ node.innerHTML = `<div class="item"><div class="meta">暂无历史</div></div>`; return; }
+        node.innerHTML = displayItems.map(it => `
           <div class="item">
             <div class="meta">#${esc(it.id)} · tick=${esc(it.tick_id)} · ${esc(it.started_at)} · ${esc(it.duration_ms)}ms · status=${esc(it.status)} · trigger=${esc(it.trigger_type || "scheduled")} · replay_of=${esc(it.replay_of_tick_id || 0)}</div>
             <div class="meta" style="margin-top:6px;">prev=${esc((it.prev_hash||"").slice(0,16))} · hash=${esc((it.entry_hash||"").slice(0,16))}</div>

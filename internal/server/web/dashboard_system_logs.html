@@ -240,7 +240,7 @@
           document.getElementById("list").textContent = "读取失败: " + (e.message || e);
         }
       }
-      setInterval(refreshAll, 2000);
+      setInterval(refreshAll, 15000);
       document.getElementById("method").addEventListener("change", refreshAll);
       document.getElementById("user_id").addEventListener("change", refreshAll);
       loadUsers().then(refreshAll).catch(e => {

@@ -211,6 +211,41 @@ func TestMonitorMetaReportsRuntimeSources(t *testing.T) {
 	}
 }
 
+func TestTianDaoLawExposesUpdatedOnboardingAndTreasuryDefaults(t *testing.T) {
+	srv := newTestServer()
+
+	w := doJSONRequest(t, srv.mux, http.MethodGet, "/api/v1/tian-dao/law", nil)
+	if w.Code != http.StatusOK {
+		t.Fatalf("tian dao law status=%d body=%s", w.Code, w.Body.String())
+	}
+	body := parseJSONBody(t, w)
+	manifest, ok := body["manifest"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected manifest in law response: %s", w.Body.String())
+	}
+	if manifest["onboarding_settlement"] != onboardingSettlementMint {
+		t.Fatalf("unexpected onboarding settlement=%v", manifest["onboarding_settlement"])
+	}
+	if got := int64(manifest["treasury_initial_token"].(float64)); got != 1000000000 {
+		t.Fatalf("treasury_initial_token=%d want 1000000000", got)
+	}
+	if got := int64(manifest["daily_tax_activated"].(float64)); got != 7200 {
+		t.Fatalf("daily_tax_activated=%d want 7200", got)
+	}
+	if got := int64(manifest["daily_tax_unactivated"].(float64)); got != 14400 {
+		t.Fatalf("daily_tax_unactivated=%d want 14400", got)
+	}
+	if got := int64(manifest["github_bind_reward"].(float64)); got != githubBindOnboardingReward {
+		t.Fatalf("github_bind_reward=%d want %d", got, githubBindOnboardingReward)
+	}
+	if got := int64(manifest["github_star_reward"].(float64)); got != githubStarOnboardingReward {
+		t.Fatalf("github_star_reward=%d want %d", got, githubStarOnboardingReward)
+	}
+	if got := int64(manifest["github_fork_reward"].(float64)); got != githubForkOnboardingReward {
+		t.Fatalf("github_fork_reward=%d want %d", got, githubForkOnboardingReward)
+	}
+}
+
 func TestDashboardCoreRuntimePages(t *testing.T) {
 	srv := newTestServer()
 	cases := []struct {

@@ -20,7 +20,7 @@ type ganglionForgeRequest struct {
 }
 
 type ganglionIntegrateRequest struct {
-	GanglionID int64  `json:"ganglion_id"`
+	GanglionID int64 `json:"ganglion_id"`
 }
 
 type ganglionRateRequest struct {
@@ -116,6 +116,17 @@ func (s *Server) handleGangliaForge(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
+	_, _, _ = s.appendContributionEvent(r.Context(), contributionEvent{
+		EventKey:     fmt.Sprintf("ganglion.forge:%d", item.ID),
+		Kind:         "ganglion.forge",
+		UserID:       userID,
+		ResourceType: "ganglion",
+		ResourceID:   fmt.Sprintf("%d", item.ID),
+		Meta: map[string]any{
+			"ganglion_id":   item.ID,
+			"ganglion_type": item.GanglionType,
+		},
+	})
 	writeJSON(w, http.StatusAccepted, map[string]any{"item": item})
 }
 
@@ -193,6 +204,19 @@ func (s *Server) handleGangliaIntegrate(w http.ResponseWriter, r *http.Request) 
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
+	_, _, _ = s.appendContributionEvent(r.Context(), contributionEvent{
+		EventKey:     fmt.Sprintf("ganglion.integrate:%d:royalty", integration.ID),
+		Kind:         "ganglion.integrate.royalty",
+		UserID:       item.AuthorUserID,
+		ResourceType: "ganglia.integration",
+		ResourceID:   fmt.Sprintf("%d", integration.ID),
+		Meta: map[string]any{
+			"integration_id":      integration.ID,
+			"ganglion_id":         integration.GanglionID,
+			"ganglion_author_id":  item.AuthorUserID,
+			"integration_user_id": integration.UserID,
+		},
+	})
 	rewards, rewardErr := s.rewardGangliaIntegrated(r.Context(), integration, item)
 	resp := map[string]any{
 		"integration": integration,
@@ -230,6 +254,14 @@ func (s *Server) handleGangliaRate(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusConflict, err.Error())
 		return
 	}
+	priorRatings, _ := s.store.ListGanglionRatings(r.Context(), req.GanglionID, 200)
+	hadPriorRating := false
+	for _, existing := range priorRatings {
+		if strings.TrimSpace(existing.UserID) == userID {
+			hadPriorRating = true
+			break
+		}
+	}
 	rating, item, err := s.store.RateGanglion(r.Context(), store.GanglionRating{
 		GanglionID: req.GanglionID,
 		UserID:     userID,
@@ -244,6 +276,19 @@ func (s *Server) handleGangliaRate(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
+	}
+	if !hadPriorRating {
+		_, _, _ = s.appendContributionEvent(r.Context(), contributionEvent{
+			EventKey:     fmt.Sprintf("community.rate.ganglion:%d:%s", req.GanglionID, userID),
+			Kind:         "community.rate.ganglion",
+			UserID:       userID,
+			ResourceType: "ganglion",
+			ResourceID:   fmt.Sprintf("%d", req.GanglionID),
+			Meta: map[string]any{
+				"ganglion_id": req.GanglionID,
+				"rating_id":   rating.ID,
+			},
+		})
 	}
 	writeJSON(w, http.StatusAccepted, map[string]any{
 		"rating": rating,

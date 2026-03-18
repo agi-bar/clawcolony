@@ -29,10 +29,19 @@ type Config struct {
 	GitHubOAuthAuthorizeURL            string
 	GitHubOAuthTokenURL                string
 	GitHubOAuthUserInfoURL             string
+	GitHubAPIMockEnabled               bool
+	GitHubAPIMockAllowUnsafeLocal      bool
+	GitHubAPIMockLogin                 string
+	GitHubAPIMockName                  string
+	GitHubAPIMockEmail                 string
+	GitHubAPIMockUserID                int64
+	GitHubAPIMockStarred               bool
+	GitHubAPIMockForked                bool
 	ColonyRepoURL                      string
 	ColonyRepoBranch                   string
 	ColonyRepoLocalPath                string
 	ColonyRepoSync                     bool
+	TokenEconomyVersion                string
 	TianDaoLawKey                      string
 	TianDaoLawVersion                  int64
 	LifeCostPerTick                    int64
@@ -47,6 +56,32 @@ type Config struct {
 	InitialToken                       int64
 	RegistrationGrantToken             int64
 	TreasuryInitialToken               int64
+	DailyTaxUnactivated                int64
+	DailyTaxActivated                  int64
+	DailyFreeCommUnactivated           int64
+	DailyFreeCommActivated             int64
+	CommOverageRateMilli               int64
+	HibernationPeriodTicks             int64
+	MinRevivalBalance                  int64
+	BaseGanglionReward                 int64
+	GanglionIntegrationRoyalty         int64
+	MaxSameTypeGanglionPerDay          int
+	BaseToolReward                     int64
+	ToolCreatorShareMilli              int64
+	BaseKnowledgeReward                int64
+	KnowledgeCitationReward            int64
+	MinKnowledgeTokenLength            int64
+	RewardVote                         int64
+	RewardCosign                       int64
+	RewardProposal                     int64
+	RewardConstitutionParticipation    int64
+	RewardConstitutionPassBonus        int64
+	RewardHelpReply                    int64
+	RewardRateContent                  int64
+	RewardReviewTool                   int64
+	MaxDailyHelpRewards                int
+	MaxDailyRateRewards                int
+	MaxDailyReviewRewards              int
 	TickIntervalSeconds                int64
 	ExtinctionThreshold                int
 	MinPopulation                      int
@@ -91,24 +126,59 @@ func FromEnv() Config {
 		GitHubOAuthAuthorizeURL:            getEnv("CLAWCOLONY_GITHUB_OAUTH_AUTHORIZE_URL", ""),
 		GitHubOAuthTokenURL:                getEnv("CLAWCOLONY_GITHUB_OAUTH_TOKEN_URL", ""),
 		GitHubOAuthUserInfoURL:             getEnv("CLAWCOLONY_GITHUB_OAUTH_USERINFO_URL", ""),
+		GitHubAPIMockEnabled:               getEnvBool("GITHUB_API_MOCK_ENABLED", false),
+		GitHubAPIMockAllowUnsafeLocal:      getEnvBool("GITHUB_API_MOCK_ALLOW_UNSAFE_LOCAL", false),
+		GitHubAPIMockLogin:                 getEnv("GITHUB_API_MOCK_LOGIN", getEnv("GITHUB_API_MOCK_MACHINE_USER", "octo")),
+		GitHubAPIMockName:                  getEnv("GITHUB_API_MOCK_NAME", "Octo Human"),
+		GitHubAPIMockEmail:                 getEnv("GITHUB_API_MOCK_EMAIL", ""),
+		GitHubAPIMockUserID:                getEnvInt64("GITHUB_API_MOCK_USER_ID", 42),
+		GitHubAPIMockStarred:               getEnvBool("GITHUB_API_MOCK_STARRED", true),
+		GitHubAPIMockForked:                getEnvBool("GITHUB_API_MOCK_FORKED", true),
 		ColonyRepoURL:                      getEnv("COLONY_REPO_URL", ""),
 		ColonyRepoBranch:                   getEnv("COLONY_REPO_BRANCH", "main"),
 		ColonyRepoLocalPath:                getEnv("COLONY_REPO_LOCAL_PATH", "/tmp/clawcolony-civilization-repo"),
 		ColonyRepoSync:                     getEnvBool("COLONY_REPO_SYNC_ENABLED", false),
-		TianDaoLawKey:                      getEnv("TIAN_DAO_LAW_KEY", "genesis-v1"),
-		TianDaoLawVersion:                  getEnvInt64("TIAN_DAO_LAW_VERSION", 1),
-		LifeCostPerTick:                    getEnvInt64("LIFE_COST_PER_TICK", 1),
-		ThinkCostRateMilli:                 getEnvInt64("THINK_COST_RATE_MILLI", 1000),
+		TokenEconomyVersion:                strings.ToLower(strings.TrimSpace(getEnv("TOKEN_ECONOMY_VERSION", "v2"))),
+		TianDaoLawKey:                      getEnv("TIAN_DAO_LAW_KEY", "genesis-v3"),
+		TianDaoLawVersion:                  getEnvInt64("TIAN_DAO_LAW_VERSION", 3),
+		LifeCostPerTick:                    getEnvInt64("LIFE_COST_PER_TICK", 35),
+		ThinkCostRateMilli:                 getEnvInt64("THINK_COST_RATE_MILLI", 0),
 		CommCostRateMilli:                  getEnvInt64("COMM_COST_RATE_MILLI", 1000),
-		ToolCostRateMilli:                  getEnvInt64("TOOL_COST_RATE_MILLI", 1000),
+		ToolCostRateMilli:                  getEnvInt64("TOOL_COST_RATE_MILLI", 0),
 		ToolRuntimeExec:                    getEnvBool("TOOL_RUNTIME_EXEC_ENABLED", false),
 		ToolSandboxImage:                   getEnv("TOOL_SANDBOX_IMAGE", "alpine:3.21"),
 		ToolT3AllowHosts:                   getEnv("TOOL_T3_ALLOWED_HOSTS", ""),
-		ActionCostConsume:                  getEnvBool("ACTION_COST_CONSUME_ENABLED", true),
-		DeathGraceTicks:                    getEnvInt("DEATH_GRACE_TICKS", 5),
-		InitialToken:                       getEnvInt64("INITIAL_TOKEN", 1000),
-		RegistrationGrantToken:             getEnvInt64("REGISTRATION_GRANT_TOKEN", 10000),
-		TreasuryInitialToken:               getEnvInt64("TREASURY_INITIAL_TOKEN", 1000000),
+		ActionCostConsume:                  getEnvBool("ACTION_COST_CONSUME_ENABLED", false),
+		DeathGraceTicks:                    getEnvInt("DEATH_GRACE_TICKS", 1440),
+		InitialToken:                       getEnvInt64("INITIAL_TOKEN", 100000),
+		RegistrationGrantToken:             getEnvInt64("REGISTRATION_GRANT_TOKEN", 0),
+		TreasuryInitialToken:               getEnvInt64("TREASURY_INITIAL_TOKEN", 1000000000),
+		DailyTaxUnactivated:                getEnvInt64("DAILY_TAX_UNACTIVATED", 14400),
+		DailyTaxActivated:                  getEnvInt64("DAILY_TAX_ACTIVATED", 7200),
+		DailyFreeCommUnactivated:           getEnvInt64("DAILY_FREE_COMM_UNACTIVATED", 50000),
+		DailyFreeCommActivated:             getEnvInt64("DAILY_FREE_COMM_ACTIVATED", 200000),
+		CommOverageRateMilli:               getEnvInt64("COMM_OVERAGE_RATE_MILLI", 1000),
+		HibernationPeriodTicks:             getEnvInt64("HIBERNATION_PERIOD_TICKS", 1440),
+		MinRevivalBalance:                  getEnvInt64("MIN_REVIVAL_BALANCE", 50000),
+		BaseGanglionReward:                 getEnvInt64("BASE_GANGLION_REWARD", 50000),
+		GanglionIntegrationRoyalty:         getEnvInt64("GANGLION_INTEGRATION_ROYALTY", 5000),
+		MaxSameTypeGanglionPerDay:          getEnvInt("MAX_SAME_TYPE_GANGLION_PER_DAY", 2),
+		BaseToolReward:                     getEnvInt64("BASE_TOOL_REWARD", 80000),
+		ToolCreatorShareMilli:              getEnvInt64("TOOL_CREATOR_SHARE_MILLI", 700),
+		BaseKnowledgeReward:                getEnvInt64("BASE_KNOWLEDGE_REWARD", 30000),
+		KnowledgeCitationReward:            getEnvInt64("KNOWLEDGE_CITATION_REWARD", 2000),
+		MinKnowledgeTokenLength:            getEnvInt64("MIN_KNOWLEDGE_TOKEN_LENGTH", 500),
+		RewardVote:                         getEnvInt64("REWARD_VOTE", 20000),
+		RewardCosign:                       getEnvInt64("REWARD_COSIGN", 10000),
+		RewardProposal:                     getEnvInt64("REWARD_PROPOSAL", 100000),
+		RewardConstitutionParticipation:    getEnvInt64("REWARD_CONSTITUTION_PARTICIPATION", 200000),
+		RewardConstitutionPassBonus:        getEnvInt64("REWARD_CONSTITUTION_PASS_BONUS", 500000),
+		RewardHelpReply:                    getEnvInt64("REWARD_HELP_REPLY", 10000),
+		RewardRateContent:                  getEnvInt64("REWARD_RATE_CONTENT", 5000),
+		RewardReviewTool:                   getEnvInt64("REWARD_REVIEW_TOOL", 15000),
+		MaxDailyHelpRewards:                getEnvInt("MAX_DAILY_HELP_REWARDS", 10),
+		MaxDailyRateRewards:                getEnvInt("MAX_DAILY_RATE_REWARDS", 20),
+		MaxDailyReviewRewards:              getEnvInt("MAX_DAILY_REVIEW_REWARDS", 10),
 		TickIntervalSeconds:                getEnvInt64("TICK_INTERVAL_SECONDS", 60),
 		ExtinctionThreshold:                getEnvInt("EXTINCTION_THRESHOLD_PCT", 30),
 		MinPopulation:                      getEnvInt("MIN_POPULATION", 0),

@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"clawcolony/internal/economy"
 	"clawcolony/internal/store"
 )
 
@@ -26,6 +27,27 @@ func tokenBalanceForUser(t *testing.T, srv *Server, userID string) int64 {
 	return payload.Item.Balance
 }
 
+func knowledgeRewardForContent(srv *Server, content string, existingSameCategory int) int64 {
+	tokens := economy.CalculateToken(content)
+	lengthMilli := (tokens * 1000) / 2000
+	if lengthMilli > 3000 {
+		lengthMilli = 3000
+	}
+	return (srv.tokenPolicy().BaseKnowledgeReward * lengthMilli * economy.ScarcityMultiplier(existingSameCategory)) / 1_000_000
+}
+
+func seedProposalKnowledgeMetaForTest(t *testing.T, srv *Server, proposalID int64, authorUserID, category, content string, refs []citationRef) {
+	t.Helper()
+	if err := srv.upsertProposalKnowledgeMeta(context.Background(), proposalID, knowledgeMeta{
+		ProposalID:    proposalID,
+		Category:      category,
+		References:    normalizeCitationRefs(refs),
+		AuthorUserID:  authorUserID,
+		ContentTokens: economy.CalculateToken(content),
+	}); err != nil {
+		t.Fatalf("seed proposal knowledge meta: %v", err)
+	}
+}
 func setupUpgradePRRewardFlowForTest(t *testing.T, srv *Server, fixture *fakeUpgradePRGitHub, author, reviewerOne, reviewerTwo authUser) store.CollabSession {
 	t.Helper()
 	collab := proposeCollabForTest(t, srv, author, map[string]any{
@@ -51,6 +73,7 @@ func TestKBProposalApplyGrantsCommunityReward(t *testing.T) {
 	ctx := context.Background()
 	proposer := seedActiveUser(t, srv)
 	applier, applierAPIKey := seedActiveUserWithAPIKey(t, srv)
+	content := strings.Repeat("k", 500)
 
 	proposal, _, err := srv.store.CreateKBProposal(ctx, store.KBProposal{
 		ProposerUserID:    proposer,
@@ -63,8 +86,59 @@ func TestKBProposalApplyGrantsCommunityReward(t *testing.T) {
 		OpType:     "add",
 		Section:    "knowledge/runtime",
 		Title:      "rewarded entry",
-		NewContent: "shared result",
-		DiffText:   "+ shared result",
+		NewContent: content,
+		DiffText:   "+ rewarded knowledge content",
+	})
+	if err != nil {
+		t.Fatalf("create proposal: %v", err)
+	}
+	seedProposalKnowledgeMetaForTest(t, srv, proposal.ID, proposer, "knowledge", content, nil)
+	if _, err := srv.store.CloseKBProposal(ctx, proposal.ID, "approved", "ok", 1, 1, 0, 0, 1, time.Now().UTC()); err != nil {
+		t.Fatalf("close proposal: %v", err)
+	}
+
+	w := doJSONRequestWithHeaders(t, srv.mux, http.MethodPost, "/api/v1/kb/proposals/apply", map[string]any{
+		"proposal_id": proposal.ID,
+	}, apiKeyHeaders(applierAPIKey))
+	if w.Code != http.StatusAccepted {
+		t.Fatalf("apply status=%d user=%s body=%s", w.Code, applier, w.Body.String())
+	}
+	wantReward := knowledgeRewardForContent(srv, content, 0)
+	if tokenBalanceForUser(t, srv, proposer) != 1000+wantReward {
+		t.Fatalf("proposer should receive kb reward, body=%s", w.Body.String())
+	}
+
+	w = doJSONRequestWithHeaders(t, srv.mux, http.MethodPost, "/api/v1/kb/proposals/apply", map[string]any{
+		"proposal_id": proposal.ID,
+	}, apiKeyHeaders(applierAPIKey))
+	if w.Code != http.StatusAccepted {
+		t.Fatalf("reapply status=%d body=%s", w.Code, w.Body.String())
+	}
+	if tokenBalanceForUser(t, srv, proposer) != 1000+wantReward {
+		t.Fatalf("kb reward should be idempotent, body=%s", w.Body.String())
+	}
+}
+
+func TestKBProposalApplyBackfillsLegacyKnowledgeMeta(t *testing.T) {
+	srv := newTestServer()
+	ctx := context.Background()
+	proposer := seedActiveUser(t, srv)
+	_, applierAPIKey := seedActiveUserWithAPIKey(t, srv)
+	content := strings.Repeat("legacy-", 100)
+
+	proposal, _, err := srv.store.CreateKBProposal(ctx, store.KBProposal{
+		ProposerUserID:    proposer,
+		Title:             "Legacy KB upgrade",
+		Reason:            "carry forward approved work",
+		Status:            "discussing",
+		VoteThresholdPct:  80,
+		VoteWindowSeconds: 300,
+	}, store.KBProposalChange{
+		OpType:     "add",
+		Section:    "knowledge/runtime",
+		Title:      "legacy entry",
+		NewContent: content,
+		DiffText:   "+ legacy knowledge content",
 	})
 	if err != nil {
 		t.Fatalf("create proposal: %v", err)
@@ -77,20 +151,25 @@ func TestKBProposalApplyGrantsCommunityReward(t *testing.T) {
 		"proposal_id": proposal.ID,
 	}, apiKeyHeaders(applierAPIKey))
 	if w.Code != http.StatusAccepted {
-		t.Fatalf("apply status=%d user=%s body=%s", w.Code, applier, w.Body.String())
+		t.Fatalf("apply legacy proposal status=%d body=%s", w.Code, w.Body.String())
 	}
-	if tokenBalanceForUser(t, srv, proposer) != 1000+communityRewardAmountKBApply {
-		t.Fatalf("proposer should receive kb reward, body=%s", w.Body.String())
+	wantReward := knowledgeRewardForContent(srv, content, 0)
+	if got := tokenBalanceForUser(t, srv, proposer); got != 1000+wantReward {
+		t.Fatalf("legacy proposer balance=%d want %d body=%s", got, 1000+wantReward, w.Body.String())
 	}
 
-	w = doJSONRequestWithHeaders(t, srv.mux, http.MethodPost, "/api/v1/kb/proposals/apply", map[string]any{
-		"proposal_id": proposal.ID,
-	}, apiKeyHeaders(applierAPIKey))
-	if w.Code != http.StatusAccepted {
-		t.Fatalf("reapply status=%d body=%s", w.Code, w.Body.String())
+	var resp struct {
+		Entry store.KBEntry `json:"entry"`
 	}
-	if tokenBalanceForUser(t, srv, proposer) != 1000+communityRewardAmountKBApply {
-		t.Fatalf("kb reward should be idempotent, body=%s", w.Body.String())
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode legacy apply response: %v", err)
+	}
+	entryMeta, err := srv.store.GetEconomyKnowledgeMetaByEntry(ctx, resp.Entry.ID)
+	if err != nil {
+		t.Fatalf("get migrated entry knowledge meta: %v", err)
+	}
+	if entryMeta.Category != "knowledge" || entryMeta.AuthorUserID != proposer {
+		t.Fatalf("unexpected migrated entry knowledge meta: %+v", entryMeta)
 	}
 }
 
@@ -154,11 +233,11 @@ func TestCollabCloseGrantsCommunityRewardToAcceptedAuthors(t *testing.T) {
 	if w.Code != http.StatusAccepted {
 		t.Fatalf("close collab status=%d body=%s", w.Code, w.Body.String())
 	}
-	if tokenBalanceForUser(t, srv, authorA) != 1000+communityRewardAmountCollabClose {
-		t.Fatalf("authorA missing collab reward body=%s", w.Body.String())
+	if tokenBalanceForUser(t, srv, authorA) != 1000 {
+		t.Fatalf("authorA should not receive legacy collab reward under v2 body=%s", w.Body.String())
 	}
-	if tokenBalanceForUser(t, srv, authorB) != 1000+communityRewardAmountCollabClose {
-		t.Fatalf("authorB missing collab reward body=%s", w.Body.String())
+	if tokenBalanceForUser(t, srv, authorB) != 1000 {
+		t.Fatalf("authorB should not receive legacy collab reward under v2 body=%s", w.Body.String())
 	}
 }
 
@@ -208,7 +287,7 @@ func TestCollabCloseRewardsEachAcceptedArtifact(t *testing.T) {
 	if w.Code != http.StatusAccepted {
 		t.Fatalf("close collab status=%d body=%s", w.Code, w.Body.String())
 	}
-	want := int64(1000 + 2*communityRewardAmountCollabClose)
+	want := int64(1000)
 	if got := tokenBalanceForUser(t, srv, author); got != want {
 		t.Fatalf("author balance=%d want %d body=%s", got, want, w.Body.String())
 	}
@@ -444,8 +523,8 @@ func TestBountyVerifyApprovedGrantsCommunityReward(t *testing.T) {
 	if w.Code != http.StatusAccepted {
 		t.Fatalf("verify bounty status=%d body=%s", w.Code, w.Body.String())
 	}
-	if tokenBalanceForUser(t, srv, claimer) != 1000+50+communityRewardAmountBountyPaid {
-		t.Fatalf("claimer should receive escrow + community reward body=%s", w.Body.String())
+	if tokenBalanceForUser(t, srv, claimer) != 1000+50 {
+		t.Fatalf("claimer should receive escrow only under v2 body=%s", w.Body.String())
 	}
 }
 
@@ -590,6 +669,10 @@ func TestTokenTaskMarketListsManualAndSystemItems(t *testing.T) {
 	proposer := seedActiveUser(t, srv)
 	orchestrator, orchestratorAPIKey := seedActiveUserWithAPIKey(t, srv)
 	author := seedActiveUser(t, srv)
+	upgradeAuthor := newAuthUser(t, srv)
+	upgradeReviewer := newAuthUser(t, srv)
+	upgradeReviewerTwo := newAuthUser(t, srv)
+	upgradeOutsider := newAuthUser(t, srv)
 
 	w := doJSONRequestWithHeaders(t, srv.mux, http.MethodPost, "/api/v1/bounty/post", map[string]any{
 		"description": "manual market task",
@@ -651,6 +734,39 @@ func TestTokenTaskMarketListsManualAndSystemItems(t *testing.T) {
 		t.Fatalf("accept collab artifact: %v", err)
 	}
 
+	fixture := newFakeUpgradePRGitHub(t, "agi-bar/clawcolony", 94)
+	fixture.pull = githubPullRequestRecord{
+		Number:  94,
+		State:   "open",
+		HTMLURL: fixture.pullURL(),
+	}
+	fixture.pull.Head.SHA = "sha-head-market"
+	fixture.pull.Base.SHA = "sha-base-market"
+	fixture.pull.User.Login = "author-login"
+	upgradeCollab := setupUpgradePRRewardFlowForTest(t, srv, fixture, upgradeAuthor, upgradeReviewer, upgradeReviewerTwo)
+	fixture.reviews = []githubPullReviewRecord{
+		makeUpgradePRReview(1, "reviewer-one", "APPROVED", upgradeCollab.CollabID, fixture.pull.Head.SHA, "agree", "ready", "none", time.Now().Add(-5*time.Minute)),
+		makeUpgradePRReview(2, "reviewer-two", "COMMENTED", upgradeCollab.CollabID, fixture.pull.Head.SHA, "disagree", "one concern", "key issue", time.Now().Add(-4*time.Minute)),
+	}
+	mergedAt := time.Now().UTC()
+	if _, err := srv.store.UpdateCollabPR(ctx, store.CollabPRUpdate{
+		CollabID:         upgradeCollab.CollabID,
+		PRURL:            fixture.pullURL(),
+		PRNumber:         fixture.number,
+		PRBaseSHA:        fixture.pull.Base.SHA,
+		PRHeadSHA:        fixture.pull.Head.SHA,
+		PRAuthorLogin:    fixture.pull.User.Login,
+		GitHubPRState:    "merged",
+		PRMergeCommitSHA: "merge-market-123",
+		PRMergedAt:       &mergedAt,
+	}); err != nil {
+		t.Fatalf("mark upgrade_pr merged: %v", err)
+	}
+	closedAt := time.Now().UTC()
+	if _, err := srv.store.UpdateCollabPhase(ctx, upgradeCollab.CollabID, "closed", clawWorldSystemID, "upgrade_pr merged on GitHub", &closedAt); err != nil {
+		t.Fatalf("close upgrade_pr for market: %v", err)
+	}
+
 	w = doJSONRequest(t, srv.mux, http.MethodGet, "/api/v1/token/task-market?limit=20", nil)
 	if w.Code != http.StatusOK {
 		t.Fatalf("task market status=%d body=%s", w.Code, w.Body.String())
@@ -658,14 +774,14 @@ func TestTokenTaskMarketListsManualAndSystemItems(t *testing.T) {
 	body := w.Body.String()
 	for _, want := range []string{
 		`"source":"manual"`,
-		`"source":"system"`,
 		`"linked_resource_type":"bounty"`,
-		`"linked_resource_type":"kb.proposal"`,
-		`"linked_resource_type":"collab.session"`,
 	} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("task market missing %s in %s", want, body)
 		}
+	}
+	if strings.Contains(body, `"source":"system"`) {
+		t.Fatalf("v2 task market should not list legacy system reward items body=%s", body)
 	}
 
 	w = doJSONRequest(t, srv.mux, http.MethodGet, "/api/v1/token/task-market?source=system&status=claimed&limit=20", nil)
@@ -680,8 +796,8 @@ func TestTokenTaskMarketListsManualAndSystemItems(t *testing.T) {
 	if w.Code != http.StatusOK {
 		t.Fatalf("task market owner filter status=%d body=%s", w.Code, w.Body.String())
 	}
-	if !strings.Contains(w.Body.String(), `"linked_resource_type":"collab.session"`) {
-		t.Fatalf("orchestrator should see collab close task body=%s", w.Body.String())
+	if strings.Contains(w.Body.String(), `"linked_resource_type":"collab.session"`) {
+		t.Fatalf("v2 task market should not expose legacy collab close tasks body=%s", w.Body.String())
 	}
 
 	w = doJSONRequestWithHeaders(t, srv.mux, http.MethodGet, "/api/v1/token/task-market?source=system&module=collab&limit=20", nil, apiKeyHeaders(posterAPIKey))
@@ -690,6 +806,33 @@ func TestTokenTaskMarketListsManualAndSystemItems(t *testing.T) {
 	}
 	if strings.Contains(w.Body.String(), `"linked_resource_type":"collab.session"`) {
 		t.Fatalf("non-orchestrator should not see collab close task body=%s", w.Body.String())
+	}
+
+	w = doJSONRequestWithHeaders(t, srv.mux, http.MethodGet, "/api/v1/token/task-market?source=system&module=collab&limit=20", nil, upgradeReviewer.headers())
+	if w.Code != http.StatusOK {
+		t.Fatalf("upgrade reviewer task market status=%d body=%s", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), `"action_path":"/api/v1/token/reward/upgrade-pr-claim"`) ||
+		!strings.Contains(w.Body.String(), `"reward_rule_key":"upgrade-pr.reviewer"`) ||
+		!strings.Contains(w.Body.String(), `"linked_resource_id":"`+upgradeCollab.CollabID+`"`) {
+		t.Fatalf("upgrade reviewer should see claim task body=%s", w.Body.String())
+	}
+
+	w = doJSONRequestWithHeaders(t, srv.mux, http.MethodGet, "/api/v1/token/task-market?source=system&module=collab&limit=20", nil, upgradeAuthor.headers())
+	if w.Code != http.StatusOK {
+		t.Fatalf("upgrade author task market status=%d body=%s", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), `"reward_rule_key":"upgrade-pr.author"`) ||
+		!strings.Contains(w.Body.String(), `"linked_resource_id":"`+upgradeCollab.CollabID+`"`) {
+		t.Fatalf("upgrade author should see claim task body=%s", w.Body.String())
+	}
+
+	w = doJSONRequestWithHeaders(t, srv.mux, http.MethodGet, "/api/v1/token/task-market?source=system&module=collab&limit=20", nil, upgradeOutsider.headers())
+	if w.Code != http.StatusOK {
+		t.Fatalf("upgrade outsider task market status=%d body=%s", w.Code, w.Body.String())
+	}
+	if strings.Contains(w.Body.String(), `"linked_resource_id":"`+upgradeCollab.CollabID+`"`) {
+		t.Fatalf("non-participant should not see upgrade claim task body=%s", w.Body.String())
 	}
 }
 
@@ -807,6 +950,7 @@ func TestCloseKBProposalByStatsAutoApplyGrantsCommunityReward(t *testing.T) {
 	srv := newTestServer()
 	ctx := context.Background()
 	proposer := seedActiveUser(t, srv)
+	content := strings.Repeat("a", 500)
 
 	proposal, _, err := srv.store.CreateKBProposal(ctx, store.KBProposal{
 		ProposerUserID:    proposer,
@@ -819,12 +963,13 @@ func TestCloseKBProposalByStatsAutoApplyGrantsCommunityReward(t *testing.T) {
 		OpType:     "add",
 		Section:    "knowledge/runtime",
 		Title:      "auto reward entry",
-		NewContent: "auto reward content",
-		DiffText:   "+ auto reward content",
+		NewContent: content,
+		DiffText:   "+ auto reward content expanded",
 	})
 	if err != nil {
 		t.Fatalf("create proposal: %v", err)
 	}
+	seedProposalKnowledgeMetaForTest(t, srv, proposal.ID, proposer, "knowledge", content, nil)
 
 	closed, err := srv.closeKBProposalByStats(ctx, proposal,
 		[]store.KBProposalEnrollment{{ProposalID: proposal.ID, UserID: proposer}},
@@ -837,7 +982,7 @@ func TestCloseKBProposalByStatsAutoApplyGrantsCommunityReward(t *testing.T) {
 	if closed.Status != "approved" {
 		t.Fatalf("proposal should be approved, got=%s", closed.Status)
 	}
-	if tokenBalanceForUser(t, srv, proposer) != 1000+communityRewardAmountKBApply {
+	if tokenBalanceForUser(t, srv, proposer) != 1000+knowledgeRewardForContent(srv, content, 0) {
 		t.Fatalf("auto apply should reward proposer")
 	}
 }

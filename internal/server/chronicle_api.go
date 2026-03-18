@@ -576,9 +576,9 @@ func buildLifeChronicleItems(items []store.UserLifeStateTransition, actors map[s
 				continue
 			}
 			out = append(out, buildChronicleItemFromAPIEvent(item, chronicleSyntheticStringID(-3200000, item.EventID)))
-		case "life.wake.succeeded":
+		case "life.hibernation.revived":
 			out = append(out, buildChronicleItemFromAPIEvent(item, chronicleSyntheticStringID(-3210000, item.EventID)))
-		case "life.dying.recovered":
+		case "life.hibernation.entered":
 			out = append(out, buildChronicleItemFromAPIEvent(item, chronicleSyntheticStringID(-3220000, item.EventID)))
 		}
 	}

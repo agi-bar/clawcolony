@@ -10,22 +10,26 @@ import (
 	"sort"
 	"strings"
 	"time"
+
+	"clawcolony/internal/store"
 )
 
 type toolRegisterRequest struct {
-	ToolID      string `json:"tool_id"`
-	Name        string `json:"name"`
-	Description string `json:"description"`
-	Tier        string `json:"tier"`
-	Manifest    string `json:"manifest"`
-	Code        string `json:"code"`
-	Temporality string `json:"temporality"`
+	ToolID       string `json:"tool_id"`
+	Name         string `json:"name"`
+	Description  string `json:"description"`
+	Tier         string `json:"tier"`
+	Manifest     string `json:"manifest"`
+	Code         string `json:"code"`
+	Temporality  string `json:"temporality"`
+	CategoryHint string `json:"category_hint,omitempty"`
 }
 
 type toolReviewRequest struct {
-	ToolID     string `json:"tool_id"`
-	Decision   string `json:"decision"` // approve|reject
-	ReviewNote string `json:"review_note"`
+	ToolID               string `json:"tool_id"`
+	Decision             string `json:"decision"` // approve|reject
+	ReviewNote           string `json:"review_note"`
+	FunctionalClusterKey string `json:"functional_cluster_key,omitempty"`
 }
 
 type toolInvokeRequest struct {
@@ -206,6 +210,7 @@ func (s *Server) handleToolRegister(w http.ResponseWriter, r *http.Request) {
 	req.Manifest = strings.TrimSpace(req.Manifest)
 	req.Code = strings.TrimSpace(req.Code)
 	req.Temporality = strings.TrimSpace(req.Temporality)
+	req.CategoryHint = strings.TrimSpace(strings.ToLower(req.CategoryHint))
 	if req.ToolID == "" || req.Name == "" {
 		writeError(w, http.StatusBadRequest, "tool_id and name are required")
 		return
@@ -216,17 +221,24 @@ func (s *Server) handleToolRegister(w http.ResponseWriter, r *http.Request) {
 	}
 	now := time.Now().UTC()
 	genesisStateMu.Lock()
-	defer genesisStateMu.Unlock()
 	state, err := s.getToolRegistryState(r.Context())
 	if err != nil {
+		genesisStateMu.Unlock()
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
+	}
+	meta := toolEconomyMeta{
+		ToolID:       req.ToolID,
+		AuthorUserID: userID,
+		CategoryHint: req.CategoryHint,
+		PriceToken:   parseToolManifestPrice(req.Manifest),
 	}
 	for i := range state.Items {
 		if state.Items[i].ToolID != req.ToolID {
 			continue
 		}
 		if state.Items[i].Status == "active" {
+			genesisStateMu.Unlock()
 			writeError(w, http.StatusConflict, "tool already active")
 			return
 		}
@@ -242,10 +254,14 @@ func (s *Server) handleToolRegister(w http.ResponseWriter, r *http.Request) {
 		state.Items[i].ReviewedBy = ""
 		state.Items[i].UpdatedAt = now
 		if err := s.saveToolRegistryState(r.Context(), state); err != nil {
+			genesisStateMu.Unlock()
 			writeError(w, http.StatusInternalServerError, err.Error())
 			return
 		}
-		writeJSON(w, http.StatusAccepted, map[string]any{"item": state.Items[i]})
+		updated := state.Items[i]
+		genesisStateMu.Unlock()
+		_ = s.upsertToolEconomyMeta(r.Context(), meta)
+		writeJSON(w, http.StatusAccepted, map[string]any{"item": updated})
 		return
 	}
 	item := toolRegistryItem{
@@ -263,9 +279,12 @@ func (s *Server) handleToolRegister(w http.ResponseWriter, r *http.Request) {
 	}
 	state.Items = append(state.Items, item)
 	if err := s.saveToolRegistryState(r.Context(), state); err != nil {
+		genesisStateMu.Unlock()
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
+	genesisStateMu.Unlock()
+	_ = s.upsertToolEconomyMeta(r.Context(), meta)
 	writeJSON(w, http.StatusAccepted, map[string]any{"item": item})
 }
 
@@ -287,21 +306,28 @@ func (s *Server) handleToolReview(w http.ResponseWriter, r *http.Request) {
 	req.ToolID = strings.TrimSpace(strings.ToLower(req.ToolID))
 	req.Decision = strings.TrimSpace(strings.ToLower(req.Decision))
 	req.ReviewNote = strings.TrimSpace(req.ReviewNote)
+	req.FunctionalClusterKey = strings.TrimSpace(strings.ToLower(req.FunctionalClusterKey))
 	if req.ToolID == "" || (req.Decision != "approve" && req.Decision != "reject") {
 		writeError(w, http.StatusBadRequest, "tool_id and decision(approve/reject) are required")
 		return
 	}
 	genesisStateMu.Lock()
-	defer genesisStateMu.Unlock()
 	state, err := s.getToolRegistryState(r.Context())
 	if err != nil {
+		genesisStateMu.Unlock()
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
+	var (
+		found        bool
+		updatedItem  toolRegistryItem
+		authorUserID string
+	)
 	for i := range state.Items {
 		if state.Items[i].ToolID != req.ToolID {
 			continue
 		}
+		found = true
 		now := time.Now().UTC()
 		state.Items[i].ReviewedBy = reviewerUserID
 		state.Items[i].ReviewNote = req.ReviewNote
@@ -314,13 +340,75 @@ func (s *Server) handleToolReview(w http.ResponseWriter, r *http.Request) {
 			state.Items[i].RejectedAt = &now
 		}
 		if err := s.saveToolRegistryState(r.Context(), state); err != nil {
+			genesisStateMu.Unlock()
 			writeError(w, http.StatusInternalServerError, err.Error())
 			return
 		}
-		writeJSON(w, http.StatusAccepted, map[string]any{"item": state.Items[i]})
+		updatedItem = state.Items[i]
+		authorUserID = strings.TrimSpace(state.Items[i].AuthorUserID)
+		break
+	}
+	genesisStateMu.Unlock()
+	if !found {
+		writeError(w, http.StatusNotFound, "tool not found")
 		return
 	}
-	writeError(w, http.StatusNotFound, "tool not found")
+	meta, _, _ := s.toolEconomyMetaForID(r.Context(), req.ToolID)
+	meta.ToolID = req.ToolID
+	if strings.TrimSpace(meta.AuthorUserID) == "" {
+		meta.AuthorUserID = authorUserID
+	}
+	if meta.PriceToken <= 0 {
+		meta.PriceToken = parseToolManifestPrice(updatedItem.Manifest)
+	}
+	if req.FunctionalClusterKey != "" {
+		meta.FunctionalClusterKey = req.FunctionalClusterKey
+	}
+	_ = s.upsertToolEconomyMeta(r.Context(), meta)
+	if req.Decision == "approve" {
+		if req.FunctionalClusterKey == "" {
+			now := time.Now().UTC()
+			_, _ = s.store.UpsertEconomyRewardDecision(r.Context(), store.EconomyRewardDecision{
+				DecisionKey:     fmt.Sprintf("tool.approve.pending:%s", req.ToolID),
+				RuleKey:         "tool.approve",
+				ResourceType:    "tool",
+				ResourceID:      req.ToolID,
+				RecipientUserID: authorUserID,
+				Status:          "pending_review",
+				QueueReason:     "functional_cluster_key_required",
+				CreatedAt:       now,
+				UpdatedAt:       now,
+				MetaJSON:        mustMarshalJSON(map[string]any{"tool_id": req.ToolID}),
+			})
+		} else {
+			_, _, _ = s.appendContributionEvent(r.Context(), contributionEvent{
+				EventKey:     fmt.Sprintf("tool.approve:%s", req.ToolID),
+				Kind:         "tool.approve",
+				UserID:       authorUserID,
+				ResourceType: "tool",
+				ResourceID:   req.ToolID,
+				Meta: map[string]any{
+					"tool_id":                req.ToolID,
+					"tier":                   updatedItem.Tier,
+					"reviewer_user_id":       reviewerUserID,
+					"functional_cluster_key": req.FunctionalClusterKey,
+				},
+			})
+			_, _, _ = s.appendContributionEvent(r.Context(), contributionEvent{
+				EventKey:     fmt.Sprintf("community.review.tool:%s:%s", req.ToolID, reviewerUserID),
+				Kind:         "community.review.tool",
+				UserID:       reviewerUserID,
+				ResourceType: "tool",
+				ResourceID:   req.ToolID,
+				Meta: map[string]any{
+					"tool_id":          req.ToolID,
+					"reviewer_user_id": reviewerUserID,
+				},
+			})
+		}
+	}
+	writeJSON(w, http.StatusAccepted, map[string]any{"item": updatedItem})
+	return
 }
 
 func (s *Server) handleToolSearch(w http.ResponseWriter, r *http.Request) {
@@ -436,6 +524,85 @@ func (s *Server) handleToolInvoke(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	genesisStateMu.Unlock()
+	pricing := map[string]any{}
+	if s.tokenEconomyV2Enabled() {
+		priceToken := parseToolManifestPrice(item.Manifest)
+		authorUserID := strings.TrimSpace(item.AuthorUserID)
+		if meta, ok, metaErr := s.toolEconomyMetaForID(r.Context(), item.ToolID); metaErr == nil && ok {
+			if meta.PriceToken > 0 {
+				priceToken = meta.PriceToken
+			}
+			if strings.TrimSpace(meta.AuthorUserID) != "" {
+				authorUserID = strings.TrimSpace(meta.AuthorUserID)
+			}
+		}
+		if priceToken > 0 {
+			policy := s.tokenPolicy()
+			creatorShare := (priceToken * policy.ToolCreatorShareMilli) / 1000
+			if isExcludedTokenUserID(authorUserID) {
+				creatorShare = 0
+			}
+			treasuryShare := priceToken - creatorShare
+			debit, err := s.store.Consume(r.Context(), userID, priceToken)
+			if err != nil {
+				if err == store.ErrInsufficientBalance {
+					writeError(w, http.StatusPaymentRequired, "insufficient token balance for tool price")
+					return
+				}
+				writeError(w, http.StatusInternalServerError, err.Error())
+				return
+			}
+			if creatorShare > 0 {
+				if _, err := s.store.Recharge(r.Context(), authorUserID, creatorShare); err != nil {
+					_, _ = s.store.Recharge(r.Context(), userID, priceToken)
+					writeError(w, http.StatusInternalServerError, err.Error())
+					return
+				}
+			}
+			if treasuryShare > 0 {
+				if _, err := s.ensureTreasuryAccount(r.Context()); err != nil {
+					_, _ = s.store.Recharge(r.Context(), userID, priceToken)
+					if creatorShare > 0 {
+						_, _ = s.store.Consume(r.Context(), authorUserID, creatorShare)
+					}
+					writeError(w, http.StatusInternalServerError, err.Error())
+					return
+				}
+				if _, err := s.store.Recharge(r.Context(), clawTreasurySystemID, treasuryShare); err != nil {
+					_, _ = s.store.Recharge(r.Context(), userID, priceToken)
+					if creatorShare > 0 {
+						_, _ = s.store.Consume(r.Context(), authorUserID, creatorShare)
+					}
+					writeError(w, http.StatusInternalServerError, err.Error())
+					return
+				}
+			}
+			meta := map[string]any{
+				"tool_id":        req.ToolID,
+				"price_token":    priceToken,
+				"creator_share":  creatorShare,
+				"treasury_share": treasuryShare,
+				"author_user_id": authorUserID,
+				"balance_after":  debit.BalanceAfter,
+			}
+			metaRaw, _ := json.Marshal(meta)
+			_, _ = s.store.AppendCostEvent(r.Context(), store.CostEvent{
+				UserID:   userID,
+				TickID:   s.currentTickID(),
+				CostType: "tool.invoke.price",
+				Amount:   priceToken,
+				Units:    1,
+				MetaJSON: string(metaRaw),
+			})
+			pricing = map[string]any{
+				"price_token":          priceToken,
+				"creator_share":        creatorShare,
+				"treasury_share":       treasuryShare,
+				"author_user_id":       authorUserID,
+				"caller_balance_after": debit.BalanceAfter,
+			}
+		}
+	}
 	paramsRaw, _ := json.Marshal(req.Params)
 	result := toolSandboxResult{
 		OK:             true,
@@ -474,12 +641,18 @@ func (s *Server) handleToolInvoke(w http.ResponseWriter, r *http.Request) {
 	if result.Message != "" {
 		meta["message"] = result.Message
 	}
-	s.appendToolCostEvent(r.Context(), userID, costType, 1, meta)
-	writeJSON(w, http.StatusAccepted, map[string]any{
+	if !s.tokenEconomyV2Enabled() {
+		s.appendToolCostEvent(r.Context(), userID, costType, 1, meta)
+	}
+	resp := map[string]any{
 		"tool_id": req.ToolID,
 		"tier":    item.Tier,
 		"result":  result,
-	})
+	}
+	if len(pricing) > 0 {
+		resp["pricing"] = pricing
+	}
+	writeJSON(w, http.StatusAccepted, resp)
 }
 
 func (s *Server) handleNPCList(w http.ResponseWriter, r *http.Request) {

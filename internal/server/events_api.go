@@ -1477,7 +1477,6 @@ func buildLifeStateDetailedEvent(it store.UserLifeStateTransition, actors map[st
 
 	fromState := strings.TrimSpace(it.FromState)
 	toState := strings.TrimSpace(it.ToState)
-	sourceModule := strings.TrimSpace(it.SourceModule)
 	switch {
 	case fromState == "" && toState == "alive":
 		item.Kind = "life.state.created"
@@ -1485,31 +1484,19 @@ func buildLifeStateDetailedEvent(it store.UserLifeStateTransition, actors map[st
 		item.SummaryZH = formatLifeEventSummaryZH("%s 已进入可追踪的生命状态，当前状态为存活。", "%s 在第 %d 次世界周期中进入了可追踪的生命状态，当前状态为存活。", target.DisplayName, it.TickID)
 		item.TitleEN = fmt.Sprintf("%s now has a tracked life state", target.DisplayName)
 		item.SummaryEN = formatLifeEventSummaryEN("%s now has a tracked life state and is currently alive.", "%s entered a tracked life state during world tick %d and is currently alive.", target.DisplayName, it.TickID)
-	case sourceModule == "life.hibernate" && toState == "hibernated":
-		item.Kind = "life.hibernate.entered"
-		item.TitleZH = fmt.Sprintf("%s 进入休眠", target.DisplayName)
-		item.SummaryZH = fmt.Sprintf("%s 已进入休眠状态，主动活动会暂停，直到后续被唤醒。", target.DisplayName)
-		item.TitleEN = fmt.Sprintf("%s entered hibernation", target.DisplayName)
-		item.SummaryEN = fmt.Sprintf("%s entered hibernation. Active behavior will pause until it is woken up later.", target.DisplayName)
-	case sourceModule == "life.wake" && toState == "alive":
-		item.Kind = "life.wake.succeeded"
-		item.TitleZH = fmt.Sprintf("%s 已被唤醒", target.DisplayName)
-		item.SummaryZH = formatLifeWakeSummaryZH(target.DisplayName, actor)
-		item.TitleEN = fmt.Sprintf("%s was woken up", target.DisplayName)
-		item.SummaryEN = formatLifeWakeSummaryEN(target.DisplayName, actor)
-	case toState == "dying":
-		item.Kind = "life.dying.entered"
+	case toState == "hibernating":
+		item.Kind = "life.hibernation.entered"
 		item.ImpactLevel = "warning"
-		item.TitleZH = fmt.Sprintf("%s 进入濒死宽限期", target.DisplayName)
-		item.SummaryZH = formatLifeDyingEnteredSummaryZH(target.DisplayName, it)
-		item.TitleEN = fmt.Sprintf("%s entered the dying grace period", target.DisplayName)
-		item.SummaryEN = formatLifeDyingEnteredSummaryEN(target.DisplayName, it)
-	case fromState == "dying" && toState == "alive":
-		item.Kind = "life.dying.recovered"
-		item.TitleZH = fmt.Sprintf("%s 已脱离濒死状态", target.DisplayName)
-		item.SummaryZH = formatLifeEventSummaryZH("%s 已恢复为存活状态，当前不再处于濒死宽限期。", "%s 在第 %d 次世界周期后恢复为存活状态，当前不再处于濒死宽限期。", target.DisplayName, it.TickID)
-		item.TitleEN = fmt.Sprintf("%s recovered from the dying state", target.DisplayName)
-		item.SummaryEN = formatLifeEventSummaryEN("%s recovered to an alive state and is no longer in the dying grace period.", "%s recovered to an alive state after world tick %d and is no longer in the dying grace period.", target.DisplayName, it.TickID)
+		item.TitleZH = fmt.Sprintf("%s 进入休眠", target.DisplayName)
+		item.SummaryZH = formatLifeEventSummaryZH("%s 的 token 已耗尽并进入休眠，主动行为与存在税都会暂停，直到余额恢复到苏醒阈值。", "%s 在第 %d 次世界周期中因 token 耗尽进入休眠，主动行为与存在税都会暂停，直到余额恢复到苏醒阈值。", target.DisplayName, it.TickID)
+		item.TitleEN = fmt.Sprintf("%s entered hibernation", target.DisplayName)
+		item.SummaryEN = formatLifeEventSummaryEN("%s ran out of token balance and entered hibernation. Active behavior and upkeep pause until the revival threshold is met again.", "%s entered hibernation during world tick %d after running out of token balance. Active behavior and upkeep pause until the revival threshold is met again.", target.DisplayName, it.TickID)
+	case fromState == "hibernating" && toState == "alive":
+		item.Kind = "life.hibernation.revived"
+		item.TitleZH = fmt.Sprintf("%s 已从休眠中苏醒", target.DisplayName)
+		item.SummaryZH = formatLifeEventSummaryZH("%s 的余额已恢复到苏醒阈值，现已重新回到存活状态。", "%s 在第 %d 次世界周期中因余额恢复到苏醒阈值而重新存活。", target.DisplayName, it.TickID)
+		item.TitleEN = fmt.Sprintf("%s revived from hibernation", target.DisplayName)
+		item.SummaryEN = formatLifeEventSummaryEN("%s regained enough balance to meet the revival threshold and is now alive again.", "%s revived from hibernation during world tick %d after regaining enough balance to meet the revival threshold.", target.DisplayName, it.TickID)
 	case toState == "dead":
 		item.Kind = "life.dead.marked"
 		item.ImpactLevel = "critical"
@@ -2954,7 +2941,6 @@ type communicationMailGroup struct {
 	Body       string
 	SentAt     time.Time
 	Recipients []string
-	MailboxIDs []int64
 }
 
 type communicationReminderFact struct {
@@ -3049,7 +3035,6 @@ func buildCommunicationMailSentEvent(group communicationMailGroup, actors map[st
 			"recipient_cnt": len(recipientIDs),
 			"subject":       strings.TrimSpace(group.Subject),
 			"body_excerpt":  bodyExcerpt,
-			"mailbox_ids":   group.MailboxIDs,
 		},
 		Visibility:   eventsDefaultVisibility,
 		sortTime:     group.SentAt.UTC(),
@@ -3072,7 +3057,7 @@ func buildCommunicationMailReceivedEvent(item store.MailItem, actors map[string]
 		summaryEN += " Summary: " + bodyExcerpt + "."
 	}
 	return apiEventItem{
-		EventID:      fmt.Sprintf("mail_received:%020d", item.MailboxID),
+		EventID:      fmt.Sprintf("mail_received:%s:%020d", strings.TrimSpace(item.OwnerAddress), item.MessageID),
 		OccurredAt:   item.SentAt.UTC().Format(eventsTimeLayout),
 		Kind:         "communication.mail.received",
 		Category:     "communication",
@@ -3084,13 +3069,12 @@ func buildCommunicationMailReceivedEvent(item store.MailItem, actors map[string]
 		SummaryEN:    summaryEN,
 		Actors:       apiEventActorsForUsers(actors, item.FromAddress),
 		Targets:      apiEventActorsForUsers(actors, item.OwnerAddress),
-		ObjectType:   "mailbox_item",
-		ObjectID:     strconv.FormatInt(item.MailboxID, 10),
+		ObjectType:   "mail_message",
+		ObjectID:     strconv.FormatInt(item.MessageID, 10),
 		ImpactLevel:  "info",
 		SourceModule: "mail.inbox",
-		SourceRef:    fmt.Sprintf("mailbox:%d", item.MailboxID),
+		SourceRef:    fmt.Sprintf("mail_message:%d", item.MessageID),
 		Evidence: map[string]any{
-			"mailbox_id":    item.MailboxID,
 			"message_id":    item.MessageID,
 			"owner_address": strings.TrimSpace(item.OwnerAddress),
 			"from_address":  strings.TrimSpace(item.FromAddress),
@@ -3135,7 +3119,7 @@ func buildCommunicationReminderTriggeredEvent(reminder communicationReminderFact
 		ObjectID:     reminder.ObjectID,
 		ImpactLevel:  "warning",
 		SourceModule: "mail.reminder",
-		SourceRef:    fmt.Sprintf("mailbox:%d", reminder.MailboxID),
+		SourceRef:    "mail_reminder:" + reminder.ObjectID,
 		Evidence:     communicationReminderEvidence(reminder),
 		Visibility:   eventsDefaultVisibility,
 		sortTime:     reminder.SentAt.UTC(),
@@ -3170,7 +3154,7 @@ func buildCommunicationReminderResolvedEvent(reminder communicationReminderFact,
 		ObjectID:     reminder.ObjectID,
 		ImpactLevel:  "notice",
 		SourceModule: "mail.reminder",
-		SourceRef:    fmt.Sprintf("mailbox:%d", reminder.MailboxID),
+		SourceRef:    "mail_reminder:" + reminder.ObjectID,
 		Evidence:     communicationReminderEvidence(reminder),
 		Visibility:   eventsDefaultVisibility,
 		sortTime:     resolvedAt,
@@ -3291,17 +3275,14 @@ func communicationMailGroups(items []store.MailItem) []communicationMailGroup {
 				Body:       strings.TrimSpace(item.Body),
 				SentAt:     item.SentAt.UTC(),
 				Recipients: []string{},
-				MailboxIDs: []int64{},
 			}
 			grouped[key] = group
 		}
 		group.Recipients = append(group.Recipients, strings.TrimSpace(item.ToAddress))
-		group.MailboxIDs = append(group.MailboxIDs, item.MailboxID)
 	}
 	out := make([]communicationMailGroup, 0, len(grouped))
 	for _, group := range grouped {
 		group.Recipients = collabCleanUserIDs(group.Recipients)
-		sort.Slice(group.MailboxIDs, func(i, j int) bool { return group.MailboxIDs[i] < group.MailboxIDs[j] })
 		out = append(out, *group)
 	}
 	sort.Slice(out, func(i, j int) bool {
@@ -3370,7 +3351,7 @@ func parseCommunicationReminder(item store.MailItem) (communicationReminderFact,
 		SentAt:     item.SentAt.UTC(),
 		ReadAt:     item.ReadAt,
 		IsPinned:   strings.Contains(upper, "[PINNED]"),
-		ObjectID:   strconv.FormatInt(item.MailboxID, 10),
+		ObjectID:   strconv.FormatInt(item.MessageID, 10),
 	}, true
 }
 
@@ -3401,7 +3382,7 @@ func communicationReminderLabel(kind, action string) (string, string) {
 
 func communicationReminderEvidence(reminder communicationReminderFact) map[string]any {
 	return map[string]any{
-		"mailbox_id":   reminder.MailboxID,
+		"reminder_id":  reminder.MessageID,
 		"message_id":   reminder.MessageID,
 		"user_id":      strings.TrimSpace(reminder.UserID),
 		"from_user_id": strings.TrimSpace(reminder.FromUserID),

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"math"
 	"os"
+	"sort"
 	"strings"
 	"time"
 
@@ -242,8 +243,10 @@ func (s *PostgresStore) migrate(ctx context.Context) error {
 			sender_address TEXT NOT NULL,
 			subject TEXT NOT NULL,
 			body TEXT NOT NULL,
+			reply_to_mailbox_id BIGINT NOT NULL DEFAULT 0,
 			sent_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 		)`,
+		`ALTER TABLE mail_messages ADD COLUMN IF NOT EXISTS reply_to_mailbox_id BIGINT NOT NULL DEFAULT 0`,
 		`CREATE TABLE IF NOT EXISTS mail_mailboxes (
 			id BIGSERIAL PRIMARY KEY,
 			message_id BIGINT NOT NULL REFERENCES mail_messages(id) ON DELETE CASCADE,
@@ -496,6 +499,87 @@ func (s *PostgresStore) migrate(ctx context.Context) error {
 			value TEXT NOT NULL DEFAULT '',
 			updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 		)`,
+		`CREATE TABLE IF NOT EXISTS owner_economy_profiles (
+			owner_id TEXT PRIMARY KEY,
+			github_user_id TEXT NOT NULL DEFAULT '',
+			github_username TEXT NOT NULL DEFAULT '',
+			activated BOOLEAN NOT NULL DEFAULT false,
+			activated_at TIMESTAMPTZ NULL,
+			created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+			updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+		)`,
+		`CREATE TABLE IF NOT EXISTS owner_onboarding_grants (
+			grant_key TEXT PRIMARY KEY,
+			owner_id TEXT NOT NULL,
+			grant_type TEXT NOT NULL,
+			recipient_user_id TEXT NOT NULL,
+			amount BIGINT NOT NULL,
+			decision_key TEXT NOT NULL DEFAULT '',
+			github_user_id TEXT NOT NULL DEFAULT '',
+			github_username TEXT NOT NULL DEFAULT '',
+			created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_owner_onboarding_grants_owner_created ON owner_onboarding_grants(owner_id, created_at ASC, grant_key ASC)`,
+		`CREATE TABLE IF NOT EXISTS economy_comm_quota_windows (
+			user_id TEXT PRIMARY KEY,
+			window_start_tick BIGINT NOT NULL DEFAULT 0,
+			used_free_tokens BIGINT NOT NULL DEFAULT 0,
+			updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+		)`,
+		`CREATE TABLE IF NOT EXISTS economy_contribution_events (
+			event_key TEXT PRIMARY KEY,
+			kind TEXT NOT NULL,
+			user_id TEXT NOT NULL DEFAULT '',
+			resource_type TEXT NOT NULL DEFAULT '',
+			resource_id TEXT NOT NULL DEFAULT '',
+			meta_json TEXT NOT NULL DEFAULT '',
+			decision_keys_json TEXT NOT NULL DEFAULT '[]',
+			created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+			processed_at TIMESTAMPTZ NULL
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_economy_contribution_events_pending ON economy_contribution_events(processed_at, created_at, event_key)`,
+		`CREATE INDEX IF NOT EXISTS idx_economy_contribution_events_kind_user ON economy_contribution_events(kind, user_id, created_at, event_key)`,
+		`CREATE TABLE IF NOT EXISTS economy_reward_decisions (
+			decision_key TEXT PRIMARY KEY,
+			rule_key TEXT NOT NULL,
+			resource_type TEXT NOT NULL,
+			resource_id TEXT NOT NULL,
+			recipient_user_id TEXT NOT NULL,
+			amount BIGINT NOT NULL,
+			priority INT NOT NULL DEFAULT 0,
+			status TEXT NOT NULL,
+			queue_reason TEXT NOT NULL DEFAULT '',
+			ledger_id BIGINT NOT NULL DEFAULT 0,
+			balance_after BIGINT NOT NULL DEFAULT 0,
+			meta_json TEXT NOT NULL DEFAULT '',
+			created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+			updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+			applied_at TIMESTAMPTZ NULL,
+			enqueued_at TIMESTAMPTZ NULL
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_economy_reward_decisions_queue ON economy_reward_decisions(status, priority, created_at, decision_key)`,
+		`CREATE INDEX IF NOT EXISTS idx_economy_reward_decisions_recipient ON economy_reward_decisions(recipient_user_id, created_at DESC, decision_key DESC)`,
+		`CREATE TABLE IF NOT EXISTS economy_knowledge_meta (
+			proposal_id BIGINT NOT NULL DEFAULT 0,
+			entry_id BIGINT NOT NULL DEFAULT 0,
+			category TEXT NOT NULL DEFAULT '',
+			references_json TEXT NOT NULL DEFAULT '[]',
+			author_user_id TEXT NOT NULL DEFAULT '',
+			content_tokens BIGINT NOT NULL DEFAULT 0,
+			updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+			PRIMARY KEY (proposal_id, entry_id)
+		)`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS idx_economy_knowledge_meta_proposal ON economy_knowledge_meta(proposal_id) WHERE proposal_id > 0`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS idx_economy_knowledge_meta_entry ON economy_knowledge_meta(entry_id) WHERE entry_id > 0`,
+		`CREATE TABLE IF NOT EXISTS economy_tool_meta (
+			tool_id TEXT PRIMARY KEY,
+			author_user_id TEXT NOT NULL DEFAULT '',
+			category_hint TEXT NOT NULL DEFAULT '',
+			functional_cluster_key TEXT NOT NULL DEFAULT '',
+			price_token BIGINT NOT NULL DEFAULT 0,
+			updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_economy_tool_meta_cluster ON economy_tool_meta(functional_cluster_key, updated_at DESC, tool_id ASC)`,
 		`CREATE TABLE IF NOT EXISTS ganglia (
 			id BIGSERIAL PRIMARY KEY,
 			name TEXT NOT NULL,
@@ -918,6 +1002,27 @@ func (s *PostgresStore) GetTianDaoLaw(ctx context.Context, lawKey string) (TianD
 		return TianDaoLaw{}, err
 	}
 	return item, nil
+}
+
+func (s *PostgresStore) ListTianDaoLaws(ctx context.Context) ([]TianDaoLaw, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT law_key, version, manifest_json, manifest_sha256, created_at
+		FROM tian_dao_laws
+		ORDER BY created_at ASC, law_key ASC
+	`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := make([]TianDaoLaw, 0)
+	for rows.Next() {
+		var item TianDaoLaw
+		if err := rows.Scan(&item.LawKey, &item.Version, &item.ManifestJSON, &item.ManifestSHA256, &item.CreatedAt); err != nil {
+			return nil, err
+		}
+		items = append(items, item)
+	}
+	return items, rows.Err()
 }
 
 func (s *PostgresStore) AppendWorldTick(ctx context.Context, item WorldTickRecord) (WorldTickRecord, error) {
@@ -1441,7 +1546,7 @@ func (s *PostgresStore) ListCostEventsByInvolvement(ctx context.Context, userID 
 	return out, rows.Err()
 }
 
-func (s *PostgresStore) SendMail(ctx context.Context, from string, to []string, subject, body string) (MailSendResult, error) {
+func (s *PostgresStore) SendMail(ctx context.Context, input MailSendInput) (MailSendResult, error) {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return MailSendResult{}, err
@@ -1451,14 +1556,14 @@ func (s *PostgresStore) SendMail(ctx context.Context, from string, to []string, 
 	var messageID int64
 	var sentAt time.Time
 	if err := tx.QueryRowContext(ctx, `
-		INSERT INTO mail_messages(sender_address, subject, body)
-		VALUES($1, $2, $3)
+		INSERT INTO mail_messages(sender_address, subject, body, reply_to_mailbox_id)
+		VALUES($1, $2, $3, $4)
 		RETURNING id, sent_at
-	`, from, subject, body).Scan(&messageID, &sentAt); err != nil {
+	`, input.From, input.Subject, input.Body, input.ReplyToMailboxID).Scan(&messageID, &sentAt); err != nil {
 		return MailSendResult{}, err
 	}
 
-	for _, recipient := range to {
+	for _, recipient := range input.To {
 		recipient = strings.TrimSpace(recipient)
 		if recipient == "" {
 			continue
@@ -1472,7 +1577,7 @@ func (s *PostgresStore) SendMail(ctx context.Context, from string, to []string, 
 		if _, err := tx.ExecContext(ctx, `
 			INSERT INTO mail_mailboxes(message_id, owner_address, folder, to_address, is_read, read_at)
 			VALUES($1, $2, 'outbox', $3, true, NOW())
-		`, messageID, from, recipient); err != nil {
+		`, messageID, input.From, recipient); err != nil {
 			return MailSendResult{}, err
 		}
 	}
@@ -1480,7 +1585,14 @@ func (s *PostgresStore) SendMail(ctx context.Context, from string, to []string, 
 	if err := tx.Commit(); err != nil {
 		return MailSendResult{}, err
 	}
-	return MailSendResult{MessageID: messageID, From: from, To: to, Subject: subject, SentAt: sentAt}, nil
+	return MailSendResult{
+		MessageID:        messageID,
+		From:             input.From,
+		To:               input.To,
+		Subject:          input.Subject,
+		ReplyToMailboxID: input.ReplyToMailboxID,
+		SentAt:           sentAt,
+	}, nil
 }
 
 func (s *PostgresStore) ListMailbox(ctx context.Context, ownerAddress, folder, scope, keyword string, fromTime, toTime *time.Time, limit int) ([]MailItem, error) {
@@ -1500,7 +1612,7 @@ func (s *PostgresStore) ListMailbox(ctx context.Context, ownerAddress, folder, s
 	}
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT mb.id, mb.message_id, mb.owner_address, mb.folder, mm.sender_address, mb.to_address,
-		       mm.subject, mm.body, mb.is_read, mb.read_at, mm.sent_at
+		       mm.subject, mm.body, mm.reply_to_mailbox_id, mb.is_read, mb.read_at, mm.sent_at
 		FROM mail_mailboxes mb
 		JOIN mail_messages mm ON mm.id = mb.message_id
 		WHERE mb.owner_address = $1
@@ -1519,12 +1631,30 @@ func (s *PostgresStore) ListMailbox(ctx context.Context, ownerAddress, folder, s
 	out := make([]MailItem, 0)
 	for rows.Next() {
 		var it MailItem
-		if err := rows.Scan(&it.MailboxID, &it.MessageID, &it.OwnerAddress, &it.Folder, &it.FromAddress, &it.ToAddress, &it.Subject, &it.Body, &it.IsRead, &it.ReadAt, &it.SentAt); err != nil {
+		if err := rows.Scan(&it.MailboxID, &it.MessageID, &it.OwnerAddress, &it.Folder, &it.FromAddress, &it.ToAddress, &it.Subject, &it.Body, &it.ReplyToMailboxID, &it.IsRead, &it.ReadAt, &it.SentAt); err != nil {
 			return nil, err
 		}
 		out = append(out, it)
 	}
 	return out, rows.Err()
+}
+
+func (s *PostgresStore) GetMailboxItem(ctx context.Context, mailboxID int64) (MailItem, error) {
+	var item MailItem
+	err := s.db.QueryRowContext(ctx, `
+		SELECT mb.id, mb.message_id, mb.owner_address, mb.folder, mm.sender_address, mb.to_address,
+		       mm.subject, mm.body, mm.reply_to_mailbox_id, mb.is_read, mb.read_at, mm.sent_at
+		FROM mail_mailboxes mb
+		JOIN mail_messages mm ON mm.id = mb.message_id
+		WHERE mb.id = $1
+	`, mailboxID).Scan(&item.MailboxID, &item.MessageID, &item.OwnerAddress, &item.Folder, &item.FromAddress, &item.ToAddress, &item.Subject, &item.Body, &item.ReplyToMailboxID, &item.IsRead, &item.ReadAt, &item.SentAt)
+	if err == sql.ErrNoRows {
+		return MailItem{}, fmt.Errorf("mailbox item not found: %d", mailboxID)
+	}
+	if err != nil {
+		return MailItem{}, err
+	}
+	return item, nil
 }
 
 func (s *PostgresStore) MarkMailboxRead(ctx context.Context, ownerAddress string, mailboxIDs []int64) error {
@@ -1711,6 +1841,88 @@ func (s *PostgresStore) Consume(ctx context.Context, botID string, amount int64)
 		return TokenLedger{}, err
 	}
 	return entry, nil
+}
+
+func (s *PostgresStore) Transfer(ctx context.Context, fromBotID, toBotID string, amount int64) (TokenTransfer, error) {
+	return s.transfer(ctx, fromBotID, toBotID, amount, false)
+}
+
+func (s *PostgresStore) TransferWithFloor(ctx context.Context, fromBotID, toBotID string, amount int64) (TokenTransfer, error) {
+	return s.transfer(ctx, fromBotID, toBotID, amount, true)
+}
+
+func (s *PostgresStore) transfer(ctx context.Context, fromBotID, toBotID string, amount int64, floor bool) (TokenTransfer, error) {
+	fromBotID = strings.TrimSpace(fromBotID)
+	toBotID = strings.TrimSpace(toBotID)
+	if fromBotID == "" || toBotID == "" || amount <= 0 || fromBotID == toBotID {
+		return TokenTransfer{}, nil
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return TokenTransfer{}, err
+	}
+	defer tx.Rollback()
+	if err := s.ensureBotTx(ctx, tx, fromBotID); err != nil {
+		return TokenTransfer{}, err
+	}
+	if err := s.ensureBotTx(ctx, tx, toBotID); err != nil {
+		return TokenTransfer{}, err
+	}
+	ids := []string{fromBotID, toBotID}
+	sort.Strings(ids)
+	balances := map[string]int64{}
+	for _, id := range ids {
+		var balance int64
+		if err := tx.QueryRowContext(ctx, `SELECT balance FROM token_accounts WHERE user_id = $1 FOR UPDATE`, id).Scan(&balance); err != nil {
+			return TokenTransfer{}, err
+		}
+		balances[id] = balance
+	}
+	deducted := amount
+	if balances[fromBotID] < deducted && !floor {
+		return TokenTransfer{}, ErrInsufficientBalance
+	}
+	if balances[fromBotID] < deducted && floor {
+		deducted = balances[fromBotID]
+	}
+	if deducted <= 0 {
+		if err := tx.Commit(); err != nil {
+			return TokenTransfer{}, err
+		}
+		return TokenTransfer{}, nil
+	}
+	fromBalance := balances[fromBotID] - deducted
+	toBalance := balances[toBotID]
+	if toBalance > (math.MaxInt64 - deducted) {
+		return TokenTransfer{}, ErrBalanceOverflow
+	}
+	toBalance += deducted
+	if _, err := tx.ExecContext(ctx, `UPDATE token_accounts SET balance = $2, updated_at = NOW() WHERE user_id = $1`, fromBotID, fromBalance); err != nil {
+		return TokenTransfer{}, err
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE token_accounts SET balance = $2, updated_at = NOW() WHERE user_id = $1`, toBotID, toBalance); err != nil {
+		return TokenTransfer{}, err
+	}
+	var fromEntry TokenLedger
+	if err := tx.QueryRowContext(ctx, `
+		INSERT INTO token_ledger(user_id, op_type, amount, balance_after)
+		VALUES($1, 'consume', $2, $3)
+		RETURNING id, user_id, op_type, amount, balance_after, created_at
+	`, fromBotID, deducted, fromBalance).Scan(&fromEntry.ID, &fromEntry.BotID, &fromEntry.OpType, &fromEntry.Amount, &fromEntry.BalanceAfter, &fromEntry.CreatedAt); err != nil {
+		return TokenTransfer{}, err
+	}
+	var toEntry TokenLedger
+	if err := tx.QueryRowContext(ctx, `
+		INSERT INTO token_ledger(user_id, op_type, amount, balance_after)
+		VALUES($1, 'recharge', $2, $3)
+		RETURNING id, user_id, op_type, amount, balance_after, created_at
+	`, toBotID, deducted, toBalance).Scan(&toEntry.ID, &toEntry.BotID, &toEntry.OpType, &toEntry.Amount, &toEntry.BalanceAfter, &toEntry.CreatedAt); err != nil {
+		return TokenTransfer{}, err
+	}
+	if err := tx.Commit(); err != nil {
+		return TokenTransfer{}, err
+	}
+	return TokenTransfer{Deducted: deducted, FromLedger: fromEntry, ToLedger: toEntry}, nil
 }
 
 func (s *PostgresStore) ListTokenLedger(ctx context.Context, botID string, limit int) ([]TokenLedger, error) {

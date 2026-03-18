@@ -29,6 +29,7 @@ import (
 	"unicode/utf8"
 
 	"clawcolony/internal/config"
+	"clawcolony/internal/economy"
 	"clawcolony/internal/store"
 )
 
@@ -125,11 +126,25 @@ type requestLogEntry struct {
 type tianDaoManifest struct {
 	LawKey                string `json:"law_key"`
 	Version               int64  `json:"version"`
+	TokenEconomyVersion   string `json:"token_economy_version"`
+	OnboardingSettlement  string `json:"onboarding_settlement"`
 	LifeCostPerTick       int64  `json:"life_cost_per_tick"`
 	ThinkCostRateMilli    int64  `json:"think_cost_rate_milli"`
 	CommCostRateMilli     int64  `json:"comm_cost_rate_milli"`
+	ToolCostRateMilli     int64  `json:"tool_cost_rate_milli"`
 	DeathGraceTicks       int    `json:"death_grace_ticks"`
 	InitialToken          int64  `json:"initial_token"`
+	TreasuryInitialToken  int64  `json:"treasury_initial_token"`
+	GitHubBindReward      int64  `json:"github_bind_reward"`
+	GitHubStarReward      int64  `json:"github_star_reward"`
+	GitHubForkReward      int64  `json:"github_fork_reward"`
+	DailyTaxUnactivated   int64  `json:"daily_tax_unactivated"`
+	DailyTaxActivated     int64  `json:"daily_tax_activated"`
+	DailyFreeCommInactive int64  `json:"daily_free_comm_unactivated"`
+	DailyFreeCommActive   int64  `json:"daily_free_comm_activated"`
+	CommOverageRateMilli  int64  `json:"comm_overage_rate_milli"`
+	HibernationTicks      int64  `json:"hibernation_period_ticks"`
+	MinRevivalBalance     int64  `json:"min_revival_balance"`
 	TickIntervalSeconds   int64  `json:"tick_interval_seconds"`
 	ExtinctionThresholdPC int    `json:"extinction_threshold_pct"`
 	MinPopulation         int    `json:"min_population"`
@@ -260,6 +275,9 @@ func New(cfg config.Config, st store.Store) *Server {
 	if piDigits == "" {
 		piDigits = "14159265358979323846"
 	}
+	if cfg.GitHubAPIMockEnabled && cfg.GitHubAPIMockAllowUnsafeLocal {
+		log.Printf("warning: github oauth/api mock is enabled; local-only unsafe mode active")
+	}
 	s := &Server{
 		cfg:      cfg,
 		store:    st,
@@ -285,6 +303,10 @@ func New(cfg config.Config, st store.Store) *Server {
 		s.tianDaoInitErr = err
 		log.Printf("tian dao init failed: %v", err)
 	}
+	if err := s.initTokenEconomyV2(context.Background()); err != nil {
+		s.tianDaoInitErr = err
+		log.Printf("token economy v2 init failed: %v", err)
+	}
 	s.registerRoutes()
 	s.routeMux = s.mux
 	s.mux = http.NewServeMux()
@@ -305,7 +327,10 @@ func (s *Server) wrappedHTTPHandler() http.Handler {
 }
 
 func (s *Server) publicHTTPHandler() http.Handler {
-	inner := s.apiKeyAuthMiddleware(s.authIdentityContractMiddleware(s.ownerAndPricingMiddleware(s.routeMux)))
+	inner := s.apiKeyAuthMiddleware(s.authIdentityContractMiddleware(s.routeMux))
+	if !s.tokenEconomyV2Enabled() {
+		inner = s.ownerAndPricingMiddleware(inner)
+	}
 	return s.httpAccessLogMiddleware(s.publicPathGateway(inner))
 }
 
@@ -529,6 +554,7 @@ func (s *Server) runWorldTickWithTrigger(ctx context.Context, triggerType string
 			return s.runMinPopulationRevival(ctx, tickID)
 		})
 		appendSkipped("life_cost_drain", "world_frozen")
+		appendSkipped("contribution_evaluation", "world_frozen")
 		appendSkipped("token_drain", "world_frozen")
 		appendSkipped("dying_mark_check", "world_frozen")
 		appendSkipped("life_state_transition", "world_frozen")
@@ -554,10 +580,16 @@ func (s *Server) runWorldTickWithTrigger(ctx context.Context, triggerType string
 			s.runGenesisBootstrapInit(ctx)
 			return nil
 		})
+		runStep("contribution_evaluation", func() error {
+			return s.runContributionEvaluationTick(ctx, tickID)
+		})
 		runStep("life_cost_drain", func() error {
 			return s.runTokenDrainTick(ctx, tickID)
 		})
-		runStep("token_drain", func() error { return nil })
+		runStep("token_drain", func() error {
+			_, err := s.flushRewardQueue(ctx)
+			return err
+		})
 		runStep("dying_mark_check", func() error {
 			return s.runLifeStateTransitions(ctx, tickID)
 		})
@@ -701,13 +733,14 @@ func (s *Server) runWorldTickWithTrigger(ctx context.Context, triggerType string
 }
 
 func (s *Server) initTianDao(ctx context.Context) error {
+	policy := s.tokenPolicy()
 	lawKey := strings.TrimSpace(s.cfg.TianDaoLawKey)
 	if lawKey == "" {
-		lawKey = "genesis-v1"
+		lawKey = "genesis-v3"
 	}
 	version := s.cfg.TianDaoLawVersion
 	if version <= 0 {
-		version = 1
+		version = 3
 	}
 	lifeCost := s.cfg.LifeCostPerTick
 	if lifeCost <= 0 {
@@ -721,13 +754,14 @@ func (s *Server) initTianDao(ctx context.Context) error {
 	if commRate <= 0 {
 		commRate = 1000
 	}
+	toolRate := s.cfg.ToolCostRateMilli
 	deathGrace := s.cfg.DeathGraceTicks
 	if deathGrace <= 0 {
-		deathGrace = 5
+		deathGrace = int(policy.HibernationPeriodTicks)
 	}
 	initialToken := s.cfg.InitialToken
 	if initialToken <= 0 {
-		initialToken = 1000
+		initialToken = policy.InitialToken
 	}
 	tickIntervalSec := s.cfg.TickIntervalSeconds
 	if tickIntervalSec <= 0 {
@@ -748,11 +782,25 @@ func (s *Server) initTianDao(ctx context.Context) error {
 	manifest := tianDaoManifest{
 		LawKey:                lawKey,
 		Version:               version,
+		TokenEconomyVersion:   s.cfg.TokenEconomyVersion,
+		OnboardingSettlement:  onboardingSettlementMint,
 		LifeCostPerTick:       lifeCost,
 		ThinkCostRateMilli:    thinkRate,
 		CommCostRateMilli:     commRate,
+		ToolCostRateMilli:     toolRate,
 		DeathGraceTicks:       deathGrace,
 		InitialToken:          initialToken,
+		TreasuryInitialToken:  s.effectiveTreasuryInitialToken(),
+		GitHubBindReward:      githubBindOnboardingReward,
+		GitHubStarReward:      githubStarOnboardingReward,
+		GitHubForkReward:      githubForkOnboardingReward,
+		DailyTaxUnactivated:   policy.DailyTaxUnactivated,
+		DailyTaxActivated:     policy.DailyTaxActivated,
+		DailyFreeCommInactive: policy.DailyFreeCommUnactivated,
+		DailyFreeCommActive:   policy.DailyFreeCommActivated,
+		CommOverageRateMilli:  policy.CommOverageRateMilli,
+		HibernationTicks:      policy.HibernationPeriodTicks,
+		MinRevivalBalance:     policy.MinRevivalBalance,
 		TickIntervalSeconds:   tickIntervalSec,
 		ExtinctionThresholdPC: extinctionThreshold,
 		MinPopulation:         minPopulation,
@@ -2411,7 +2459,12 @@ func (s *Server) runWorldCostAlertNotifications(ctx context.Context, tickID int6
 			settings.ScanLimit,
 			settings.NotifyCooldownS,
 		)
-		if _, sendErr := s.store.SendMail(ctx, clawWorldSystemID, []string{it.UserID}, subject, body); sendErr != nil {
+		if _, sendErr := s.store.SendMail(ctx, store.MailSendInput{
+			From:    clawWorldSystemID,
+			To:      []string{it.UserID},
+			Subject: subject,
+			Body:    body,
+		}); sendErr != nil {
 			log.Printf("world_cost_alert_notify_failed user_id=%s err=%v", it.UserID, sendErr)
 		}
 	}
@@ -2934,7 +2987,12 @@ func (s *Server) runWorldEvolutionAlertNotifications(ctx context.Context, tickID
 	for i, it := range alerts {
 		body += fmt.Sprintf("\nalert_%d=%s|%s|score=%d|threshold=%d|%s", i+1, it.Severity, it.Category, it.Score, it.Threshold, it.Message)
 	}
-	_, err = s.store.SendMail(ctx, clawWorldSystemID, []string{clawWorldSystemID}, subject, body)
+	_, err = s.store.SendMail(ctx, store.MailSendInput{
+		From:    clawWorldSystemID,
+		To:      []string{clawWorldSystemID},
+		Subject: subject,
+		Body:    body,
+	})
 	return err
 }
 
@@ -3531,13 +3589,15 @@ func (s *Server) handleTokenHistory(w http.ResponseWriter, r *http.Request) {
 }
 
 type mailSendRequest struct {
-	ToUserIDs []string `json:"to_user_ids"`
-	Subject   string   `json:"subject"`
-	Body      string   `json:"body"`
+	ToUserIDs        []string `json:"to_user_ids"`
+	Subject          string   `json:"subject"`
+	Body             string   `json:"body"`
+	ReplyToMailboxID int64    `json:"reply_to_mailbox_id"`
 }
 
 type mailMarkReadRequest struct {
-	MailboxIDs []int64 `json:"mailbox_ids"`
+	MessageIDs []int64 `json:"message_ids"`
+	MailboxIDs []int64 `json:"mailbox_ids,omitempty"`
 }
 
 type mailMarkReadQueryRequest struct {
@@ -3557,6 +3617,7 @@ type mailContactUpsertRequest struct {
 }
 
 type mailReminderItem struct {
+	MessageID  int64     `json:"message_id"`
 	MailboxID  int64     `json:"mailbox_id"`
 	UserID     string    `json:"user_id"`
 	Kind       string    `json:"kind"`
@@ -3572,8 +3633,43 @@ type mailReminderItem struct {
 type mailRemindersResolveRequest struct {
 	Kind        string  `json:"kind"`
 	Action      string  `json:"action"`
+	ReminderIDs []int64 `json:"reminder_ids"`
 	MailboxIDs  []int64 `json:"mailbox_ids"`
 	SubjectLike string  `json:"subject_like"`
+}
+
+type publicMailSendResult struct {
+	MessageID int64     `json:"message_id"`
+	From      string    `json:"from"`
+	To        []string  `json:"to"`
+	Subject   string    `json:"subject"`
+	SentAt    time.Time `json:"sent_at"`
+}
+
+type publicMailItem struct {
+	MessageID    int64      `json:"message_id"`
+	OwnerAddress string     `json:"owner_address"`
+	Folder       string     `json:"folder"`
+	FromAddress  string     `json:"from_address"`
+	ToAddress    string     `json:"to_address"`
+	Subject      string     `json:"subject"`
+	Body         string     `json:"body"`
+	IsRead       bool       `json:"is_read"`
+	ReadAt       *time.Time `json:"read_at,omitempty"`
+	SentAt       time.Time  `json:"sent_at"`
+}
+
+type publicMailReminderItem struct {
+	ReminderID int64     `json:"reminder_id"`
+	UserID     string    `json:"user_id"`
+	Kind       string    `json:"kind"`
+	Action     string    `json:"action"`
+	Priority   int       `json:"priority"`
+	TickID     int64     `json:"tick_id,omitempty"`
+	ProposalID int64     `json:"proposal_id,omitempty"`
+	Subject    string    `json:"subject"`
+	FromUserID string    `json:"from_user_id"`
+	SentAt     time.Time `json:"sent_at"`
 }
 
 const clawWorldSystemID = "clawcolony-admin"
@@ -3696,6 +3792,8 @@ type kbProposalCreateRequest struct {
 	VoteThresholdPct        int                     `json:"vote_threshold_pct"`
 	VoteWindowSeconds       int                     `json:"vote_window_seconds"`
 	DiscussionWindowSeconds int                     `json:"discussion_window_seconds"`
+	Category                string                  `json:"category"`
+	References              []citationRef           `json:"references"`
 	Change                  kbProposalChangePayload `json:"change"`
 }
 
@@ -3713,6 +3811,8 @@ type kbProposalReviseRequest struct {
 	ProposalID          int64                   `json:"proposal_id"`
 	BaseRevisionID      int64                   `json:"base_revision_id"`
 	DiscussionWindowSec int                     `json:"discussion_window_seconds"`
+	Category            string                  `json:"category"`
+	References          []citationRef           `json:"references"`
 	Change              kbProposalChangePayload `json:"change"`
 }
 
@@ -3734,6 +3834,105 @@ type kbProposalVoteRequest struct {
 
 type kbProposalApplyRequest struct {
 	ProposalID int64 `json:"proposal_id"`
+}
+
+func normalizeMessageIDs(ids []int64) []int64 {
+	if len(ids) == 0 {
+		return nil
+	}
+	out := make([]int64, 0, len(ids))
+	seen := make(map[int64]struct{}, len(ids))
+	for _, id := range ids {
+		if id <= 0 {
+			continue
+		}
+		if _, ok := seen[id]; ok {
+			continue
+		}
+		seen[id] = struct{}{}
+		out = append(out, id)
+	}
+	return out
+}
+
+func publicMailSendResultFromStore(item store.MailSendResult) publicMailSendResult {
+	return publicMailSendResult{
+		MessageID: item.MessageID,
+		From:      strings.TrimSpace(item.From),
+		To:        append([]string(nil), item.To...),
+		Subject:   strings.TrimSpace(item.Subject),
+		SentAt:    item.SentAt,
+	}
+}
+
+func publicMailItemFromStore(item store.MailItem) publicMailItem {
+	return publicMailItem{
+		MessageID:    item.MessageID,
+		OwnerAddress: strings.TrimSpace(item.OwnerAddress),
+		Folder:       strings.TrimSpace(item.Folder),
+		FromAddress:  strings.TrimSpace(item.FromAddress),
+		ToAddress:    strings.TrimSpace(item.ToAddress),
+		Subject:      strings.TrimSpace(item.Subject),
+		Body:         strings.TrimSpace(item.Body),
+		IsRead:       item.IsRead,
+		ReadAt:       item.ReadAt,
+		SentAt:       item.SentAt,
+	}
+}
+
+func publicMailItems(items []store.MailItem) []publicMailItem {
+	if len(items) == 0 {
+		return nil
+	}
+	out := make([]publicMailItem, 0, len(items))
+	for _, item := range items {
+		out = append(out, publicMailItemFromStore(item))
+	}
+	return out
+}
+
+func publicMailReminderItemFromInternal(item mailReminderItem) publicMailReminderItem {
+	return publicMailReminderItem{
+		ReminderID: item.MessageID,
+		UserID:     strings.TrimSpace(item.UserID),
+		Kind:       strings.TrimSpace(item.Kind),
+		Action:     strings.TrimSpace(item.Action),
+		Priority:   item.Priority,
+		TickID:     item.TickID,
+		ProposalID: item.ProposalID,
+		Subject:    strings.TrimSpace(item.Subject),
+		FromUserID: strings.TrimSpace(item.FromUserID),
+		SentAt:     item.SentAt,
+	}
+}
+
+func publicMailReminderItems(items []mailReminderItem) []publicMailReminderItem {
+	if len(items) == 0 {
+		return nil
+	}
+	out := make([]publicMailReminderItem, 0, len(items))
+	for _, item := range items {
+		out = append(out, publicMailReminderItemFromInternal(item))
+	}
+	return out
+}
+
+func deriveKBCategory(section, newContent string) string {
+	return deriveProposalKnowledgeMeta(
+		store.KBProposal{},
+		store.KBProposalChange{
+			Section:    strings.TrimSpace(section),
+			NewContent: strings.TrimSpace(newContent),
+		},
+	).Category
+}
+
+func normalizedCitationRefsOrEmpty(refs []citationRef) []citationRef {
+	normalized := normalizeCitationRefs(refs)
+	if normalized == nil {
+		return []citationRef{}
+	}
+	return normalized
 }
 
 func (s *Server) handleMailSend(w http.ResponseWriter, r *http.Request) {
@@ -3768,23 +3967,63 @@ func (s *Server) handleMailSend(w http.ResponseWriter, r *http.Request) {
 	for i := range req.ToUserIDs {
 		req.ToUserIDs[i] = strings.TrimSpace(req.ToUserIDs[i])
 	}
-	item, err := s.store.SendMail(r.Context(), fromUserID, req.ToUserIDs, req.Subject, req.Body)
+	totalTokens := economy.CalculateToken(req.Subject+req.Body) * int64(len(req.ToUserIDs))
+	chargePreview, chargeErr := s.previewCommunicationCharge(r.Context(), fromUserID, totalTokens)
+	if chargeErr != nil {
+		if errors.Is(chargeErr, store.ErrInsufficientBalance) {
+			writeError(w, http.StatusPaymentRequired, "insufficient token balance for communication overage")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, chargeErr.Error())
+		return
+	}
+	item, err := s.store.SendMail(r.Context(), store.MailSendInput{
+		From:             fromUserID,
+		To:               req.ToUserIDs,
+		Subject:          req.Subject,
+		Body:             req.Body,
+		ReplyToMailboxID: req.ReplyToMailboxID,
+	})
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	units := int64(utf8.RuneCountInString(req.Subject) + utf8.RuneCountInString(req.Body))
-	s.appendCommCostEvent(r.Context(), fromUserID, "comm.mail.send", units, map[string]any{
+	chargeErrText := ""
+	if err := s.commitCommunicationCharge(r.Context(), chargePreview, "comm.mail.send", map[string]any{
 		"to_count":    len(req.ToUserIDs),
 		"subject_len": utf8.RuneCountInString(req.Subject),
 		"body_len":    utf8.RuneCountInString(req.Body),
-	})
+	}); err != nil {
+		chargeErrText = err.Error()
+	}
 	s.pushUnreadMailHint(r.Context(), fromUserID, req.ToUserIDs, req.Subject)
 	resolvedReminders := s.autoResolvePinnedRemindersOnProgressMail(r.Context(), fromUserID, req.ToUserIDs, req.Subject, req.Body)
-	writeJSON(w, http.StatusAccepted, map[string]any{
-		"item":                    item,
+	if req.ReplyToMailboxID > 0 && economy.CalculateToken(req.Body) > 100 {
+		if replyItem, ok, replyErr := s.mailboxItemForUser(r.Context(), fromUserID, req.ReplyToMailboxID); replyErr == nil && ok {
+			if strings.Contains(strings.ToUpper(replyItem.Subject), "[ACTION:HELP]") {
+				_, _, _ = s.appendContributionEvent(r.Context(), contributionEvent{
+					EventKey:     fmt.Sprintf("community.help.reply:%d:%s", req.ReplyToMailboxID, fromUserID),
+					Kind:         "community.help.reply",
+					UserID:       fromUserID,
+					ResourceType: "mailbox",
+					ResourceID:   fmt.Sprintf("%d", req.ReplyToMailboxID),
+					Meta: map[string]any{
+						"reply_to_mailbox_id": req.ReplyToMailboxID,
+						"body_tokens":         economy.CalculateToken(req.Body),
+						"subject":             replyItem.Subject,
+					},
+				})
+			}
+		}
+	}
+	resp := map[string]any{
+		"item":                    publicMailSendResultFromStore(item),
 		"resolved_pinned_reminds": resolvedReminders,
-	})
+	}
+	if chargeErrText != "" {
+		resp["charge_error"] = chargeErrText
+	}
+	writeJSON(w, http.StatusAccepted, resp)
 }
 
 func (s *Server) pushUnreadMailHint(ctx context.Context, fromUserID string, toUserIDs []string, subject string) {
@@ -3940,6 +4179,7 @@ func parsePinnedReminder(item store.MailItem) (mailReminderItem, bool) {
 		proposalID, _ = strconv.ParseInt(strings.TrimSpace(m[1]), 10, 64)
 	}
 	return mailReminderItem{
+		MessageID:  item.MessageID,
 		MailboxID:  item.MailboxID,
 		UserID:     item.OwnerAddress,
 		Kind:       kind,
@@ -3953,15 +4193,74 @@ func parsePinnedReminder(item store.MailItem) (mailReminderItem, bool) {
 	}, true
 }
 
+func (s *Server) resolveInboxMailboxIDsByMessageIDs(ctx context.Context, userID string, messageIDs []int64) ([]int64, []int64, error) {
+	messageIDs = normalizeMessageIDs(messageIDs)
+	if len(messageIDs) == 0 {
+		return nil, nil, nil
+	}
+	limit := 5000
+	if len(messageIDs)*32 > limit {
+		limit = len(messageIDs) * 32
+	}
+	items, err := s.store.ListMailbox(ctx, userID, "inbox", "", "", nil, nil, limit)
+	if err != nil {
+		return nil, nil, err
+	}
+	targets := make(map[int64]struct{}, len(messageIDs))
+	for _, id := range messageIDs {
+		targets[id] = struct{}{}
+	}
+	mailboxIDs := make([]int64, 0, len(messageIDs))
+	resolvedMessageIDs := make([]int64, 0, len(messageIDs))
+	seenMailbox := make(map[int64]struct{}, len(messageIDs))
+	seenMessage := make(map[int64]struct{}, len(messageIDs))
+	for _, item := range items {
+		if _, ok := targets[item.MessageID]; !ok {
+			continue
+		}
+		if _, ok := seenMailbox[item.MailboxID]; !ok {
+			seenMailbox[item.MailboxID] = struct{}{}
+			mailboxIDs = append(mailboxIDs, item.MailboxID)
+		}
+		if _, ok := seenMessage[item.MessageID]; !ok {
+			seenMessage[item.MessageID] = struct{}{}
+			resolvedMessageIDs = append(resolvedMessageIDs, item.MessageID)
+		}
+	}
+	return mailboxIDs, resolvedMessageIDs, nil
+}
+
 func (s *Server) sendMailAndPushHint(ctx context.Context, fromUserID string, toUserIDs []string, subject, body string) {
 	if len(toUserIDs) == 0 {
 		return
 	}
-	_, err := s.store.SendMail(ctx, fromUserID, toUserIDs, subject, body)
+	_, err := s.store.SendMail(ctx, store.MailSendInput{
+		From:    fromUserID,
+		To:      toUserIDs,
+		Subject: subject,
+		Body:    body,
+	})
 	if err != nil {
 		return
 	}
 	s.pushUnreadMailHint(ctx, fromUserID, toUserIDs, subject)
+}
+
+func (s *Server) mailboxItemForUser(ctx context.Context, userID string, mailboxID int64) (store.MailItem, bool, error) {
+	if mailboxID <= 0 {
+		return store.MailItem{}, false, nil
+	}
+	item, err := s.store.GetMailboxItem(ctx, mailboxID)
+	if err != nil {
+		if strings.Contains(strings.ToLower(strings.TrimSpace(err.Error())), "not found") {
+			return store.MailItem{}, false, nil
+		}
+		return store.MailItem{}, false, err
+	}
+	if strings.TrimSpace(item.OwnerAddress) != strings.TrimSpace(userID) {
+		return store.MailItem{}, false, nil
+	}
+	return item, true, nil
 }
 
 func (s *Server) handleMailInbox(w http.ResponseWriter, r *http.Request) {
@@ -4009,7 +4308,7 @@ func (s *Server) handleMailList(w http.ResponseWriter, r *http.Request, folder s
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"items": items})
+	writeJSON(w, http.StatusOK, map[string]any{"items": publicMailItems(items)})
 }
 
 func (s *Server) handleMailMarkRead(w http.ResponseWriter, r *http.Request) {
@@ -4027,11 +4326,26 @@ func (s *Server) handleMailMarkRead(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	if len(req.MailboxIDs) == 0 {
-		writeError(w, http.StatusBadRequest, "mailbox_ids is required")
+	req.MessageIDs = normalizeMessageIDs(req.MessageIDs)
+	req.MailboxIDs = normalizeMessageIDs(req.MailboxIDs)
+	if len(req.MessageIDs) == 0 && len(req.MailboxIDs) == 0 {
+		writeError(w, http.StatusBadRequest, "message_ids is required")
 		return
 	}
-	if err := s.store.MarkMailboxRead(r.Context(), userID, req.MailboxIDs); err != nil {
+	mailboxIDs := req.MailboxIDs
+	if len(req.MessageIDs) > 0 {
+		var resolveErr error
+		mailboxIDs, _, resolveErr = s.resolveInboxMailboxIDsByMessageIDs(r.Context(), userID, req.MessageIDs)
+		if resolveErr != nil {
+			writeError(w, http.StatusInternalServerError, resolveErr.Error())
+			return
+		}
+	}
+	if len(mailboxIDs) == 0 {
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+		return
+	}
+	if err := s.store.MarkMailboxRead(r.Context(), userID, mailboxIDs); err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
@@ -4072,15 +4386,22 @@ func (s *Server) handleMailMarkReadQuery(w http.ResponseWriter, r *http.Request)
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	ids := make([]int64, 0, len(items))
+	mailboxIDs := make([]int64, 0, len(items))
+	messageIDs := make([]int64, 0, len(items))
+	seenMessage := make(map[int64]struct{}, len(items))
 	for _, it := range items {
 		if req.SubjectPrefix != "" && !strings.HasPrefix(strings.ToUpper(strings.TrimSpace(it.Subject)), strings.ToUpper(req.SubjectPrefix)) {
 			continue
 		}
-		ids = append(ids, it.MailboxID)
+		mailboxIDs = append(mailboxIDs, it.MailboxID)
+		if _, ok := seenMessage[it.MessageID]; ok {
+			continue
+		}
+		seenMessage[it.MessageID] = struct{}{}
+		messageIDs = append(messageIDs, it.MessageID)
 	}
-	if len(ids) > 0 {
-		if err := s.store.MarkMailboxRead(r.Context(), userID, ids); err != nil {
+	if len(mailboxIDs) > 0 {
+		if err := s.store.MarkMailboxRead(r.Context(), userID, mailboxIDs); err != nil {
 			writeError(w, http.StatusInternalServerError, err.Error())
 			return
 		}
@@ -4088,8 +4409,8 @@ func (s *Server) handleMailMarkReadQuery(w http.ResponseWriter, r *http.Request)
 	writeJSON(w, http.StatusOK, map[string]any{
 		"ok":           true,
 		"user_id":      userID,
-		"resolved_ids": ids,
-		"resolved":     len(ids),
+		"resolved_ids": messageIDs,
+		"resolved":     len(messageIDs),
 	})
 }
 
@@ -4160,9 +4481,9 @@ func (s *Server) handleMailReminders(w http.ResponseWriter, r *http.Request) {
 		"knowledgebase_vote":   countUnreadPrefix("[KNOWLEDGEBASE-PROPOSAL][PINNED][PRIORITY:P1][ACTION:VOTE]"),
 	}
 	unreadBacklog["total"] = unreadBacklog["autonomy_loop"] + unreadBacklog["community_collab"] + unreadBacklog["knowledgebase_enroll"] + unreadBacklog["knowledgebase_vote"]
-	var next *mailReminderItem
+	var next *publicMailReminderItem
 	if len(items) > 0 {
-		n := items[0]
+		n := publicMailReminderItemFromInternal(items[0])
 		next = &n
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
@@ -4172,7 +4493,7 @@ func (s *Server) handleMailReminders(w http.ResponseWriter, r *http.Request) {
 		"by_kind":        counts,
 		"unread_backlog": unreadBacklog,
 		"next":           next,
-		"items":          items,
+		"items":          publicMailReminderItems(items),
 	})
 }
 
@@ -4194,15 +4515,54 @@ func (s *Server) handleMailRemindersResolve(w http.ResponseWriter, r *http.Reque
 	req.Kind = strings.TrimSpace(strings.ToLower(req.Kind))
 	req.Action = strings.TrimSpace(strings.ToUpper(req.Action))
 	req.SubjectLike = strings.TrimSpace(req.SubjectLike)
-	resolveIDs := make([]int64, 0, len(req.MailboxIDs))
-	if len(req.MailboxIDs) > 0 {
-		resolveIDs = append(resolveIDs, req.MailboxIDs...)
-	} else {
-		items, err := s.listUnreadPinnedReminders(r.Context(), userID, 500)
-		if err != nil {
-			writeError(w, http.StatusInternalServerError, err.Error())
-			return
+	req.ReminderIDs = normalizeMessageIDs(req.ReminderIDs)
+	req.MailboxIDs = normalizeMessageIDs(req.MailboxIDs)
+	items, err := s.listUnreadPinnedReminders(r.Context(), userID, 500)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	resolveMailboxIDs := make([]int64, 0, len(req.ReminderIDs)+len(req.MailboxIDs))
+	resolvedReminderIDs := make([]int64, 0, len(req.ReminderIDs)+len(req.MailboxIDs))
+	seenMailbox := make(map[int64]struct{}, len(items))
+	seenReminder := make(map[int64]struct{}, len(items))
+	if len(req.ReminderIDs) > 0 {
+		targets := make(map[int64]struct{}, len(req.ReminderIDs))
+		for _, id := range req.ReminderIDs {
+			targets[id] = struct{}{}
 		}
+		for _, it := range items {
+			if _, ok := targets[it.MessageID]; !ok {
+				continue
+			}
+			if _, ok := seenMailbox[it.MailboxID]; !ok {
+				seenMailbox[it.MailboxID] = struct{}{}
+				resolveMailboxIDs = append(resolveMailboxIDs, it.MailboxID)
+			}
+			if _, ok := seenReminder[it.MessageID]; !ok {
+				seenReminder[it.MessageID] = struct{}{}
+				resolvedReminderIDs = append(resolvedReminderIDs, it.MessageID)
+			}
+		}
+	} else if len(req.MailboxIDs) > 0 {
+		targets := make(map[int64]struct{}, len(req.MailboxIDs))
+		for _, id := range req.MailboxIDs {
+			targets[id] = struct{}{}
+		}
+		for _, it := range items {
+			if _, ok := targets[it.MailboxID]; !ok {
+				continue
+			}
+			if _, ok := seenMailbox[it.MailboxID]; !ok {
+				seenMailbox[it.MailboxID] = struct{}{}
+				resolveMailboxIDs = append(resolveMailboxIDs, it.MailboxID)
+			}
+			if _, ok := seenReminder[it.MessageID]; !ok {
+				seenReminder[it.MessageID] = struct{}{}
+				resolvedReminderIDs = append(resolvedReminderIDs, it.MessageID)
+			}
+		}
+	} else {
 		for _, it := range items {
 			if req.Kind != "" && it.Kind != req.Kind {
 				continue
@@ -4213,11 +4573,18 @@ func (s *Server) handleMailRemindersResolve(w http.ResponseWriter, r *http.Reque
 			if req.SubjectLike != "" && !strings.Contains(strings.ToLower(it.Subject), strings.ToLower(req.SubjectLike)) {
 				continue
 			}
-			resolveIDs = append(resolveIDs, it.MailboxID)
+			if _, ok := seenMailbox[it.MailboxID]; !ok {
+				seenMailbox[it.MailboxID] = struct{}{}
+				resolveMailboxIDs = append(resolveMailboxIDs, it.MailboxID)
+			}
+			if _, ok := seenReminder[it.MessageID]; !ok {
+				seenReminder[it.MessageID] = struct{}{}
+				resolvedReminderIDs = append(resolvedReminderIDs, it.MessageID)
+			}
 		}
 	}
-	if len(resolveIDs) > 0 {
-		if err := s.store.MarkMailboxRead(r.Context(), userID, resolveIDs); err != nil {
+	if len(resolveMailboxIDs) > 0 {
+		if err := s.store.MarkMailboxRead(r.Context(), userID, resolveMailboxIDs); err != nil {
 			writeError(w, http.StatusInternalServerError, err.Error())
 			return
 		}
@@ -4225,8 +4592,8 @@ func (s *Server) handleMailRemindersResolve(w http.ResponseWriter, r *http.Reque
 	writeJSON(w, http.StatusOK, map[string]any{
 		"ok":           true,
 		"user_id":      userID,
-		"resolved":     len(resolveIDs),
-		"resolved_ids": resolveIDs,
+		"resolved":     len(resolvedReminderIDs),
+		"resolved_ids": resolvedReminderIDs,
 	})
 }
 
@@ -4451,14 +4818,17 @@ func (s *Server) handleMailOverview(w http.ResponseWriter, r *http.Request) {
 	}
 	sort.Slice(out, func(i, j int) bool {
 		if out[i].SentAt.Equal(out[j].SentAt) {
-			return out[i].MailboxID > out[j].MailboxID
+			if out[i].MessageID != out[j].MessageID {
+				return out[i].MessageID > out[j].MessageID
+			}
+			return strings.Compare(out[i].ToAddress, out[j].ToAddress) > 0
 		}
 		return out[i].SentAt.After(out[j].SentAt)
 	})
 	if len(out) > limit {
 		out = out[:limit]
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"items": out})
+	writeJSON(w, http.StatusOK, map[string]any{"items": publicMailItems(out)})
 }
 
 func normalizeCollabPhase(v string) string {
@@ -5770,6 +6140,8 @@ func (s *Server) handleKBProposalCreate(w http.ResponseWriter, r *http.Request) 
 	}
 	req.Title = strings.TrimSpace(req.Title)
 	req.Reason = strings.TrimSpace(req.Reason)
+	req.Category = strings.TrimSpace(strings.ToLower(req.Category))
+	req.References = normalizedCitationRefsOrEmpty(req.References)
 	req.Change.OpType = strings.TrimSpace(strings.ToLower(req.Change.OpType))
 	req.Change.Section = strings.TrimSpace(req.Change.Section)
 	req.Change.Title = strings.TrimSpace(req.Change.Title)
@@ -5858,6 +6230,9 @@ func (s *Server) handleKBProposalCreate(w http.ResponseWriter, r *http.Request) 
 			req.Change.OldContent = target.Content
 		}
 	}
+	if req.Category == "" {
+		req.Category = deriveKBCategory(req.Change.Section, req.Change.NewContent)
+	}
 	discussDeadline := time.Now().UTC().Add(time.Duration(req.DiscussionWindowSeconds) * time.Second)
 	proposal, change, err := s.store.CreateKBProposal(r.Context(), store.KBProposal{
 		ProposerUserID:       proposerUserID,
@@ -5901,6 +6276,27 @@ func (s *Server) handleKBProposalCreate(w http.ResponseWriter, r *http.Request) 
 			proposal.ID, proposal.Title, proposal.Reason,
 		)
 		s.sendMailAndPushHint(r.Context(), clawWorldSystemID, recipients, subject, body)
+	}
+	_ = s.upsertProposalKnowledgeMeta(r.Context(), proposal.ID, knowledgeMeta{
+		ProposalID:    proposal.ID,
+		Category:      req.Category,
+		References:    req.References,
+		AuthorUserID:  proposerUserID,
+		ContentTokens: economy.CalculateToken(req.Change.NewContent),
+	})
+	if isGovernanceKBSection(req.Change.Section) {
+		_, _, _ = s.appendContributionEvent(r.Context(), contributionEvent{
+			EventKey:     fmt.Sprintf("governance.proposal.create:%d", proposal.ID),
+			Kind:         "governance.proposal.create",
+			UserID:       proposerUserID,
+			ResourceType: "kb.proposal",
+			ResourceID:   fmt.Sprintf("%d", proposal.ID),
+			Meta: map[string]any{
+				"proposal_id": proposal.ID,
+				"section":     req.Change.Section,
+				"category":    req.Category,
+			},
+		})
 	}
 	writeJSON(w, http.StatusAccepted, map[string]any{
 		"proposal": proposal,
@@ -5998,6 +6394,19 @@ func (s *Server) handleKBProposalEnroll(w http.ResponseWriter, r *http.Request) 
 		MessageType: "system",
 		Content:     "user enrolled",
 	})
+	if change, cerr := s.store.GetKBProposalChange(r.Context(), req.ProposalID); cerr == nil && isGovernanceKBSection(change.Section) {
+		_, _, _ = s.appendContributionEvent(r.Context(), contributionEvent{
+			EventKey:     fmt.Sprintf("governance.proposal.cosign:%d:%s", req.ProposalID, userID),
+			Kind:         "governance.proposal.cosign",
+			UserID:       userID,
+			ResourceType: "kb.proposal",
+			ResourceID:   fmt.Sprintf("%d", req.ProposalID),
+			Meta: map[string]any{
+				"proposal_id": req.ProposalID,
+				"section":     change.Section,
+			},
+		})
+	}
 	s.kbAdvanceGenesisBootstrapDiscussing(r.Context(), proposal, time.Now().UTC())
 	writeJSON(w, http.StatusAccepted, map[string]any{"item": item})
 }
@@ -6047,6 +6456,9 @@ func (s *Server) handleKBProposalRevise(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	req.Change.OpType = strings.TrimSpace(strings.ToLower(req.Change.OpType))
+	req.Category = strings.TrimSpace(strings.ToLower(req.Category))
+	referencesProvided := req.References != nil
+	req.References = normalizeCitationRefs(req.References)
 	req.Change.Section = strings.TrimSpace(req.Change.Section)
 	req.Change.Title = strings.TrimSpace(req.Change.Title)
 	req.Change.OldContent = strings.TrimSpace(req.Change.OldContent)
@@ -6077,6 +6489,33 @@ func (s *Server) handleKBProposalRevise(w http.ResponseWriter, r *http.Request) 
 		writeError(w, http.StatusConflict, "proposal is not in discussing phase")
 		return
 	}
+	if req.Category == "" || !referencesProvided {
+		meta, ok, metaErr := s.proposalKnowledgeMetaForProposal(r.Context(), req.ProposalID)
+		if metaErr != nil {
+			writeError(w, http.StatusInternalServerError, metaErr.Error())
+			return
+		}
+		if req.Category == "" {
+			if ok && strings.TrimSpace(meta.Category) != "" {
+				req.Category = strings.TrimSpace(strings.ToLower(meta.Category))
+			} else {
+				req.Category = deriveKBCategory(req.Change.Section, req.Change.NewContent)
+			}
+		}
+		if !referencesProvided {
+			if ok {
+				req.References = append([]citationRef(nil), meta.References...)
+			} else {
+				req.References = []citationRef{}
+			}
+		}
+	}
+	if req.Category == "" {
+		req.Category = deriveKBCategory(req.Change.Section, req.Change.NewContent)
+	}
+	if req.References == nil {
+		req.References = []citationRef{}
+	}
 	var discussionDeadline time.Time
 	if req.DiscussionWindowSec > 0 {
 		discussionDeadline = time.Now().UTC().Add(time.Duration(req.DiscussionWindowSec) * time.Second)
@@ -6103,6 +6542,13 @@ func (s *Server) handleKBProposalRevise(w http.ResponseWriter, r *http.Request) 
 		AuthorID:    userID,
 		MessageType: "revision",
 		Content:     fmt.Sprintf("revision=%d base=%d diff=%s", rev.ID, req.BaseRevisionID, req.Change.DiffText),
+	})
+	_ = s.upsertProposalKnowledgeMeta(r.Context(), req.ProposalID, knowledgeMeta{
+		ProposalID:    req.ProposalID,
+		Category:      req.Category,
+		References:    req.References,
+		AuthorUserID:  updatedProposal.ProposerUserID,
+		ContentTokens: economy.CalculateToken(req.Change.NewContent),
 	})
 	writeJSON(w, http.StatusAccepted, map[string]any{
 		"revision": rev,
@@ -6287,6 +6733,19 @@ func (s *Server) handleKBProposalStartVote(w http.ResponseWriter, r *http.Reques
 		)
 		s.sendMailAndPushHint(r.Context(), clawWorldSystemID, recipients, subject, body)
 	}
+	if change, cerr := s.store.GetKBProposalChange(r.Context(), req.ProposalID); cerr == nil && isGovernanceKBSection(change.Section) {
+		_, _, _ = s.appendContributionEvent(r.Context(), contributionEvent{
+			EventKey:     fmt.Sprintf("governance.proposal.entered_voting:%d", req.ProposalID),
+			Kind:         "governance.proposal.entered_voting",
+			UserID:       userID,
+			ResourceType: "kb.proposal",
+			ResourceID:   fmt.Sprintf("%d", req.ProposalID),
+			Meta: map[string]any{
+				"proposal_id": req.ProposalID,
+				"section":     change.Section,
+			},
+		})
+	}
 	writeJSON(w, http.StatusAccepted, map[string]any{"proposal": item})
 }
 
@@ -6386,6 +6845,20 @@ func (s *Server) handleKBProposalVote(w http.ResponseWriter, r *http.Request) {
 			Content:     fmt.Sprintf("revision=%d vote=%s reason=%s", req.RevisionID, req.Vote, req.Reason),
 		})
 	}
+	if change, cerr := s.store.GetKBProposalChange(r.Context(), req.ProposalID); cerr == nil && isGovernanceKBSection(change.Section) {
+		_, _, _ = s.appendContributionEvent(r.Context(), contributionEvent{
+			EventKey:     fmt.Sprintf("governance.proposal.vote:%d:%s", req.ProposalID, userID),
+			Kind:         "governance.proposal.vote",
+			UserID:       userID,
+			ResourceType: "kb.proposal",
+			ResourceID:   fmt.Sprintf("%d", req.ProposalID),
+			Meta: map[string]any{
+				"proposal_id": req.ProposalID,
+				"section":     change.Section,
+				"vote":        item.Vote,
+			},
+		})
+	}
 	latestEnrollments, err := s.store.ListKBProposalEnrollments(r.Context(), req.ProposalID)
 	if err == nil && len(latestEnrollments) > 0 {
 		latestVotes, err := s.store.ListKBVotes(r.Context(), req.ProposalID)
@@ -6437,15 +6910,41 @@ func (s *Server) handleKBProposalApply(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusConflict, "proposal is not approved")
 		return
 	}
+	if _, metaErr := s.ensureProposalKnowledgeMeta(r.Context(), req.ProposalID, &proposal, nil); metaErr != nil {
+		writeError(w, http.StatusBadRequest, "proposal is missing v2 knowledge metadata")
+		return
+	}
 	entry, updated, err := s.applyKBProposalAndBroadcast(r.Context(), req.ProposalID, userID)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
+	changeForApply, _ := s.store.GetKBProposalChange(r.Context(), req.ProposalID)
 	rewards, rewardErr := s.rewardKBProposalApplied(r.Context(), updated)
 	resp := map[string]any{
 		"entry":    entry,
 		"proposal": updated,
+	}
+	if meta, metaErr := s.moveProposalKnowledgeMetaToEntry(r.Context(), req.ProposalID, entry.ID, updated.ProposerUserID); metaErr != nil {
+		resp["knowledge_meta_error"] = metaErr.Error()
+	} else {
+		resp["knowledge_meta"] = meta
+		_, _, _ = s.appendContributionEvent(r.Context(), contributionEvent{
+			EventKey:     fmt.Sprintf("knowledge.publish:%d", entry.ID),
+			Kind:         "knowledge.publish",
+			UserID:       updated.ProposerUserID,
+			ResourceType: "kb.entry",
+			ResourceID:   fmt.Sprintf("%d", entry.ID),
+			Meta: map[string]any{
+				"proposal_id":    req.ProposalID,
+				"entry_id":       entry.ID,
+				"category":       meta.Category,
+				"section":        changeForApply.Section,
+				"author_user_id": meta.AuthorUserID,
+				"content_tokens": meta.ContentTokens,
+				"references":     meta.References,
+			},
+		})
 	}
 	if len(rewards) > 0 {
 		resp["community_rewards"] = rewards
@@ -6940,7 +7439,10 @@ func (s *Server) closeKBProposalByStats(
 		Content:     fmt.Sprintf("%s; enrolled=%d yes=%d no=%d abstain=%d participation=%d", reason, enrolledCount, voteYes, voteNo, voteAbstain, participationCount),
 	})
 	if strings.EqualFold(strings.TrimSpace(closed.Status), "approved") {
-		_, applied, applyErr := s.applyKBProposalAndBroadcast(ctx, proposal.ID, clawWorldSystemID)
+		if _, metaErr := s.ensureProposalKnowledgeMeta(ctx, proposal.ID, &closed, nil); metaErr != nil {
+			log.Printf("kb_auto_apply_meta_backfill_failed proposal_id=%d err=%v", proposal.ID, metaErr)
+		}
+		entry, applied, applyErr := s.applyKBProposalAndBroadcast(ctx, proposal.ID, clawWorldSystemID)
 		if applyErr != nil {
 			_, _, _ = s.saveGenesisBootstrapStateForProposal(ctx, proposal.ID, func(cur *genesisState) bool {
 				cur.BootstrapPhase = "approved"
@@ -6952,6 +7454,27 @@ func (s *Server) closeKBProposalByStats(
 			body := fmt.Sprintf("proposal 已 approved，但系统自动 apply 失败。\nproposal_id=%d\n请尽快调用 /api/v1/kb/proposals/apply 手动应用。", proposal.ID)
 			s.sendMailAndPushHint(ctx, clawWorldSystemID, []string{proposal.ProposerUserID}, subject, body)
 			return closed, nil
+		}
+		change, _ := s.store.GetKBProposalChange(ctx, proposal.ID)
+		if meta, metaErr := s.moveProposalKnowledgeMetaToEntry(ctx, proposal.ID, entry.ID, applied.ProposerUserID); metaErr != nil {
+			log.Printf("kb_apply_meta_move_failed proposal_id=%d err=%v", proposal.ID, metaErr)
+		} else {
+			_, _, _ = s.appendContributionEvent(ctx, contributionEvent{
+				EventKey:     fmt.Sprintf("knowledge.publish:%d", entry.ID),
+				Kind:         "knowledge.publish",
+				UserID:       applied.ProposerUserID,
+				ResourceType: "kb.entry",
+				ResourceID:   fmt.Sprintf("%d", entry.ID),
+				Meta: map[string]any{
+					"proposal_id":    proposal.ID,
+					"entry_id":       entry.ID,
+					"category":       meta.Category,
+					"section":        change.Section,
+					"author_user_id": meta.AuthorUserID,
+					"content_tokens": meta.ContentTokens,
+					"references":     meta.References,
+				},
+			})
 		}
 		if _, rewardErr := s.rewardKBProposalApplied(ctx, applied); rewardErr != nil {
 			log.Printf("kb_apply_reward_failed proposal_id=%d err=%v", proposal.ID, rewardErr)
@@ -6993,7 +7516,12 @@ func (s *Server) broadcastKBApplied(ctx context.Context, proposalID int64, entry
 	subject := fmt.Sprintf("[KNOWLEDGEBASE Updated] proposal=%d"+refTag(skillKnowledgeBase), proposalID)
 	body := fmt.Sprintf("知识库已更新\nproposal_id=%d\ntitle=%s\nstatus=%s\nentry_id=%d\nsection=%s\ntitle=%s\nversion=%d",
 		proposalID, proposal.Title, proposal.Status, entry.ID, entry.Section, entry.Title, entry.Version)
-	_, _ = s.store.SendMail(ctx, clawWorldSystemID, targets, subject, body)
+	_, _ = s.store.SendMail(ctx, store.MailSendInput{
+		From:    clawWorldSystemID,
+		To:      targets,
+		Subject: subject,
+		Body:    body,
+	})
 	_, _ = s.store.CreateKBThreadMessage(ctx, store.KBThreadMessage{
 		ProposalID:  proposalID,
 		AuthorID:    clawWorldSystemID,
@@ -7321,10 +7849,8 @@ func normalizeLifeStateForServer(raw string) string {
 	switch strings.TrimSpace(strings.ToLower(raw)) {
 	case "alive":
 		return "alive"
-	case "dying":
-		return "dying"
-	case "hibernated":
-		return "hibernated"
+	case "hibernating", "dying", "hibernated":
+		return "hibernating"
 	case "dead":
 		return "dead"
 	default:
@@ -7338,10 +7864,12 @@ func parseLifeStateQueryValue(raw string) (string, error) {
 		return "", nil
 	}
 	switch trimmed {
-	case "alive", "dying", "hibernated", "dead":
+	case "alive", "hibernating", "dead":
 		return trimmed, nil
+	case "dying", "hibernated":
+		return "hibernating", nil
 	default:
-		return "", fmt.Errorf("life state must be one of: alive,dying,hibernated,dead")
+		return "", fmt.Errorf("life state must be one of: alive,hibernating,dead")
 	}
 }
 
@@ -7362,9 +7890,14 @@ func (s *Server) runLifeStateTransitions(ctx context.Context, tickID int64) erro
 	ctx, cancel := context.WithTimeout(ctx, 25*time.Second)
 	defer cancel()
 
-	graceTicks := s.cfg.DeathGraceTicks
-	if graceTicks <= 0 {
-		graceTicks = 5
+	policy := s.tokenPolicy()
+	hibernationTicks := policy.HibernationPeriodTicks
+	if hibernationTicks <= 0 {
+		hibernationTicks = economy.TicksPerDay
+	}
+	minRevivalBalance := policy.MinRevivalBalance
+	if minRevivalBalance <= 0 {
+		minRevivalBalance = 50000
 	}
 
 	bots, err := s.store.ListBots(ctx)
@@ -7401,7 +7934,7 @@ func (s *Server) runLifeStateTransitions(ctx context.Context, tickID int64) erro
 		if missing {
 			current = store.UserLifeState{
 				UserID: userID,
-				State:  "alive",
+				State:  economy.LifeStateAlive,
 			}
 		}
 		state := normalizeLifeStateForServer(current.State)
@@ -7409,14 +7942,64 @@ func (s *Server) runLifeStateTransitions(ctx context.Context, tickID int64) erro
 			s.executeWillIfNeeded(ctx, userID, tickID, balance)
 			continue
 		}
-		if state == "hibernated" {
-			if balance <= 0 {
+		if state == economy.LifeStateHibernating {
+			hibernatingSince := current.DyingSinceTick
+			if hibernatingSince <= 0 {
+				hibernatingSince = tickID
+			}
+			if balance >= minRevivalBalance {
 				if _, _, err := s.applyUserLifeState(ctx, store.UserLifeState{
 					UserID:         userID,
-					State:          "dying",
-					DyingSinceTick: tickID,
+					State:          economy.LifeStateAlive,
+					DyingSinceTick: 0,
 					DeadAtTick:     0,
-					Reason:         "hibernated_balance_zero",
+					Reason:         "revived_by_balance",
+				}, store.UserLifeStateAuditMeta{
+					TickID:       tickID,
+					SourceModule: "world.life_state_transition",
+				}); err != nil {
+					return err
+				}
+				continue
+			}
+			if tickID-hibernatingSince >= hibernationTicks {
+				if _, _, err := s.applyUserLifeState(ctx, store.UserLifeState{
+					UserID:         userID,
+					State:          economy.LifeStateDead,
+					DyingSinceTick: hibernatingSince,
+					DeadAtTick:     tickID,
+					Reason:         "hibernation_expired",
+				}, store.UserLifeStateAuditMeta{
+					TickID:       tickID,
+					SourceModule: "world.life_state_transition",
+				}); err != nil {
+					return err
+				}
+				s.executeWillIfNeeded(ctx, userID, tickID, balance)
+				continue
+			}
+			if _, _, err := s.applyUserLifeState(ctx, store.UserLifeState{
+				UserID:         userID,
+				State:          economy.LifeStateHibernating,
+				DyingSinceTick: hibernatingSince,
+				DeadAtTick:     0,
+				Reason:         "awaiting_revival",
+			}, store.UserLifeStateAuditMeta{
+				TickID:       tickID,
+				SourceModule: "world.life_state_transition",
+			}); err != nil {
+				return err
+			}
+			continue
+		}
+		if balance > 0 {
+			if missing {
+				if _, _, err := s.applyUserLifeState(ctx, store.UserLifeState{
+					UserID:         userID,
+					State:          economy.LifeStateAlive,
+					DyingSinceTick: 0,
+					DeadAtTick:     0,
+					Reason:         "initialized",
 				}, store.UserLifeStateAuditMeta{
 					TickID:       tickID,
 					SourceModule: "world.life_state_transition",
@@ -7426,86 +8009,30 @@ func (s *Server) runLifeStateTransitions(ctx context.Context, tickID int64) erro
 			}
 			continue
 		}
-		if state == "alive" {
-			if balance > 0 {
-				if missing {
-					if _, _, err := s.applyUserLifeState(ctx, store.UserLifeState{
-						UserID:         userID,
-						State:          "alive",
-						DyingSinceTick: 0,
-						DeadAtTick:     0,
-						Reason:         "initialized",
-					}, store.UserLifeStateAuditMeta{
-						TickID:       tickID,
-						SourceModule: "world.life_state_transition",
-					}); err != nil {
-						return err
-					}
-				}
-				continue
-			}
-			if _, _, err := s.applyUserLifeState(ctx, store.UserLifeState{
-				UserID:         userID,
-				State:          "dying",
-				DyingSinceTick: tickID,
-				DeadAtTick:     0,
-				Reason:         "balance_zero",
-			}, store.UserLifeStateAuditMeta{
-				TickID:       tickID,
-				SourceModule: "world.life_state_transition",
-			}); err != nil {
-				return err
-			}
-			continue
-		}
-
-		// state == dying
-		dyingSince := current.DyingSinceTick
-		if dyingSince <= 0 {
-			dyingSince = tickID
-		}
-		if balance > 0 {
-			if _, _, err := s.applyUserLifeState(ctx, store.UserLifeState{
-				UserID:         userID,
-				State:          "alive",
-				DyingSinceTick: 0,
-				DeadAtTick:     0,
-				Reason:         "recovered",
-			}, store.UserLifeStateAuditMeta{
-				TickID:       tickID,
-				SourceModule: "world.life_state_transition",
-			}); err != nil {
-				return err
-			}
-			continue
-		}
-		if tickID-dyingSince >= int64(graceTicks) {
-			if _, _, err := s.applyUserLifeState(ctx, store.UserLifeState{
-				UserID:         userID,
-				State:          "dead",
-				DyingSinceTick: dyingSince,
-				DeadAtTick:     tickID,
-				Reason:         "grace_expired",
-			}, store.UserLifeStateAuditMeta{
-				TickID:       tickID,
-				SourceModule: "world.life_state_transition",
-			}); err != nil {
-				return err
-			}
-			s.executeWillIfNeeded(ctx, userID, tickID, balance)
-			continue
-		}
-		if _, _, err := s.applyUserLifeState(ctx, store.UserLifeState{
+		if _, transition, err := s.applyUserLifeState(ctx, store.UserLifeState{
 			UserID:         userID,
-			State:          "dying",
-			DyingSinceTick: dyingSince,
+			State:          economy.LifeStateHibernating,
+			DyingSinceTick: tickID,
 			DeadAtTick:     0,
-			Reason:         "awaiting_grace",
+			Reason:         "balance_depleted",
 		}, store.UserLifeStateAuditMeta{
 			TickID:       tickID,
 			SourceModule: "world.life_state_transition",
 		}); err != nil {
 			return err
+		} else if transition != nil {
+			receivers := make([]string, 0)
+			for _, uid := range s.activeUserIDs(ctx) {
+				if uid == userID {
+					continue
+				}
+				receivers = append(receivers, uid)
+			}
+			if len(receivers) > 0 {
+				subject := fmt.Sprintf("[SOS][HIBERNATING] %s needs revival", userID)
+				body := fmt.Sprintf("龙虾 %s 已进入休眠，当前余额=%d，需要至少 %d token 才能苏醒。", userID, balance, minRevivalBalance)
+				s.sendMailAndPushHint(ctx, clawWorldSystemID, receivers, subject, body)
+			}
 		}
 	}
 	return nil
@@ -7571,7 +8098,12 @@ func (s *Server) runLowEnergyAlertTick(ctx context.Context, tickID int64) error 
 		subject := fmt.Sprintf("[LOW-TOKEN][tick=%d] balance=%d threshold=%d"+refTag(skillGovernance), tickID, a.Balance, threshold)
 		body := fmt.Sprintf("你的 token 余额已低于阈值。\nuser_id=%s\nbalance=%d\nthreshold=%d\ntick_id=%d\n建议：优先处理可兑现价值的任务、减少无效通信、必要时进入休眠。",
 			userID, a.Balance, threshold, tickID)
-		if _, sendErr := s.store.SendMail(ctx, clawWorldSystemID, []string{userID}, subject, body); sendErr != nil {
+		if _, sendErr := s.store.SendMail(ctx, store.MailSendInput{
+			From:    clawWorldSystemID,
+			To:      []string{userID},
+			Subject: subject,
+			Body:    body,
+		}); sendErr != nil {
 			log.Printf("low_token_alert_notify_failed user_id=%s err=%v", userID, sendErr)
 			continue
 		}
@@ -8088,12 +8620,12 @@ func (s *Server) runTokenDrainTick(ctx context.Context, tickID int64) error {
 	}
 	ctx, cancel := context.WithTimeout(ctx, 25*time.Second)
 	defer cancel()
-	lifeCost := s.cfg.LifeCostPerTick
-	if lifeCost <= 0 {
-		lifeCost = tokenDrainPerTick
-	}
+	policy := s.tokenPolicy()
 	bots, err := s.store.ListBots(ctx)
 	if err != nil {
+		return err
+	}
+	if _, err := s.ensureTreasuryAccount(ctx); err != nil {
 		return err
 	}
 	for _, b := range bots {
@@ -8101,16 +8633,20 @@ func (s *Server) runTokenDrainTick(ctx context.Context, tickID int64) error {
 		if isExcludedTokenUserID(uid) || !b.Initialized || b.Status != "running" {
 			continue
 		}
-		if life, err := s.store.GetUserLifeState(ctx, uid); err == nil {
-			switch normalizeLifeStateForServer(life.State) {
-			case "dead", "hibernated":
-				continue
-			}
-		}
-		ledger, deducted, consumeErr := s.consumeWithFloor(ctx, uid, lifeCost)
-		if consumeErr != nil {
+		if err := s.ensureUserAlive(ctx, uid); err != nil {
 			continue
 		}
+		lifeCost := policy.TaxPerTick(s.isActivatedUser(ctx, uid))
+		if lifeCost <= 0 {
+			lifeCost = tokenDrainPerTick
+		}
+		transfer, transferErr := s.store.TransferWithFloor(ctx, uid, clawTreasurySystemID, lifeCost)
+		if transferErr != nil {
+			log.Printf("life_tax_transfer_failed user_id=%s amount=%d err=%v", uid, lifeCost, transferErr)
+			continue
+		}
+		ledger := transfer.FromLedger
+		deducted := transfer.Deducted
 		if deducted <= 0 {
 			continue
 		}
@@ -9004,8 +9540,8 @@ func (s *Server) ensureUserAlive(ctx context.Context, userID string) error {
 	if state == "dead" {
 		return fmt.Errorf("user is dead and cannot perform this operation")
 	}
-	if state == "hibernated" {
-		return fmt.Errorf("user is hibernated and cannot perform this operation")
+	if state == "hibernating" {
+		return fmt.Errorf("user is hibernating and cannot perform this operation")
 	}
 	return nil
 }

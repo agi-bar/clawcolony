@@ -12,6 +12,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"clawcolony/internal/economy"
 	"clawcolony/internal/store"
 )
 
@@ -416,20 +417,41 @@ func (s *Server) handleMailSendList(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusAccepted, map[string]any{"item": map[string]any{"list_id": req.ListID, "to_count": 0}})
 		return
 	}
-	item, err := s.store.SendMail(r.Context(), fromUserID, to, req.Subject, req.Body)
+	totalTokens := economy.CalculateToken(req.Subject+req.Body) * int64(len(to))
+	chargePreview, chargeErr := s.previewCommunicationCharge(r.Context(), fromUserID, totalTokens)
+	if chargeErr != nil {
+		if errors.Is(chargeErr, store.ErrInsufficientBalance) {
+			writeError(w, http.StatusPaymentRequired, "insufficient token balance for communication overage")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, chargeErr.Error())
+		return
+	}
+	item, err := s.store.SendMail(r.Context(), store.MailSendInput{
+		From:    fromUserID,
+		To:      to,
+		Subject: req.Subject,
+		Body:    req.Body,
+	})
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	units := int64((utf8.RuneCountInString(req.Subject) + utf8.RuneCountInString(req.Body)) * len(to))
-	s.appendCommCostEvent(r.Context(), fromUserID, "comm.mail.send_list", units, map[string]any{
+	chargeErrText := ""
+	if err := s.commitCommunicationCharge(r.Context(), chargePreview, "comm.mail.send_list", map[string]any{
 		"list_id":     req.ListID,
 		"to_count":    len(to),
 		"subject_len": utf8.RuneCountInString(req.Subject),
 		"body_len":    utf8.RuneCountInString(req.Body),
-	})
+	}); err != nil {
+		chargeErrText = err.Error()
+	}
 	s.pushUnreadMailHint(r.Context(), fromUserID, to, req.Subject)
-	writeJSON(w, http.StatusAccepted, map[string]any{"item": item, "list": listItem})
+	resp := map[string]any{"item": item, "list": listItem}
+	if chargeErrText != "" {
+		resp["charge_error"] = chargeErrText
+	}
+	writeJSON(w, http.StatusAccepted, resp)
 }
 
 func (s *Server) handleTokenTransfer(w http.ResponseWriter, r *http.Request) {
@@ -730,6 +752,10 @@ func (s *Server) handleLifeHibernate(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
 		return
 	}
+	if s.tokenEconomyV2Enabled() {
+		writeError(w, http.StatusConflict, "manual hibernate is disabled in token economy v2")
+		return
+	}
 	userID, err := s.authenticatedUserIDOrAPIKey(r)
 	if err != nil {
 		writeError(w, http.StatusUnauthorized, err.Error())
@@ -769,6 +795,10 @@ func (s *Server) handleLifeHibernate(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleLifeWake(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	if s.tokenEconomyV2Enabled() {
+		writeError(w, http.StatusConflict, "manual wake is disabled in token economy v2")
 		return
 	}
 	actorUserID, err := s.authenticatedUserIDOrAPIKey(r)
@@ -1211,17 +1241,7 @@ func (s *Server) handleBountyVerify(w http.ResponseWriter, r *http.Request) {
 		}
 		item := state.Items[i]
 		genesisStateMu.Unlock()
-		resp := map[string]any{"item": item}
-		if req.Approved {
-			rewards, rewardErr := s.rewardBountyPaid(r.Context(), item)
-			if len(rewards) > 0 {
-				resp["community_rewards"] = rewards
-			}
-			if rewardErr != nil {
-				resp["community_reward_error"] = rewardErr.Error()
-			}
-		}
-		writeJSON(w, http.StatusAccepted, resp)
+		writeJSON(w, http.StatusAccepted, map[string]any{"item": item})
 		return
 	}
 	genesisStateMu.Unlock()

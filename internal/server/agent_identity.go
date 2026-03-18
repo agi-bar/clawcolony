@@ -408,6 +408,13 @@ func (s *Server) authIdentityContractMiddleware(next http.Handler) http.Handler 
 
 func (s *Server) ownerAndPricingMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if s.tokenEconomyV2Enabled() {
+			// V2 no longer uses fixed pricedBusinessActions; charging happens in
+			// the handler-specific v2 economy paths (communication overage, tool
+			// pricing, treasury payouts, and explicit transfers).
+			next.ServeHTTP(w, r)
+			return
+		}
 		if r.Method != http.MethodPost && r.Method != http.MethodPut {
 			next.ServeHTTP(w, r)
 			return
@@ -781,18 +788,25 @@ func (s *Server) handleClaimComplete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.setOwnerSessionCookie(w, r, sessionToken, expiresAt)
-	grantAmount := s.cfg.RegistrationGrantToken
-	var grantBalance int64
-	if grantAmount > 0 {
-		if _, credit, grantErr := s.transferFromTreasury(r.Context(), reg.UserID, grantAmount); grantErr != nil {
-			log.Printf("registration_grant_failed user_id=%s amount=%d err=%v", reg.UserID, grantAmount, grantErr)
-		} else {
-			grantBalance = credit.BalanceAfter
-		}
+	_, _ = s.syncOwnerEconomyProfile(r.Context(), owner)
+	grantAmount := s.tokenPolicy().InitialToken
+	grantStatus := ""
+	if decision, grantErr := s.grantInitialTokenDecision(r.Context(), reg.UserID); grantErr != nil {
+		log.Printf("registration_initial_grant_failed user_id=%s amount=%d err=%v", reg.UserID, grantAmount, grantErr)
+		grantStatus = "error"
+	} else {
+		grantStatus = decision.Status
 	}
-	_, _ = s.store.SendMail(r.Context(), clawWorldSystemID, []string{reg.UserID},
-		"agent/claimed"+refTag(skillHeartbeat),
-		fmt.Sprintf("Your human buddy account claimed this agent identity. You received %d tokens to get started.", grantAmount))
+	var grantBalance int64
+	if balances, balErr := s.listTokenBalanceMap(r.Context()); balErr == nil {
+		grantBalance = balances[reg.UserID]
+	}
+	_, _ = s.store.SendMail(r.Context(), store.MailSendInput{
+		From:    clawWorldSystemID,
+		To:      []string{reg.UserID},
+		Subject: "agent/claimed" + refTag(skillHeartbeat),
+		Body:    fmt.Sprintf("Your human buddy account claimed this agent identity. Your initial token allocation is %d.", grantAmount),
+	})
 	writeJSON(w, http.StatusOK, map[string]any{
 		"user_id":       reg.UserID,
 		"status":        "active",
@@ -800,6 +814,7 @@ func (s *Server) handleClaimComplete(w http.ResponseWriter, r *http.Request) {
 		"owner":         owner,
 		"session_id":    session.SessionID,
 		"grant_tokens":  grantAmount,
+		"grant_status":  grantStatus,
 		"token_balance": grantBalance,
 		"message":       "Your agent identity is now active.",
 	})
@@ -905,6 +920,7 @@ func (s *Server) socialPolicyPayload() map[string]any {
 	gitHubCfg, gitHubEnabled := s.socialOAuthConfig("github")
 	return map[string]any{
 		"mode":                   "oauth_callback",
+		"economic":               !s.tokenEconomyV2Enabled(),
 		"connect_cooldown_secs":  int64(socialConnectCooldown / time.Second),
 		"manual_replay_strategy": "repeat connect/start after cooldown if the provider denied consent or the callback expired; rewards remain idempotent",
 		"providers": map[string]any{
@@ -916,6 +932,7 @@ func (s *Server) socialPolicyPayload() map[string]any {
 				"official_handle":       defaultOfficialXHandle,
 				"reward_auth_amount":    s.socialRewardAmountXAuth(),
 				"reward_mention_amount": s.socialRewardAmountXMention(),
+				"economic":              !s.tokenEconomyV2Enabled(),
 				"verification_mode":     "oauth_identity_proof",
 				"scopes":                xCfg.Scopes,
 			},
@@ -928,6 +945,7 @@ func (s *Server) socialPolicyPayload() map[string]any {
 				"reward_auth_amount": s.socialRewardAmountGitHubAuth(),
 				"reward_star_amount": s.socialRewardAmountGitHubStar(),
 				"reward_fork_amount": s.socialRewardAmountGitHubFork(),
+				"economic":           !s.tokenEconomyV2Enabled(),
 				"verification_mode":  "oauth_callback_and_provider_api",
 				"scopes":             gitHubCfg.Scopes,
 			},
@@ -1046,26 +1064,17 @@ func (s *Server) handleSocialXVerify(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	grant := store.SocialRewardGrant{
-		GrantKey:   fmt.Sprintf("social:x:mention:%s", strings.TrimSpace(req.UserID)),
-		UserID:     strings.TrimSpace(req.UserID),
-		Provider:   "x",
-		RewardType: "mention",
-		Amount:     s.socialRewardAmountXMention(),
-		MetaJSON:   mustMarshalJSON(map[string]any{"official_handle": defaultOfficialXHandle, "post_text": postText}),
-	}
-	reward, created, err := s.store.GrantSocialReward(r.Context(), grant)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
-		return
-	}
-	if created {
-		if _, err := s.store.Recharge(r.Context(), req.UserID, reward.Amount); err != nil {
-			writeError(w, http.StatusInternalServerError, err.Error())
-			return
-		}
-	}
-	writeJSON(w, http.StatusOK, map[string]any{"item": link, "reward": reward, "granted": created})
+	writeJSON(w, http.StatusOK, map[string]any{
+		"item":    link,
+		"granted": false,
+		"reward": map[string]any{
+			"provider":    "x",
+			"reward_type": "mention",
+			"amount":      0,
+			"granted":     false,
+			"economic":    false,
+		},
+	})
 }
 
 func (s *Server) handleSocialGitHubConnectStart(w http.ResponseWriter, r *http.Request) {
@@ -1126,6 +1135,14 @@ func (s *Server) handleSocialGitHubVerify(w http.ResponseWriter, r *http.Request
 }
 
 func (s *Server) grantSocialRewardForGitHub(ctx context.Context, userID, rewardType string, amount int64) map[string]any {
+	if s.tokenEconomyV2Enabled() {
+		return map[string]any{
+			"reward_type": rewardType,
+			"amount":      amount,
+			"granted":     false,
+			"economic":    false,
+		}
+	}
 	grant := store.SocialRewardGrant{
 		GrantKey:   fmt.Sprintf("social:github:%s:%s", rewardType, strings.TrimSpace(userID)),
 		UserID:     strings.TrimSpace(userID),
@@ -1179,6 +1196,65 @@ func (s *Server) handleSocialRewardsStatus(w http.ResponseWriter, r *http.Reques
 func (s *Server) handleTokenPricing(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	if s.tokenEconomyV2Enabled() {
+		policy := s.tokenPolicy()
+		items := []map[string]any{
+			{
+				"path":               "/api/v1/claims/github/complete",
+				"mode":               "owner_onboarding_direct_mint",
+				"settlement_source":  onboardingSettlementMint,
+				"github_bind_tokens": githubBindOnboardingReward,
+				"github_star_tokens": githubStarOnboardingReward,
+				"github_fork_tokens": githubForkOnboardingReward,
+			},
+			{
+				"path":                        "/api/v1/life/tax",
+				"mode":                        "per_tick",
+				"activated_tokens_per_tick":   policy.TaxPerTick(true),
+				"unactivated_tokens_per_tick": policy.TaxPerTick(false),
+				"hibernation_period_ticks":    policy.HibernationPeriodTicks,
+				"min_revival_balance":         policy.MinRevivalBalance,
+			},
+			{
+				"path":                          "/api/v1/communication/output",
+				"mode":                          "quota_plus_overage",
+				"activated_free_daily_tokens":   policy.DailyFreeComm(true),
+				"unactivated_free_daily_tokens": policy.DailyFreeComm(false),
+				"overage_rate_milli":            policy.CommOverageRateMilli,
+			},
+			{
+				"path":   "/api/v1/token/tip",
+				"mode":   "face_amount_only",
+				"tokens": 0,
+			},
+			{
+				"path":   "/api/v1/token/transfer",
+				"mode":   "face_amount_only",
+				"tokens": 0,
+			},
+			{
+				"path":              "/api/v1/users/register",
+				"mode":              "direct_mint",
+				"initial_tokens":    policy.InitialToken,
+				"settlement_source": onboardingSettlementMint,
+			},
+			{
+				"path":                 "/api/v1/tools/invoke",
+				"mode":                 "manifest_price_split",
+				"price_field":          "metadata.colony.price",
+				"creator_share_milli":  policy.ToolCreatorShareMilli,
+				"treasury_share_milli": 1000 - policy.ToolCreatorShareMilli,
+			},
+		}
+		sort.Slice(items, func(i, j int) bool {
+			return items[i]["path"].(string) < items[j]["path"].(string)
+		})
+		writeJSON(w, http.StatusOK, map[string]any{
+			"version": "v2",
+			"items":   items,
+		})
 		return
 	}
 	items := make([]pricedBusinessAction, 0, len(pricedBusinessActions))
@@ -1620,6 +1696,11 @@ func (s *Server) writeSocialCallbackSuccess(w http.ResponseWriter, r *http.Reque
 }
 
 func (s *Server) exchangeSocialOAuthCode(ctx context.Context, cfg socialOAuthProviderConfig, code, redirectURI, codeVerifier string) (string, error) {
+	if cfg.Provider == "github" {
+		if _, ok := s.githubOAuthMockProfile(""); ok {
+			return s.githubOAuthMockAccessTokenForCode(code), nil
+		}
+	}
 	form := neturl.Values{}
 	form.Set("grant_type", "authorization_code")
 	form.Set("code", strings.TrimSpace(code))
@@ -1663,6 +1744,13 @@ func (s *Server) exchangeSocialOAuthCode(ctx context.Context, cfg socialOAuthPro
 }
 
 func (s *Server) fetchGitHubViewer(ctx context.Context, accessToken string) (githubViewer, error) {
+	if profile, ok := s.githubOAuthMockProfile(accessToken); ok {
+		return githubViewer{
+			ID:    profile.UserID,
+			Login: profile.Login,
+			Name:  profile.Name,
+		}, nil
+	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, s.githubOAuthUserInfoURL(), nil)
 	if err != nil {
 		return githubViewer{}, err
@@ -1830,24 +1918,20 @@ func (s *Server) completeXOAuthCallback(ctx context.Context, ownerID, userID, ac
 	if err != nil {
 		return nil, err
 	}
-	grant := store.SocialRewardGrant{
-		GrantKey:   fmt.Sprintf("social:x:auth:%s", strings.TrimSpace(userID)),
-		UserID:     strings.TrimSpace(userID),
-		Provider:   "x",
-		RewardType: "auth_callback",
-		Amount:     s.socialRewardAmountXAuth(),
-		MetaJSON:   mustMarshalJSON(map[string]any{"provider_user_id": viewer.Data.ID, "username": viewer.Data.Username, "owner_id": ownerID}),
-	}
-	reward, created, err := s.store.GrantSocialReward(ctx, grant)
-	if err != nil {
-		return nil, err
-	}
-	if created {
-		if _, err := s.store.Recharge(ctx, userID, reward.Amount); err != nil {
-			return nil, err
-		}
-	}
-	return map[string]any{"item": link, "reward": reward, "granted": created, "handle": handle, "owner": owner}, nil
+	_, _ = s.syncOwnerEconomyProfile(ctx, owner)
+	return map[string]any{
+		"item":    link,
+		"granted": false,
+		"reward": map[string]any{
+			"provider":    "x",
+			"reward_type": "auth_callback",
+			"amount":      0,
+			"granted":     false,
+			"economic":    false,
+		},
+		"handle": handle,
+		"owner":  owner,
+	}, nil
 }
 
 func (s *Server) completeGitHubOAuthCallback(ctx context.Context, ownerID, userID, accessToken string) (map[string]any, error) {
@@ -1894,13 +1978,9 @@ func (s *Server) completeGitHubOAuthCallback(ctx context.Context, ownerID, userI
 	if err != nil {
 		return nil, err
 	}
-	grants := make([]map[string]any, 0, 3)
-	grants = append(grants, s.grantSocialRewardForGitHub(ctx, userID, "auth_callback", s.socialRewardAmountGitHubAuth()))
-	if starred {
-		grants = append(grants, s.grantSocialRewardForGitHub(ctx, userID, "star", s.socialRewardAmountGitHubStar()))
-	}
-	if forked {
-		grants = append(grants, s.grantSocialRewardForGitHub(ctx, userID, "fork", s.socialRewardAmountGitHubFork()))
+	grants, _, err := s.grantGitHubOnboardingRewards(ctx, owner, userID, starred, forked, "social.github.oauth")
+	if err != nil {
+		return nil, err
 	}
 	return map[string]any{
 		"item":     link,
@@ -1930,6 +2010,10 @@ func (s *Server) githubAPIBaseURL() string {
 }
 
 func (s *Server) verifyGitHubStar(ctx context.Context, username string) (bool, error) {
+	if _, ok := s.githubOAuthMockProfile(""); ok {
+		starred, _ := s.githubOAuthMockFlags(username)
+		return starred, nil
+	}
 	target := strings.ToLower(strings.TrimSpace(s.officialGitHubRepo()))
 	for page := 1; page <= maxGitHubVerificationPages; page++ {
 		var repos []githubRepoRecord
@@ -1952,6 +2036,10 @@ func (s *Server) verifyGitHubStar(ctx context.Context, username string) (bool, e
 }
 
 func (s *Server) verifyGitHubFork(ctx context.Context, username string) (bool, error) {
+	if _, ok := s.githubOAuthMockProfile(""); ok {
+		_, forked := s.githubOAuthMockFlags(username)
+		return forked, nil
+	}
 	target := strings.ToLower(strings.TrimSpace(s.officialGitHubRepo()))
 	for page := 1; page <= maxGitHubVerificationPages; page++ {
 		var repos []githubRepoRecord

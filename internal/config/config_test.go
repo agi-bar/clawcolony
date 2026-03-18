@@ -39,8 +39,8 @@ func TestFromEnvDefaults(t *testing.T) {
 	if cfg.ColonyRepoSync {
 		t.Fatal("ColonyRepoSync default should be false")
 	}
-	if !cfg.ActionCostConsume {
-		t.Fatal("ActionCostConsume default should be true")
+	if cfg.ActionCostConsume {
+		t.Fatal("ActionCostConsume default should be false under v2")
 	}
 	if cfg.AutonomyReminderIntervalTicks != 0 {
 		t.Fatalf("AutonomyReminderIntervalTicks default = %d, want 0", cfg.AutonomyReminderIntervalTicks)
@@ -54,23 +54,26 @@ func TestFromEnvDefaults(t *testing.T) {
 	if cfg.KBVotingReminderIntervalTicks != 0 {
 		t.Fatalf("KBVotingReminderIntervalTicks default = %d, want 0", cfg.KBVotingReminderIntervalTicks)
 	}
-	if cfg.RegistrationGrantToken != 10000 {
-		t.Fatalf("RegistrationGrantToken default = %d, want 10000", cfg.RegistrationGrantToken)
+	if cfg.TokenEconomyVersion != "v2" {
+		t.Fatalf("TokenEconomyVersion default = %q, want v2", cfg.TokenEconomyVersion)
 	}
-	if cfg.SocialRewardXAuth != 10000 {
-		t.Fatalf("SocialRewardXAuth default = %d, want 10000", cfg.SocialRewardXAuth)
+	if cfg.RegistrationGrantToken != 0 {
+		t.Fatalf("RegistrationGrantToken default = %d, want 0", cfg.RegistrationGrantToken)
 	}
-	if cfg.SocialRewardXMention != 10000 {
-		t.Fatalf("SocialRewardXMention default = %d, want 10000", cfg.SocialRewardXMention)
+	if cfg.InitialToken != 100000 {
+		t.Fatalf("InitialToken default = %d, want 100000", cfg.InitialToken)
 	}
-	if cfg.SocialRewardGitHubAuth != 10000 {
-		t.Fatalf("SocialRewardGitHubAuth default = %d, want 10000", cfg.SocialRewardGitHubAuth)
+	if cfg.TreasuryInitialToken != 1000000000 {
+		t.Fatalf("TreasuryInitialToken default = %d, want 1000000000", cfg.TreasuryInitialToken)
 	}
-	if cfg.SocialRewardGitHubStar != 10000 {
-		t.Fatalf("SocialRewardGitHubStar default = %d, want 10000", cfg.SocialRewardGitHubStar)
+	if cfg.DailyTaxUnactivated != 14400 || cfg.DailyTaxActivated != 7200 {
+		t.Fatalf("unexpected daily tax defaults: unactivated=%d activated=%d", cfg.DailyTaxUnactivated, cfg.DailyTaxActivated)
 	}
-	if cfg.SocialRewardGitHubFork != 10000 {
-		t.Fatalf("SocialRewardGitHubFork default = %d, want 10000", cfg.SocialRewardGitHubFork)
+	if cfg.DailyFreeCommUnactivated != 50000 || cfg.DailyFreeCommActivated != 200000 {
+		t.Fatalf("unexpected free comm defaults: unactivated=%d activated=%d", cfg.DailyFreeCommUnactivated, cfg.DailyFreeCommActivated)
+	}
+	if cfg.HibernationPeriodTicks != 1440 || cfg.MinRevivalBalance != 50000 {
+		t.Fatalf("unexpected hibernation defaults: period=%d min_revival=%d", cfg.HibernationPeriodTicks, cfg.MinRevivalBalance)
 	}
 }
 
@@ -84,6 +87,7 @@ func TestFromEnvParsesRuntimeFields(t *testing.T) {
 	t.Setenv("COLONY_REPO_BRANCH", "runtime-lite")
 	t.Setenv("COLONY_REPO_LOCAL_PATH", "/tmp/runtime-lite")
 	t.Setenv("COLONY_REPO_SYNC_ENABLED", "true")
+	t.Setenv("TOKEN_ECONOMY_VERSION", "v2")
 	t.Setenv("AUTONOMY_REMINDER_INTERVAL_TICKS", "240")
 	t.Setenv("COMMUNITY_COMM_REMINDER_INTERVAL_TICKS", "480")
 	t.Setenv("KB_ENROLLMENT_REMINDER_INTERVAL_TICKS", "360")
@@ -116,6 +120,9 @@ func TestFromEnvParsesRuntimeFields(t *testing.T) {
 	}
 	if !cfg.ColonyRepoSync {
 		t.Fatal("ColonyRepoSync should parse true")
+	}
+	if cfg.TokenEconomyVersion != "v2" {
+		t.Fatalf("TokenEconomyVersion = %q, want v2", cfg.TokenEconomyVersion)
 	}
 	if cfg.AutonomyReminderIntervalTicks != 240 {
 		t.Fatalf("AutonomyReminderIntervalTicks = %d, want 240", cfg.AutonomyReminderIntervalTicks)

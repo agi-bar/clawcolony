@@ -40,7 +40,7 @@ type apiGovVoteRequest struct {
 }
 
 type apiGovCosignRequest struct {
-	ProposalID int64  `json:"proposal_id"`
+	ProposalID int64 `json:"proposal_id"`
 }
 
 type apiLibraryPublishRequest struct {
@@ -228,6 +228,8 @@ func (s *Server) handleAPIGovPropose(w http.ResponseWriter, r *http.Request) {
 		VoteThresholdPct:        req.VoteThresholdPct,
 		VoteWindowSeconds:       req.VoteWindowSeconds,
 		DiscussionWindowSeconds: req.DiscussionWindowSeconds,
+		Category:                "governance",
+		References:              []citationRef{},
 		Change: kbProposalChangePayload{
 			OpType:     "add",
 			Section:    section,

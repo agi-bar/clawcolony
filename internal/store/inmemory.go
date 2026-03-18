@@ -70,29 +70,45 @@ type InMemoryStore struct {
 	ganglionInts         []GanglionIntegration
 	nextGanglionRateID   int64
 	ganglionRatings      []GanglionRating
+	ownerEconomyProfiles map[string]OwnerEconomyProfile
+	onboardingGrants     map[string]OwnerOnboardingGrant
+	commQuotaWindows     map[string]EconomyCommQuotaWindow
+	contributionEvents   map[string]EconomyContributionEvent
+	rewardDecisions      map[string]EconomyRewardDecision
+	knowledgeMetaByProp  map[int64]EconomyKnowledgeMeta
+	knowledgeMetaByEntry map[int64]EconomyKnowledgeMeta
+	toolEconomyMeta      map[string]EconomyToolMeta
 }
 
 func NewInMemory() *InMemoryStore {
 	return &InMemoryStore{
-		bots:               make(map[string]Bot),
-		agentRegistrations: make(map[string]AgentRegistration),
-		agentProfiles:      make(map[string]AgentProfile),
-		humanOwners:        make(map[string]HumanOwner),
-		humanOwnerByEmail:  make(map[string]string),
-		humanOwnerSessions: make(map[string]HumanOwnerSession),
-		agentBindings:      make(map[string]AgentHumanBinding),
-		socialLinks:        make(map[string]SocialLink),
-		socialRewardGrants: make(map[string]SocialRewardGrant),
-		accounts:           make(map[string]TokenAccount),
-		contacts:           make(map[string]map[string]MailContact),
-		collab:             make(map[string]CollabSession),
-		kbEntries:          make(map[int64]KBEntry),
-		kbProposals:        make(map[int64]KBProposal),
-		kbChanges:          make(map[int64]KBProposalChange),
-		tianDaoLaws:        make(map[string]TianDaoLaw),
-		worldSettings:      make(map[string]WorldSetting),
-		userLifeStates:     make(map[string]UserLifeState),
-		ganglia:            make(map[int64]Ganglion),
+		bots:                 make(map[string]Bot),
+		agentRegistrations:   make(map[string]AgentRegistration),
+		agentProfiles:        make(map[string]AgentProfile),
+		humanOwners:          make(map[string]HumanOwner),
+		humanOwnerByEmail:    make(map[string]string),
+		humanOwnerSessions:   make(map[string]HumanOwnerSession),
+		agentBindings:        make(map[string]AgentHumanBinding),
+		socialLinks:          make(map[string]SocialLink),
+		socialRewardGrants:   make(map[string]SocialRewardGrant),
+		accounts:             make(map[string]TokenAccount),
+		contacts:             make(map[string]map[string]MailContact),
+		collab:               make(map[string]CollabSession),
+		kbEntries:            make(map[int64]KBEntry),
+		kbProposals:          make(map[int64]KBProposal),
+		kbChanges:            make(map[int64]KBProposalChange),
+		tianDaoLaws:          make(map[string]TianDaoLaw),
+		worldSettings:        make(map[string]WorldSetting),
+		userLifeStates:       make(map[string]UserLifeState),
+		ganglia:              make(map[int64]Ganglion),
+		ownerEconomyProfiles: make(map[string]OwnerEconomyProfile),
+		onboardingGrants:     make(map[string]OwnerOnboardingGrant),
+		commQuotaWindows:     make(map[string]EconomyCommQuotaWindow),
+		contributionEvents:   make(map[string]EconomyContributionEvent),
+		rewardDecisions:      make(map[string]EconomyRewardDecision),
+		knowledgeMetaByProp:  make(map[int64]EconomyKnowledgeMeta),
+		knowledgeMetaByEntry: make(map[int64]EconomyKnowledgeMeta),
+		toolEconomyMeta:      make(map[string]EconomyToolMeta),
 	}
 }
 
@@ -260,6 +276,22 @@ func (s *InMemoryStore) GetTianDaoLaw(_ context.Context, lawKey string) (TianDao
 	return item, nil
 }
 
+func (s *InMemoryStore) ListTianDaoLaws(_ context.Context) ([]TianDaoLaw, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	items := make([]TianDaoLaw, 0, len(s.tianDaoLaws))
+	for _, item := range s.tianDaoLaws {
+		items = append(items, item)
+	}
+	sort.SliceStable(items, func(i, j int) bool {
+		if !items[i].CreatedAt.Equal(items[j].CreatedAt) {
+			return items[i].CreatedAt.Before(items[j].CreatedAt)
+		}
+		return items[i].LawKey < items[j].LawKey
+	})
+	return items, nil
+}
+
 func (s *InMemoryStore) AppendWorldTick(_ context.Context, item WorldTickRecord) (WorldTickRecord, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -384,10 +416,8 @@ func normalizeLifeState(state string) string {
 	switch strings.TrimSpace(strings.ToLower(state)) {
 	case "alive":
 		return "alive"
-	case "dying":
-		return "dying"
-	case "hibernated":
-		return "hibernated"
+	case "hibernating", "dying", "hibernated":
+		return "hibernating"
 	case "dead":
 		return "dead"
 	default:
@@ -662,57 +692,60 @@ func (s *InMemoryStore) UpsertWorldSetting(_ context.Context, item WorldSetting)
 	return item, nil
 }
 
-func (s *InMemoryStore) SendMail(_ context.Context, from string, to []string, subject, body string) (MailSendResult, error) {
+func (s *InMemoryStore) SendMail(_ context.Context, input MailSendInput) (MailSendResult, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	now := time.Now().UTC()
 	s.nextMessageID++
 	msgID := s.nextMessageID
 
-	for _, recipient := range to {
+	for _, recipient := range input.To {
 		if strings.TrimSpace(recipient) == "" {
 			continue
 		}
 		s.nextMailboxID++
 		s.mailbox = append(s.mailbox, MailItem{
-			MailboxID:    s.nextMailboxID,
-			MessageID:    msgID,
-			OwnerAddress: recipient,
-			Folder:       "inbox",
-			FromAddress:  from,
-			ToAddress:    recipient,
-			Subject:      subject,
-			Body:         body,
-			IsRead:       false,
-			SentAt:       now,
+			MailboxID:        s.nextMailboxID,
+			MessageID:        msgID,
+			OwnerAddress:     recipient,
+			Folder:           "inbox",
+			FromAddress:      input.From,
+			ToAddress:        recipient,
+			Subject:          input.Subject,
+			Body:             input.Body,
+			ReplyToMailboxID: input.ReplyToMailboxID,
+			IsRead:           false,
+			SentAt:           now,
 		})
 	}
 
-	for _, recipient := range to {
+	for _, recipient := range input.To {
 		if strings.TrimSpace(recipient) == "" {
 			continue
 		}
 		s.nextMailboxID++
 		s.mailbox = append(s.mailbox, MailItem{
-			MailboxID:    s.nextMailboxID,
-			MessageID:    msgID,
-			OwnerAddress: from,
-			Folder:       "outbox",
-			FromAddress:  from,
-			ToAddress:    recipient,
-			Subject:      subject,
-			Body:         body,
-			IsRead:       true,
-			SentAt:       now,
+			MailboxID:        s.nextMailboxID,
+			MessageID:        msgID,
+			OwnerAddress:     input.From,
+			Folder:           "outbox",
+			FromAddress:      input.From,
+			ToAddress:        recipient,
+			Subject:          input.Subject,
+			Body:             input.Body,
+			ReplyToMailboxID: input.ReplyToMailboxID,
+			IsRead:           true,
+			SentAt:           now,
 		})
 	}
 
 	return MailSendResult{
-		MessageID: msgID,
-		From:      from,
-		To:        append([]string(nil), to...),
-		Subject:   subject,
-		SentAt:    now,
+		MessageID:        msgID,
+		From:             input.From,
+		To:               append([]string(nil), input.To...),
+		Subject:          input.Subject,
+		ReplyToMailboxID: input.ReplyToMailboxID,
+		SentAt:           now,
 	}, nil
 }
 
@@ -754,6 +787,17 @@ func (s *InMemoryStore) ListMailbox(_ context.Context, ownerAddress, folder, sco
 		out = out[:limit]
 	}
 	return out, nil
+}
+
+func (s *InMemoryStore) GetMailboxItem(_ context.Context, mailboxID int64) (MailItem, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, item := range s.mailbox {
+		if item.MailboxID == mailboxID {
+			return item, nil
+		}
+	}
+	return MailItem{}, fmt.Errorf("mailbox item not found: %d", mailboxID)
 }
 
 func (s *InMemoryStore) MarkMailboxRead(_ context.Context, ownerAddress string, mailboxIDs []int64) error {
@@ -895,6 +939,71 @@ func (s *InMemoryStore) Consume(_ context.Context, botID string, amount int64) (
 	}
 	s.ledger = append(s.ledger, entry)
 	return entry, nil
+}
+
+func (s *InMemoryStore) Transfer(_ context.Context, fromBotID, toBotID string, amount int64) (TokenTransfer, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.transferLocked(fromBotID, toBotID, amount, false)
+}
+
+func (s *InMemoryStore) TransferWithFloor(_ context.Context, fromBotID, toBotID string, amount int64) (TokenTransfer, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.transferLocked(fromBotID, toBotID, amount, true)
+}
+
+func (s *InMemoryStore) transferLocked(fromBotID, toBotID string, amount int64, floor bool) (TokenTransfer, error) {
+	fromBotID = strings.TrimSpace(fromBotID)
+	toBotID = strings.TrimSpace(toBotID)
+	if fromBotID == "" || toBotID == "" || amount <= 0 || fromBotID == toBotID {
+		return TokenTransfer{}, nil
+	}
+	s.ensureBot(fromBotID)
+	s.ensureBot(toBotID)
+	from := s.accounts[fromBotID]
+	to := s.accounts[toBotID]
+	deducted := amount
+	if from.Balance < deducted && !floor {
+		return TokenTransfer{}, ErrInsufficientBalance
+	}
+	if from.Balance < deducted && floor {
+		deducted = from.Balance
+	}
+	if deducted <= 0 {
+		return TokenTransfer{}, nil
+	}
+	if deducted > 0 && to.Balance > (math.MaxInt64-deducted) {
+		return TokenTransfer{}, ErrBalanceOverflow
+	}
+	from.Balance -= deducted
+	from.UpdatedAt = time.Now().UTC()
+	s.accounts[fromBotID] = from
+	s.nextLedgerID++
+	fromEntry := TokenLedger{
+		ID:           s.nextLedgerID,
+		BotID:        fromBotID,
+		OpType:       "consume",
+		Amount:       deducted,
+		BalanceAfter: from.Balance,
+		CreatedAt:    time.Now().UTC(),
+	}
+	s.ledger = append(s.ledger, fromEntry)
+
+	to.Balance += deducted
+	to.UpdatedAt = time.Now().UTC()
+	s.accounts[toBotID] = to
+	s.nextLedgerID++
+	toEntry := TokenLedger{
+		ID:           s.nextLedgerID,
+		BotID:        toBotID,
+		OpType:       "recharge",
+		Amount:       deducted,
+		BalanceAfter: to.Balance,
+		CreatedAt:    time.Now().UTC(),
+	}
+	s.ledger = append(s.ledger, toEntry)
+	return TokenTransfer{Deducted: deducted, FromLedger: fromEntry, ToLedger: toEntry}, nil
 }
 
 func (s *InMemoryStore) ListTokenLedger(_ context.Context, botID string, limit int) ([]TokenLedger, error) {

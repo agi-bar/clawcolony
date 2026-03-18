@@ -373,9 +373,9 @@ func TestAPIEventsReturnsLifeDetailedEventsAndSupportsUserFilter(t *testing.T) {
 		t.Fatalf("life state created event should expose bilingual readable titles: %+v", *created)
 	}
 
-	dying := findAPIEventByKindAndTarget(resp.Items, "life.dying.entered", fixture.dyingUserID)
-	if dying == nil || dying.ImpactLevel != "warning" {
-		t.Fatalf("expected warning life.dying.entered event, got=%+v", dying)
+	hibernating := findAPIEventByKindAndTarget(resp.Items, "life.hibernation.entered", fixture.dyingUserID)
+	if hibernating == nil || hibernating.ImpactLevel != "warning" {
+		t.Fatalf("expected warning life.hibernation.entered event, got=%+v", hibernating)
 	}
 
 	dead := findAPIEventByKindAndTarget(resp.Items, "life.dead.marked", fixture.dyingUserID)
@@ -386,12 +386,12 @@ func TestAPIEventsReturnsLifeDetailedEventsAndSupportsUserFilter(t *testing.T) {
 		t.Fatalf("life.dead.marked should explain user-visible impact: %+v", *dead)
 	}
 
-	wake := findAPIEventByKindAndTarget(resp.Items, "life.wake.succeeded", fixture.wakeUserID)
-	if wake == nil {
-		t.Fatalf("expected life.wake.succeeded event, body=%s", w.Body.String())
+	revived := findAPIEventByKindAndTarget(resp.Items, "life.hibernation.revived", fixture.wakeUserID)
+	if revived == nil {
+		t.Fatalf("expected life.hibernation.revived event, body=%s", w.Body.String())
 	}
-	if len(wake.Actors) != 1 || wake.Actors[0].DisplayName != "lobster-healer" {
-		t.Fatalf("wake event should retain actor display_name fallback: %+v", *wake)
+	if len(revived.Targets) != 1 || revived.Targets[0].UserID != fixture.wakeUserID {
+		t.Fatalf("revival event should target the revived user: %+v", *revived)
 	}
 
 	w = doJSONRequest(t, srv.mux, http.MethodGet, "/api/v1/events?user_id="+fixture.dyingUserID+"&limit=50", nil)
@@ -410,9 +410,6 @@ func TestAPIEventsReturnsLifeDetailedEventsAndSupportsUserFilter(t *testing.T) {
 	for _, it := range scoped.Items {
 		if !apiEventInvolvesUser(it, fixture.dyingUserID) {
 			t.Fatalf("user filter returned unrelated item: %+v", it)
-		}
-		if it.Category != "life" {
-			t.Fatalf("current user-scoped slice should only contain life events: %+v", it)
 		}
 	}
 }
@@ -835,12 +832,15 @@ func TestAPIEventsReturnsCommunicationDetailedEvents(t *testing.T) {
 	if findAPIEvent(scoped.Items, "communication.mail.sent", "mail_message", strconv.FormatInt(fixture.directMessageID, 10)) == nil {
 		t.Fatalf("recipient-scoped events should include the direct mail sent event: %+v", scoped.Items)
 	}
-	received := findAPIEvent(scoped.Items, "communication.mail.received", "mailbox_item", strconv.FormatInt(fixture.directInboxMailboxID, 10))
+	received := findAPIEvent(scoped.Items, "communication.mail.received", "mail_message", strconv.FormatInt(fixture.directMessageID, 10))
 	if received == nil {
 		t.Fatalf("expected recipient-scoped direct mail received event, body=%s", w.Body.String())
 	}
 	if !strings.Contains(received.SummaryEN, "design sync") {
 		t.Fatalf("mail received should expose readable bilingual summary: %+v", *received)
+	}
+	if _, ok := received.Evidence["mailbox_id"]; ok {
+		t.Fatalf("mail received event should not leak mailbox_id: %+v", received.Evidence)
 	}
 	if leaked := findAPIEvent(scoped.Items, "communication.mail.sent", "mail_message", strconv.FormatInt(fixture.unrelatedMessageID, 10)); leaked != nil {
 		t.Fatalf("recipient-scoped events should not include third-party outbox mail: %+v", *leaked)
@@ -848,17 +848,23 @@ func TestAPIEventsReturnsCommunicationDetailedEvents(t *testing.T) {
 	if leakedContact := findAPIEvent(scoped.Items, "communication.contact.updated", "mail_contact", fixture.contactObjectID); leakedContact != nil {
 		t.Fatalf("recipient-scoped events should not include another user's private contact metadata: %+v", *leakedContact)
 	}
-	reminderTriggered := findAPIEvent(scoped.Items, "communication.reminder.triggered", "mail_reminder", strconv.FormatInt(fixture.reminderMailboxID, 10))
+	reminderTriggered := findAPIEvent(scoped.Items, "communication.reminder.triggered", "mail_reminder", strconv.FormatInt(fixture.reminderMessageID, 10))
 	if reminderTriggered == nil {
 		t.Fatalf("expected reminder triggered event, body=%s", w.Body.String())
 	}
 	if reminderTriggered.Actors[0].DisplayName != "Clawcolony" {
 		t.Fatalf("reminder sender should use the user-facing system actor name: %+v", *reminderTriggered)
 	}
-	if findAPIEvent(scoped.Items, "communication.reminder.resolved", "mail_reminder", strconv.FormatInt(fixture.reminderMailboxID, 10)) == nil {
+	if got := reminderTriggered.Evidence["reminder_id"]; got != float64(fixture.reminderMessageID) {
+		t.Fatalf("reminder triggered should expose reminder_id, got=%v", got)
+	}
+	if _, ok := reminderTriggered.Evidence["mailbox_id"]; ok {
+		t.Fatalf("reminder event should not leak mailbox_id: %+v", reminderTriggered.Evidence)
+	}
+	if findAPIEvent(scoped.Items, "communication.reminder.resolved", "mail_reminder", strconv.FormatInt(fixture.reminderMessageID, 10)) == nil {
 		t.Fatalf("recipient-scoped events should include the reminder resolution event: %+v", scoped.Items)
 	}
-	if duplicateReminderMail := findAPIEvent(scoped.Items, "communication.mail.received", "mailbox_item", strconv.FormatInt(fixture.reminderMailboxID, 10)); duplicateReminderMail != nil {
+	if duplicateReminderMail := findAPIEvent(scoped.Items, "communication.mail.received", "mail_message", strconv.FormatInt(fixture.reminderMessageID, 10)); duplicateReminderMail != nil {
 		t.Fatalf("recognized reminder mail should not also appear as a generic received mail event: %+v", *duplicateReminderMail)
 	}
 }
@@ -1356,7 +1362,7 @@ type lifeEventsFixture struct {
 
 func seedLifeEventsFixture(t *testing.T, srv *Server, ctx context.Context) lifeEventsFixture {
 	t.Helper()
-	srv.cfg.DeathGraceTicks = 1
+	srv.cfg.HibernationPeriodTicks = 1
 
 	dyingUserID, _ := seedActiveUserWithAPIKey(t, srv)
 	nickname := "小钳"
@@ -1383,31 +1389,21 @@ func seedLifeEventsFixture(t *testing.T, srv *Server, ctx context.Context) lifeE
 		t.Fatalf("run life transitions tick3: %v", err)
 	}
 
-	wakeUserID, wakeUserAPIKey := seedActiveUserWithAPIKey(t, srv)
-	wakeActor := newAuthUser(t, srv)
-	wakeNickname := "lobster-healer"
-	if _, err := srv.store.UpsertBot(ctx, store.BotUpsertInput{
-		BotID:       wakeActor.id,
-		Name:        "wake-actor",
-		Nickname:    &wakeNickname,
-		Provider:    "openclaw",
-		Status:      "running",
-		Initialized: true,
-	}); err != nil {
-		t.Fatalf("set wake actor nickname: %v", err)
+	wakeUserID, _ := seedActiveUserWithAPIKey(t, srv)
+	if err := srv.runLifeStateTransitions(ctx, 4); err != nil {
+		t.Fatalf("run life transitions tick4: %v", err)
 	}
-	w := doJSONRequestWithHeaders(t, srv.mux, http.MethodPost, "/api/v1/life/hibernate", map[string]any{
-		"reason": "manual-rest",
-	}, apiKeyHeaders(wakeUserAPIKey))
-	if w.Code != http.StatusAccepted {
-		t.Fatalf("hibernate status=%d body=%s", w.Code, w.Body.String())
+	if _, err := srv.store.Consume(ctx, wakeUserID, 1000); err != nil {
+		t.Fatalf("consume all balance for wake user: %v", err)
 	}
-	w = doJSONRequestWithHeaders(t, srv.mux, http.MethodPost, "/api/v1/life/wake", map[string]any{
-		"user_id": wakeUserID,
-		"reason":  "manual-wake",
-	}, wakeActor.headers())
-	if w.Code != http.StatusAccepted {
-		t.Fatalf("wake status=%d body=%s", w.Code, w.Body.String())
+	if err := srv.runLifeStateTransitions(ctx, 5); err != nil {
+		t.Fatalf("run life transitions tick5: %v", err)
+	}
+	if _, err := srv.store.Recharge(ctx, wakeUserID, srv.cfg.MinRevivalBalance); err != nil {
+		t.Fatalf("recharge wake user for revival: %v", err)
+	}
+	if err := srv.runLifeStateTransitions(ctx, 6); err != nil {
+		t.Fatalf("run life transitions tick6: %v", err)
 	}
 
 	return lifeEventsFixture{
@@ -1525,15 +1521,14 @@ type collaborationEventsFixture struct {
 }
 
 type communicationEventsFixture struct {
-	senderUserID         string
-	recipientUserID      string
-	directMessageID      int64
-	directInboxMailboxID int64
-	broadcastMessageID   int64
-	unrelatedMessageID   int64
-	reminderMailboxID    int64
-	contactObjectID      string
-	listID               string
+	senderUserID       string
+	recipientUserID    string
+	directMessageID    int64
+	broadcastMessageID int64
+	unrelatedMessageID int64
+	reminderMessageID  int64
+	contactObjectID    string
+	listID             string
 }
 
 type economyIdentityEventsFixture struct {
@@ -1590,6 +1585,8 @@ func seedKnowledgeEventsFixture(t *testing.T, srv *Server, ctx context.Context) 
 			"vote_threshold_pct":        80,
 			"vote_window_seconds":       300,
 			"discussion_window_seconds": 300,
+			"category":                  "governance",
+			"references":                []map[string]any{},
 			"change": map[string]any{
 				"op_type":     "add",
 				"section":     "governance",
@@ -1671,6 +1668,8 @@ func seedKnowledgeEventsFixture(t *testing.T, srv *Server, ctx context.Context) 
 	revisionResp := doJSONRequestWithHeaders(t, srv.mux, http.MethodPost, "/api/v1/kb/proposals/revise", map[string]any{
 		"proposal_id":      approvedProposalID,
 		"base_revision_id": baseRevisionID,
+		"category":         "governance",
+		"references":       []map[string]any{},
 		"change": map[string]any{
 			"op_type":     "add",
 			"section":     "governance",
@@ -2010,7 +2009,12 @@ func seedCommunicationEventsFixture(t *testing.T, srv *Server, ctx context.Conte
 		t.Fatalf("decode mail send-list response: %v", err)
 	}
 
-	if _, err := srv.store.SendMail(ctx, clawWorldSystemID, []string{recipientUserID}, "[KNOWLEDGEBASE-PROPOSAL][PINNED][PRIORITY:P1][ACTION:VOTE] #11 kb-topic", "Please review proposal #11 and cast a vote."); err != nil {
+	if _, err := srv.store.SendMail(ctx, store.MailSendInput{
+		From:    clawWorldSystemID,
+		To:      []string{recipientUserID},
+		Subject: "[KNOWLEDGEBASE-PROPOSAL][PINNED][PRIORITY:P1][ACTION:VOTE] #11 kb-topic",
+		Body:    "Please review proposal #11 and cast a vote.",
+	}); err != nil {
 		t.Fatalf("seed reminder mail: %v", err)
 	}
 
@@ -2051,20 +2055,26 @@ func seedCommunicationEventsFixture(t *testing.T, srv *Server, ctx context.Conte
 	}
 
 	return communicationEventsFixture{
-		senderUserID:         senderUserID,
-		recipientUserID:      recipientUserID,
-		directMessageID:      directSend.Item.MessageID,
-		directInboxMailboxID: directInbox[0].MailboxID,
-		broadcastMessageID:   listSend.Item.MessageID,
-		unrelatedMessageID:   unrelatedSend.Item.MessageID,
-		reminderMailboxID:    reminderInbox[0].MailboxID,
-		contactObjectID:      senderUserID + ":" + recipientUserID,
-		listID:               listCreate.Item.ListID,
+		senderUserID:       senderUserID,
+		recipientUserID:    recipientUserID,
+		directMessageID:    directSend.Item.MessageID,
+		broadcastMessageID: listSend.Item.MessageID,
+		unrelatedMessageID: unrelatedSend.Item.MessageID,
+		reminderMessageID:  reminderInbox[0].MessageID,
+		contactObjectID:    senderUserID + ":" + recipientUserID,
+		listID:             listCreate.Item.ListID,
 	}
 }
 
 func seedEconomyIdentityEventsFixture(t *testing.T, srv *Server, ctx context.Context) economyIdentityEventsFixture {
 	t.Helper()
+
+	if _, err := srv.ensureTreasuryAccount(ctx); err != nil {
+		t.Fatalf("ensure treasury account: %v", err)
+	}
+	if _, err := srv.store.Recharge(ctx, clawTreasurySystemID, 1000); err != nil {
+		t.Fatalf("seed treasury balance: %v", err)
+	}
 
 	sender := newAuthUser(t, srv)
 	recipient := newAuthUser(t, srv)

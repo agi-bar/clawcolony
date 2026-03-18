@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"clawcolony/internal/economy"
 	"clawcolony/internal/store"
 )
 
@@ -151,6 +152,15 @@ func cloneRewardMeta(in map[string]any) map[string]any {
 	return out
 }
 
+func rewardPriorityForRule(ruleKey string) int {
+	switch strings.TrimSpace(strings.ToLower(ruleKey)) {
+	case "governance.vote", "governance.cosign", "governance.entered_voting", "governance.constitution.bonus":
+		return economy.RewardPriorityGovernance
+	default:
+		return economy.RewardPriorityContribution
+	}
+}
+
 func splitRewardEvenly(total int64, users []string) map[string]int64 {
 	normalized := normalizeDistinctUserIDs(users)
 	out := map[string]int64{}
@@ -193,6 +203,58 @@ func (s *Server) ensureCommunityRewards(ctx context.Context, spec communityRewar
 	}
 	if len(spec.Recipients) == 0 {
 		return nil, nil
+	}
+	if s.tokenEconomyV2Enabled() {
+		results := make([]communityRewardResult, 0, len(spec.Recipients))
+		ordered := make([]string, 0, len(spec.Recipients))
+		normalizedRecipients := make(map[string]int64, len(spec.Recipients))
+		for uid, amount := range spec.Recipients {
+			uid = strings.TrimSpace(uid)
+			if isExcludedTokenUserID(uid) || amount <= 0 {
+				continue
+			}
+			normalizedRecipients[uid] += amount
+		}
+		for uid := range normalizedRecipients {
+			ordered = append(ordered, uid)
+		}
+		sort.Strings(ordered)
+		for _, uid := range ordered {
+			amount := normalizedRecipients[uid]
+			decisionKey := rewardGrantKey(spec.RuleKey, spec.ResourceType, spec.ResourceID, uid)
+			meta := cloneRewardMeta(spec.Meta)
+			if meta == nil {
+				meta = map[string]any{}
+			}
+			meta["recipient_user_id"] = uid
+			decision, err := s.applyRewardDecision(ctx, economyRewardDecision{
+				DecisionKey:     decisionKey,
+				RuleKey:         spec.RuleKey,
+				ResourceType:    spec.ResourceType,
+				ResourceID:      spec.ResourceID,
+				RecipientUserID: uid,
+				Amount:          amount,
+				Priority:        rewardPriorityForRule(spec.RuleKey),
+				Meta:            meta,
+			})
+			if err != nil {
+				return nil, err
+			}
+			results = append(results, communityRewardResult{
+				GrantKey:        decision.DecisionKey,
+				RuleKey:         decision.RuleKey,
+				ResourceType:    decision.ResourceType,
+				ResourceID:      decision.ResourceID,
+				RecipientUserID: decision.RecipientUserID,
+				Amount:          decision.Amount,
+				Applied:         decision.Status == "applied",
+				LedgerID:        decision.LedgerID,
+				BalanceAfter:    decision.BalanceAfter,
+				CreatedAt:       decision.CreatedAt,
+				Meta:            cloneRewardMeta(decision.Meta),
+			})
+		}
+		return buildCommunityRewardResults(results), nil
 	}
 
 	type pendingReward struct {
@@ -351,6 +413,9 @@ func (s *Server) ensureCommunityRewards(ctx context.Context, spec communityRewar
 }
 
 func (s *Server) rewardKBProposalApplied(ctx context.Context, proposal store.KBProposal) ([]communityRewardResult, error) {
+	if s.tokenEconomyV2Enabled() {
+		return nil, nil
+	}
 	recipient := strings.TrimSpace(proposal.ProposerUserID)
 	if isExcludedTokenUserID(recipient) {
 		return nil, nil
@@ -368,6 +433,9 @@ func (s *Server) rewardKBProposalApplied(ctx context.Context, proposal store.KBP
 }
 
 func (s *Server) rewardCollabClosed(ctx context.Context, session store.CollabSession) ([]communityRewardResult, error) {
+	if s.tokenEconomyV2Enabled() {
+		return nil, nil
+	}
 	if strings.TrimSpace(strings.ToLower(session.Phase)) != "closed" {
 		return nil, nil
 	}
@@ -480,6 +548,9 @@ func (s *Server) rewardUpgradePRTerminal(ctx context.Context, session store.Coll
 }
 
 func (s *Server) rewardBountyPaid(ctx context.Context, item bountyItem) ([]communityRewardResult, error) {
+	if s.tokenEconomyV2Enabled() {
+		return nil, nil
+	}
 	recipient := strings.TrimSpace(item.ReleasedTo)
 	if isExcludedTokenUserID(recipient) {
 		return nil, nil
@@ -500,6 +571,9 @@ func (s *Server) rewardBountyPaid(ctx context.Context, item bountyItem) ([]commu
 }
 
 func (s *Server) rewardGangliaIntegrated(ctx context.Context, integration store.GanglionIntegration, ganglion store.Ganglion) ([]communityRewardResult, error) {
+	if s.tokenEconomyV2Enabled() {
+		return nil, nil
+	}
 	authorID := strings.TrimSpace(ganglion.AuthorUserID)
 	if isExcludedTokenUserID(authorID) || authorID == strings.TrimSpace(integration.UserID) {
 		return nil, nil
@@ -729,6 +803,117 @@ func normalizeTaskMarketSource(raw string) string {
 	}
 }
 
+func (s *Server) economyRewardDecisionExists(ctx context.Context, decisionKey string) (bool, error) {
+	decisionKey = strings.TrimSpace(decisionKey)
+	if decisionKey == "" {
+		return false, nil
+	}
+	if _, err := s.store.GetEconomyRewardDecision(ctx, decisionKey); err != nil {
+		if strings.Contains(strings.ToLower(err.Error()), "not found") {
+			return false, nil
+		}
+		return false, err
+	}
+	return true, nil
+}
+
+func containsUserID(ids []string, userID string) bool {
+	userID = strings.TrimSpace(userID)
+	if userID == "" {
+		return false
+	}
+	for _, item := range ids {
+		if strings.EqualFold(strings.TrimSpace(item), userID) {
+			return true
+		}
+	}
+	return false
+}
+
+func (s *Server) collectUpgradePRTaskMarketItemsV2(ctx context.Context, viewerUserID string) ([]tokenTaskMarketItem, error) {
+	viewerUserID = strings.TrimSpace(viewerUserID)
+	if viewerUserID == "" {
+		return nil, nil
+	}
+	sessions, err := s.store.ListCollabSessions(ctx, "upgrade_pr", "", "", 200)
+	if err != nil {
+		return nil, err
+	}
+	items := make([]tokenTaskMarketItem, 0)
+	for _, session := range sessions {
+		phase := strings.ToLower(strings.TrimSpace(session.Phase))
+		prState := strings.ToLower(strings.TrimSpace(session.GitHubPRState))
+		if phase != "closed" && phase != "failed" && prState != "merged" && prState != "closed" {
+			continue
+		}
+		authorUserID := strings.TrimSpace(upgradePRAuthorUserID(session))
+		if prState == "merged" && viewerUserID == authorUserID {
+			decisionKey := rewardGrantKey(communityRewardRuleUpgradePRAuthor, "collab.session", session.CollabID, viewerUserID)
+			exists, err := s.economyRewardDecisionExists(ctx, decisionKey)
+			if err != nil {
+				return nil, err
+			}
+			if !exists {
+				items = append(items, tokenTaskMarketItem{
+					TaskID:               "upgrade-pr-claim:author:" + session.CollabID,
+					Source:               tokenTaskMarketSourceSystem,
+					Module:               "collab",
+					Status:               "open",
+					Title:                session.Title,
+					Summary:              "Claim author reward for terminal upgrade_pr",
+					RewardToken:          communityRewardAmountUpgradePRAuthor,
+					CommunityRewardToken: communityRewardAmountUpgradePRAuthor,
+					RewardRuleKey:        communityRewardRuleUpgradePRAuthor,
+					LinkedResourceType:   "collab.session",
+					LinkedResourceID:     session.CollabID,
+					OwnerUserID:          authorUserID,
+					AssigneeUserID:       viewerUserID,
+					ActionPath:           "/api/v1/token/reward/upgrade-pr-claim",
+					CreatedAt:            session.CreatedAt,
+					UpdatedAt:            session.UpdatedAt,
+				})
+			}
+		}
+		if strings.TrimSpace(session.PRURL) == "" {
+			continue
+		}
+		status, err := s.evaluateUpgradePRReviews(ctx, session, session.PRHeadSHA)
+		if err != nil {
+			return nil, err
+		}
+		if !containsUserID(status.RewardEligibleReviewerIDs, viewerUserID) {
+			continue
+		}
+		decisionKey := rewardGrantKey(communityRewardRuleUpgradePRReviewer, "collab.session", session.CollabID, viewerUserID)
+		exists, err := s.economyRewardDecisionExists(ctx, decisionKey)
+		if err != nil {
+			return nil, err
+		}
+		if exists {
+			continue
+		}
+		items = append(items, tokenTaskMarketItem{
+			TaskID:               "upgrade-pr-claim:reviewer:" + session.CollabID + ":" + viewerUserID,
+			Source:               tokenTaskMarketSourceSystem,
+			Module:               "collab",
+			Status:               "open",
+			Title:                session.Title,
+			Summary:              "Claim reviewer reward for terminal upgrade_pr",
+			RewardToken:          communityRewardAmountUpgradePRReviewer,
+			CommunityRewardToken: communityRewardAmountUpgradePRReviewer,
+			RewardRuleKey:        communityRewardRuleUpgradePRReviewer,
+			LinkedResourceType:   "collab.session",
+			LinkedResourceID:     session.CollabID,
+			OwnerUserID:          authorUserID,
+			AssigneeUserID:       viewerUserID,
+			ActionPath:           "/api/v1/token/reward/upgrade-pr-claim",
+			CreatedAt:            session.CreatedAt,
+			UpdatedAt:            session.UpdatedAt,
+		})
+	}
+	return items, nil
+}
+
 func (s *Server) handleTokenTaskMarket(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
@@ -811,10 +996,10 @@ func (s *Server) collectManualBountyMarketItems(ctx context.Context, module, sta
 			Status:               st,
 			Title:                fmt.Sprintf("Bounty #%d", it.BountyID),
 			Summary:              strings.TrimSpace(it.Description),
-			RewardToken:          it.Reward + communityRewardAmountBountyPaid,
+			RewardToken:          it.Reward,
 			EscrowRewardToken:    it.Reward,
-			CommunityRewardToken: communityRewardAmountBountyPaid,
-			RewardRuleKey:        communityRewardRuleBountyPaid,
+			CommunityRewardToken: 0,
+			RewardRuleKey:        "",
 			LinkedResourceType:   "bounty",
 			LinkedResourceID:     fmt.Sprintf("%d", it.BountyID),
 			OwnerUserID:          strings.TrimSpace(it.PosterUserID),
@@ -832,6 +1017,17 @@ func (s *Server) collectSystemTaskMarketItems(ctx context.Context, viewerUserID,
 	viewerUserID = strings.TrimSpace(viewerUserID)
 	if status != "" && status != "open" {
 		return nil, nil
+	}
+	if s.tokenEconomyV2Enabled() {
+		items := make([]tokenTaskMarketItem, 0)
+		if module == "" || module == "collab" {
+			upgradeItems, err := s.collectUpgradePRTaskMarketItemsV2(ctx, viewerUserID)
+			if err != nil {
+				return nil, err
+			}
+			items = append(items, upgradeItems...)
+		}
+		return items, nil
 	}
 	items := make([]tokenTaskMarketItem, 0)
 	if module == "" || module == "kb" {

@@ -403,10 +403,10 @@ func TestAPIColonyChronicleIncludesHighValueDetailedEventAggregates(t *testing.T
 	} else if len(dead.Targets) != 1 || dead.Targets[0].UserID != life.dyingUserID || dead.ImpactLevel != "critical" {
 		t.Fatalf("life dead chronicle event should target the dead user: %+v", *dead)
 	}
-	if wake := findByKindAndTarget("life.wake.succeeded", life.wakeUserID); wake == nil {
-		t.Fatalf("expected life wake chronicle event, body=%s", w.Body.String())
-	} else if len(wake.Targets) != 1 || wake.Targets[0].UserID != life.wakeUserID {
-		t.Fatalf("life wake chronicle event should target the woken user: %+v", *wake)
+	if revived := findByKindAndTarget("life.hibernation.revived", life.wakeUserID); revived == nil {
+		t.Fatalf("expected life revival chronicle event, body=%s", w.Body.String())
+	} else if len(revived.Targets) != 1 || revived.Targets[0].UserID != life.wakeUserID {
+		t.Fatalf("life revival chronicle event should target the revived user: %+v", *revived)
 	}
 
 	if started := find("collaboration.started", "collab_session", collab.successCollabID); started == nil {

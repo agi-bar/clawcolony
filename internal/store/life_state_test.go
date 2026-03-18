@@ -19,9 +19,9 @@ func TestInMemoryUpsertUserLifeStateRecordsTransitions(t *testing.T) {
 	}
 	if _, err := s.UpsertUserLifeState(ctx, UserLifeState{
 		UserID: "lobster-alice",
-		State:  "dying",
+		State:  "hibernating",
 	}); err != nil {
-		t.Fatalf("upsert dying state: %v", err)
+		t.Fatalf("upsert hibernating state: %v", err)
 	}
 
 	items, err := s.ListUserLifeStateTransitions(ctx, UserLifeStateTransitionFilter{
@@ -34,7 +34,7 @@ func TestInMemoryUpsertUserLifeStateRecordsTransitions(t *testing.T) {
 	if len(items) != 2 {
 		t.Fatalf("expected two transitions, got=%d items=%+v", len(items), items)
 	}
-	if items[0].ToState != "dying" || items[0].SourceRef != "store.upsert" {
+	if items[0].ToState != "hibernating" || items[0].SourceRef != "store.upsert" {
 		t.Fatalf("unexpected latest transition: %+v", items[0])
 	}
 	if items[1].ToState != "alive" || items[1].SourceRef != "store.upsert" {

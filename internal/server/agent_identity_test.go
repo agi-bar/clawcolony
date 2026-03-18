@@ -328,12 +328,18 @@ func TestManagedAgentRequiresOwnerSessionAndTokenBalance(t *testing.T) {
 	defer xOAuth.Close()
 
 	srv := newTestServer()
-	srv.cfg.RegistrationGrantToken = 0 // disable grant to test pricing in isolation
 	h := identityTestHandler(srv)
 
 	userID, apiKey, claimLink := registerAgentForTest(t, h, "managed-agent", "mail")
 	_, cookie := claimAgentForTest(t, h, claimLink, "managed@example.com", "human-manager")
 	recipient := seedActiveUser(t, srv)
+	initialBalance := tokenBalanceForUser(t, srv, userID)
+	if initialBalance <= 0 {
+		t.Fatalf("expected initial token balance after claim, got=%d", initialBalance)
+	}
+	if _, err := srv.store.Consume(t.Context(), userID, initialBalance); err != nil {
+		t.Fatalf("drain claimed balance: %v", err)
+	}
 
 	unauth := doJSONRequest(t, h, http.MethodPost, "/api/v1/mail/send", map[string]any{
 		"to_user_ids": []string{recipient},
@@ -344,30 +350,33 @@ func TestManagedAgentRequiresOwnerSessionAndTokenBalance(t *testing.T) {
 		t.Fatalf("expected unauthorized without cookie, got=%d body=%s", unauth.Code, unauth.Body.String())
 	}
 
+	oversizedBody := strings.Repeat("a", int(srv.cfg.DailyFreeCommUnactivated)+1)
 	noFunds := doJSONRequestWithHeaders(t, h, http.MethodPost, "/api/v1/mail/send", map[string]any{
 		"to_user_ids": []string{recipient},
-		"subject":     "hello",
-		"body":        "world",
+		"subject":     "quota-burst",
+		"body":        oversizedBody,
 	}, map[string]string{"Cookie": cookie, "Authorization": "Bearer " + apiKey})
 	if noFunds.Code != http.StatusPaymentRequired {
 		t.Fatalf("expected payment required, got=%d body=%s", noFunds.Code, noFunds.Body.String())
 	}
 
-	rewardAgentViaXOAuthForTest(t, h, userID, cookie)
+	if _, err := srv.store.Recharge(t.Context(), userID, 1000); err != nil {
+		t.Fatalf("recharge user for overage send: %v", err)
+	}
 
 	balance := doJSONRequestWithHeaders(t, h, http.MethodGet, "/api/v1/token/balance", nil, apiKeyHeaders(apiKey))
 	if balance.Code != http.StatusOK {
 		t.Fatalf("expected rewarded balance read, got code=%d body=%s", balance.Code, balance.Body.String())
 	}
 	rewardedBalance := balanceFromResponse(t, balance)
-	if rewardedBalance != srv.cfg.SocialRewardXAuth {
-		t.Fatalf("expected rewarded balance=%d, got=%d body=%s", srv.cfg.SocialRewardXAuth, rewardedBalance, balance.Body.String())
+	if rewardedBalance != 1000 {
+		t.Fatalf("expected recharged balance=1000, got=%d body=%s", rewardedBalance, balance.Body.String())
 	}
 
 	send := doJSONRequestWithHeaders(t, h, http.MethodPost, "/api/v1/mail/send", map[string]any{
 		"to_user_ids": []string{recipient},
-		"subject":     "hello",
-		"body":        "world",
+		"subject":     "quota-burst",
+		"body":        oversizedBody,
 	}, map[string]string{"Cookie": cookie, "Authorization": "Bearer " + apiKey})
 	if send.Code != http.StatusAccepted {
 		t.Fatalf("expected accepted send after reward, got=%d body=%s", send.Code, send.Body.String())
@@ -381,8 +390,8 @@ func TestManagedAgentRequiresOwnerSessionAndTokenBalance(t *testing.T) {
 	}
 
 	ownerMe := doJSONRequestWithHeaders(t, h, http.MethodGet, "/api/v1/owner/me", nil, map[string]string{"Cookie": cookie})
-	if ownerMe.Code != http.StatusOK || !strings.Contains(ownerMe.Body.String(), `"x_handle":"@orbit_agent"`) {
-		t.Fatalf("expected owner x identity binding, got code=%d body=%s", ownerMe.Code, ownerMe.Body.String())
+	if ownerMe.Code != http.StatusOK || !strings.Contains(ownerMe.Body.String(), `"human_username":"human-manager"`) {
+		t.Fatalf("expected owner session to remain valid, got code=%d body=%s", ownerMe.Code, ownerMe.Body.String())
 	}
 }
 
@@ -420,8 +429,8 @@ func TestManagedAgentCanUseAPIKeyForPricedWrite(t *testing.T) {
 		t.Fatalf("expected balance read after send, got code=%d body=%s", after.Code, after.Body.String())
 	}
 	afterBalance := balanceFromResponse(t, after)
-	if afterBalance >= beforeBalance {
-		t.Fatalf("expected priced write to reduce balance, before=%d after=%d body=%s", beforeBalance, afterBalance, after.Body.String())
+	if afterBalance != beforeBalance {
+		t.Fatalf("expected v2 mail send within free quota to preserve balance, before=%d after=%d body=%s", beforeBalance, afterBalance, after.Body.String())
 	}
 }
 
@@ -530,7 +539,6 @@ func TestGitHubVerifyUsesServerSideVerificationAndRewards(t *testing.T) {
 	defer gh.Close()
 
 	srv := newTestServer()
-	srv.cfg.RegistrationGrantToken = 0 // disable grant to test reward balances in isolation
 	h := identityTestHandler(srv)
 
 	userID, apiKey, claimLink := registerAgentForTest(t, h, "github-agent", "oss")
@@ -556,7 +564,7 @@ func TestGitHubVerifyUsesServerSideVerificationAndRewards(t *testing.T) {
 	if balance.Code != http.StatusOK {
 		t.Fatalf("expected rewarded balance read, got code=%d body=%s", balance.Code, balance.Body.String())
 	}
-	expectedBalance := srv.cfg.SocialRewardGitHubAuth + srv.cfg.SocialRewardGitHubStar + srv.cfg.SocialRewardGitHubFork
+	expectedBalance := srv.tokenPolicy().InitialToken + 50000 + 500000 + 200000
 	if got := balanceFromResponse(t, balance); got != expectedBalance {
 		t.Fatalf("expected rewarded balance=%d, got=%d body=%s", expectedBalance, got, balance.Body.String())
 	}
@@ -634,7 +642,7 @@ func TestManualSocialVerifyEndpointsRejectWhenOAuthIsConfigured(t *testing.T) {
 	}
 }
 
-func TestXMentionRewardIsGrantedAndQueryable(t *testing.T) {
+func TestXMentionVerifyDoesNotMintTokenRewardsInV2(t *testing.T) {
 	xOAuth := enableXOAuthForTest(t)
 	defer xOAuth.Close()
 
@@ -650,12 +658,15 @@ func TestXMentionRewardIsGrantedAndQueryable(t *testing.T) {
 		"post_text": "hello " + defaultOfficialXHandle + " from orbit",
 	}, map[string]string{"Cookie": cookie})
 	if mention.Code != http.StatusOK {
-		t.Fatalf("expected x mention reward ok, got=%d body=%s", mention.Code, mention.Body.String())
+		t.Fatalf("expected x mention verify ok, got=%d body=%s", mention.Code, mention.Body.String())
+	}
+	if strings.Contains(mention.Body.String(), `"amount":3`) || strings.Contains(mention.Body.String(), `"granted":true`) {
+		t.Fatalf("x mention verify should not mint token rewards under v2: %s", mention.Body.String())
 	}
 
 	status := doJSONRequestWithHeaders(t, h, http.MethodGet, "/api/v1/social/rewards/status", nil, map[string]string{"Cookie": cookie, "Authorization": "Bearer " + apiKey})
-	if status.Code != http.StatusOK || !strings.Contains(status.Body.String(), `"reward_type":"mention"`) {
-		t.Fatalf("expected mention reward in status, got=%d body=%s", status.Code, status.Body.String())
+	if status.Code != http.StatusOK || strings.Contains(status.Body.String(), `"reward_type":"mention"`) {
+		t.Fatalf("expected no mention reward in status under v2, got=%d body=%s", status.Code, status.Body.String())
 	}
 }
 
@@ -793,6 +804,66 @@ func TestTokenPricingIsSorted(t *testing.T) {
 			t.Fatalf("pricing items should be sorted: prev=%q current=%q", prev, path)
 		}
 		prev = path
+	}
+}
+
+func TestTokenPricingV2IncludesOnboardingMintAndUpdatedLifeParameters(t *testing.T) {
+	srv := newTestServer()
+	h := identityTestHandler(srv)
+
+	w := doJSONRequest(t, h, http.MethodGet, "/api/v1/token/pricing", nil)
+	if w.Code != http.StatusOK {
+		t.Fatalf("token pricing status=%d body=%s", w.Code, w.Body.String())
+	}
+	body := parseJSONBody(t, w)
+	items, ok := body["items"].([]any)
+	if !ok {
+		t.Fatalf("expected pricing items, got body=%s", w.Body.String())
+	}
+	byPath := map[string]map[string]any{}
+	for _, raw := range items {
+		item, ok := raw.(map[string]any)
+		if !ok {
+			t.Fatalf("expected item object, got %#v", raw)
+		}
+		path, _ := item["path"].(string)
+		byPath[path] = item
+	}
+
+	register := byPath["/api/v1/users/register"]
+	if register["mode"] != "direct_mint" || register["settlement_source"] != onboardingSettlementMint {
+		t.Fatalf("unexpected register pricing item=%v", register)
+	}
+	if got := int64(register["initial_tokens"].(float64)); got != srv.tokenPolicy().InitialToken {
+		t.Fatalf("register initial_tokens=%d want %d", got, srv.tokenPolicy().InitialToken)
+	}
+
+	github := byPath["/api/v1/claims/github/complete"]
+	if github["mode"] != "owner_onboarding_direct_mint" || github["settlement_source"] != onboardingSettlementMint {
+		t.Fatalf("unexpected github onboarding pricing item=%v", github)
+	}
+	if got := int64(github["github_bind_tokens"].(float64)); got != githubBindOnboardingReward {
+		t.Fatalf("github bind reward=%d want %d", got, githubBindOnboardingReward)
+	}
+	if got := int64(github["github_star_tokens"].(float64)); got != githubStarOnboardingReward {
+		t.Fatalf("github star reward=%d want %d", got, githubStarOnboardingReward)
+	}
+	if got := int64(github["github_fork_tokens"].(float64)); got != githubForkOnboardingReward {
+		t.Fatalf("github fork reward=%d want %d", got, githubForkOnboardingReward)
+	}
+
+	life := byPath["/api/v1/life/tax"]
+	if got := int64(life["activated_tokens_per_tick"].(float64)); got != 5 {
+		t.Fatalf("activated tax per tick=%d want 5", got)
+	}
+	if got := int64(life["unactivated_tokens_per_tick"].(float64)); got != 10 {
+		t.Fatalf("unactivated tax per tick=%d want 10", got)
+	}
+	if got := int64(life["hibernation_period_ticks"].(float64)); got != 1440 {
+		t.Fatalf("hibernation ticks=%d want 1440", got)
+	}
+	if got := int64(life["min_revival_balance"].(float64)); got != 50000 {
+		t.Fatalf("min revival balance=%d want 50000", got)
 	}
 }
 
@@ -1004,8 +1075,12 @@ func TestClaimGitHubFrontendFlowActivatesAgentAndSetsOwnerSession(t *testing.T) 
 	defer gh.Close()
 
 	srv := newTestServer()
-	srv.cfg.RegistrationGrantToken = 0
+	srv.cfg.TreasuryInitialToken = 0
 	h := identityTestHandler(srv)
+	beforeTreasury, err := srv.treasuryBalance(t.Context())
+	if err != nil {
+		t.Fatalf("treasury balance before onboarding: %v", err)
+	}
 
 	userID, apiKey, claimLink := registerAgentForTest(t, h, "github-claim-agent", "oss")
 	claimToken := claimTokenFromLink(t, claimLink)
@@ -1119,21 +1194,37 @@ func TestClaimGitHubFrontendFlowActivatesAgentAndSetsOwnerSession(t *testing.T) 
 	if profile.HumanUsername != "octo-human" || profile.OwnerEmail != "octo@example.com" || profile.GitHubUsername != "octo" {
 		t.Fatalf("unexpected agent profile after complete: %+v", profile)
 	}
-	grants, err := srv.store.ListSocialRewardGrants(t.Context(), userID)
-	if err != nil {
-		t.Fatalf("list social reward grants: %v", err)
-	}
-	if len(grants) != 3 {
-		t.Fatalf("expected 3 github grants after finalize, got=%d %+v", len(grants), grants)
-	}
-
 	balance := doJSONRequestWithHeaders(t, h, http.MethodGet, "/api/v1/token/balance", nil, apiKeyHeaders(apiKey))
 	if balance.Code != http.StatusOK {
 		t.Fatalf("expected rewarded balance read, got code=%d body=%s", balance.Code, balance.Body.String())
 	}
-	expectedBalance := srv.cfg.SocialRewardGitHubAuth + srv.cfg.SocialRewardGitHubStar + srv.cfg.SocialRewardGitHubFork
+	expectedBalance := srv.tokenPolicy().InitialToken + 50000 + 500000 + 200000
 	if got := balanceFromResponse(t, balance); got != expectedBalance {
 		t.Fatalf("expected rewarded balance=%d, got=%d body=%s", expectedBalance, got, balance.Body.String())
+	}
+	ownerID, _ := owner["owner_id"].(string)
+	for _, decisionKey := range []string{
+		"onboarding:initial:" + userID,
+		"onboarding:github:bind:" + ownerID,
+		"onboarding:github:star:" + ownerID,
+		"onboarding:github:fork:" + ownerID,
+	} {
+		decision, err := srv.store.GetEconomyRewardDecision(t.Context(), decisionKey)
+		if err != nil {
+			t.Fatalf("get onboarding decision %s: %v", decisionKey, err)
+		}
+		if decision.Status != "applied" {
+			t.Fatalf("decision %s status=%s want applied", decisionKey, decision.Status)
+		}
+	}
+	accounts, err := srv.store.ListTokenAccounts(t.Context())
+	if err != nil {
+		t.Fatalf("list token accounts: %v", err)
+	}
+	for _, account := range accounts {
+		if account.BotID == clawTreasurySystemID && account.Balance != beforeTreasury {
+			t.Fatalf("expected treasury to stay untouched during onboarding mint, before=%d got=%d", beforeTreasury, account.Balance)
+		}
 	}
 
 	repeat := doJSONRequestWithHeaders(t, h, http.MethodPost, "/api/v1/claims/github/complete", map[string]any{
@@ -1144,13 +1235,192 @@ func TestClaimGitHubFrontendFlowActivatesAgentAndSetsOwnerSession(t *testing.T) 
 	if repeat.Code != http.StatusConflict {
 		t.Fatalf("expected repeat finalize conflict after activation, got=%d body=%s", repeat.Code, repeat.Body.String())
 	}
-	grantsAfterRepeat, err := srv.store.ListSocialRewardGrants(t.Context(), userID)
+	repeatBalance := doJSONRequestWithHeaders(t, h, http.MethodGet, "/api/v1/token/balance", nil, apiKeyHeaders(apiKey))
+	if repeatBalance.Code != http.StatusOK {
+		t.Fatalf("expected balance read after repeat finalize conflict, got code=%d body=%s", repeatBalance.Code, repeatBalance.Body.String())
+	}
+	if got := balanceFromResponse(t, repeatBalance); got != expectedBalance {
+		t.Fatalf("repeat finalize should not add duplicate onboarding rewards: got=%d want=%d body=%s", got, expectedBalance, repeatBalance.Body.String())
+	}
+}
+
+func TestClaimGitHubFrontendFlowUsesLocalGitHubMock(t *testing.T) {
+	t.Setenv("GITHUB_API_MOCK_ENABLED", "true")
+	t.Setenv("GITHUB_API_MOCK_ALLOW_UNSAFE_LOCAL", "true")
+	t.Setenv("GITHUB_API_MOCK_LOGIN", "mock-octo")
+	t.Setenv("GITHUB_API_MOCK_NAME", "Mock Octo")
+	t.Setenv("GITHUB_API_MOCK_EMAIL", "mock-octo@example.com")
+	t.Setenv("GITHUB_API_MOCK_USER_ID", "4242")
+	t.Setenv("GITHUB_API_MOCK_STARRED", "true")
+	t.Setenv("GITHUB_API_MOCK_FORKED", "true")
+	t.Setenv("CLAWCOLONY_GITHUB_OAUTH_CLIENT_ID", "gh-client")
+	t.Setenv("CLAWCOLONY_GITHUB_OAUTH_CLIENT_SECRET", "gh-secret")
+	t.Setenv("CLAWCOLONY_GITHUB_OAUTH_AUTHORIZE_URL", "https://github.mock.test/login/oauth/authorize")
+
+	srv := newTestServer()
+	h := identityTestHandler(srv)
+
+	userID, apiKey, claimLink := registerAgentForTest(t, h, "github-mock-agent", "oss")
+	claimToken := claimTokenFromLink(t, claimLink)
+
+	start := doJSONRequest(t, h, http.MethodPost, "/api/v1/claims/github/start", map[string]any{
+		"claim_token": claimToken,
+	})
+	if start.Code != http.StatusAccepted {
+		t.Fatalf("claim github start status=%d body=%s", start.Code, start.Body.String())
+	}
+	startBody := parseJSONBody(t, start)
+	rawAuthorizeURL, _ := startBody["authorize_url"].(string)
+	if strings.TrimSpace(rawAuthorizeURL) == "" {
+		t.Fatalf("missing authorize_url in start response: %s", start.Body.String())
+	}
+	authorizeURL, err := neturl.Parse(rawAuthorizeURL)
 	if err != nil {
-		t.Fatalf("list social reward grants after repeat: %v", err)
+		t.Fatalf("parse authorize_url: %v", err)
 	}
-	if len(grantsAfterRepeat) != 3 {
-		t.Fatalf("repeat finalize should not add duplicate grants: %+v", grantsAfterRepeat)
+	state := authorizeURL.Query().Get("state")
+	if strings.TrimSpace(state) == "" {
+		t.Fatalf("expected signed oauth state in authorize url")
 	}
+
+	callbackReq := httptest.NewRequest(http.MethodGet, "/auth/github/claim/callback?code=gh-code&state="+neturl.QueryEscape(state), nil)
+	callbackReq.Header.Set("Cookie", joinCookieHeader("", start.Result().Cookies()))
+	callback := httptest.NewRecorder()
+	h.ServeHTTP(callback, callbackReq)
+	if callback.Code != http.StatusSeeOther {
+		t.Fatalf("claim github callback status=%d body=%s", callback.Code, callback.Body.String())
+	}
+	callbackLocation, err := neturl.Parse(callback.Header().Get("Location"))
+	if err != nil {
+		t.Fatalf("callback location: %v", err)
+	}
+	if got := callbackLocation.Query().Get("github_username"); got != "mock-octo" {
+		t.Fatalf("unexpected callback github username=%q", got)
+	}
+	if got := callbackLocation.Query().Get("starred"); got != "true" {
+		t.Fatalf("unexpected callback starred flag=%q", got)
+	}
+	if got := callbackLocation.Query().Get("forked"); got != "true" {
+		t.Fatalf("unexpected callback forked flag=%q", got)
+	}
+
+	complete := doJSONRequestWithHeaders(t, h, http.MethodPost, "/api/v1/claims/github/complete", map[string]any{
+		"human_username": "mock-human",
+	}, map[string]string{
+		"Cookie": joinCookieHeader("", callback.Result().Cookies()),
+	})
+	if complete.Code != http.StatusOK {
+		t.Fatalf("claim github complete status=%d body=%s", complete.Code, complete.Body.String())
+	}
+	completeBody := parseJSONBody(t, complete)
+	if completeBody["user_id"] != userID || completeBody["status"] != "active" {
+		t.Fatalf("unexpected complete payload=%s", complete.Body.String())
+	}
+	owner, ok := completeBody["owner"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected owner payload in complete response: %s", complete.Body.String())
+	}
+	if owner["human_username"] != "mock-human" || owner["email"] != "mock-octo@example.com" {
+		t.Fatalf("unexpected owner payload=%s", complete.Body.String())
+	}
+	balance := doJSONRequestWithHeaders(t, h, http.MethodGet, "/api/v1/token/balance", nil, apiKeyHeaders(apiKey))
+	if balance.Code != http.StatusOK {
+		t.Fatalf("expected rewarded balance read, got code=%d body=%s", balance.Code, balance.Body.String())
+	}
+	expectedBalance := srv.tokenPolicy().InitialToken + 50000 + 500000 + 200000
+	if got := balanceFromResponse(t, balance); got != expectedBalance {
+		t.Fatalf("expected rewarded balance=%d, got=%d body=%s", expectedBalance, got, balance.Body.String())
+	}
+}
+
+func TestGitHubOAuthMockRequiresUnsafeAllowFlag(t *testing.T) {
+	t.Setenv("GITHUB_API_MOCK_ENABLED", "true")
+	t.Setenv("GITHUB_API_MOCK_LOGIN", "mock-octo")
+
+	srv := newTestServer()
+	if _, ok := srv.githubOAuthMockProfile(""); ok {
+		t.Fatalf("expected github oauth mock to stay disabled without GITHUB_API_MOCK_ALLOW_UNSAFE_LOCAL")
+	}
+}
+
+func TestGitHubOAuthMockRequiresEnabledFlag(t *testing.T) {
+	t.Setenv("GITHUB_API_MOCK_ALLOW_UNSAFE_LOCAL", "true")
+	t.Setenv("GITHUB_API_MOCK_LOGIN", "mock-octo")
+
+	srv := newTestServer()
+	if _, ok := srv.githubOAuthMockProfile(""); ok {
+		t.Fatalf("expected github oauth mock to stay disabled without GITHUB_API_MOCK_ENABLED")
+	}
+}
+
+func TestClaimGitHubFrontendFlowUsesDynamicLocalGitHubMockIdentity(t *testing.T) {
+	t.Setenv("GITHUB_API_MOCK_ENABLED", "true")
+	t.Setenv("GITHUB_API_MOCK_ALLOW_UNSAFE_LOCAL", "true")
+	t.Setenv("GITHUB_API_MOCK_STARRED", "true")
+	t.Setenv("GITHUB_API_MOCK_FORKED", "true")
+	t.Setenv("CLAWCOLONY_GITHUB_OAUTH_CLIENT_ID", "gh-client")
+	t.Setenv("CLAWCOLONY_GITHUB_OAUTH_CLIENT_SECRET", "gh-secret")
+	t.Setenv("CLAWCOLONY_GITHUB_OAUTH_AUTHORIZE_URL", "https://github.mock.test/login/oauth/authorize")
+
+	srv := newTestServer()
+	srv.cfg.TreasuryInitialToken = 0
+	h := identityTestHandler(srv)
+
+	claimWithCode := func(agentUsername, code, expectedLogin string) {
+		t.Helper()
+		_, apiKey, claimLink := registerAgentForTest(t, h, agentUsername, "oss")
+		claimToken := claimTokenFromLink(t, claimLink)
+		start := doJSONRequest(t, h, http.MethodPost, "/api/v1/claims/github/start", map[string]any{
+			"claim_token": claimToken,
+		})
+		if start.Code != http.StatusAccepted {
+			t.Fatalf("claim github start status=%d body=%s", start.Code, start.Body.String())
+		}
+		startBody := parseJSONBody(t, start)
+		rawAuthorizeURL, _ := startBody["authorize_url"].(string)
+		authorizeURL, err := neturl.Parse(rawAuthorizeURL)
+		if err != nil {
+			t.Fatalf("parse authorize_url: %v", err)
+		}
+		state := authorizeURL.Query().Get("state")
+		callbackReq := httptest.NewRequest(http.MethodGet, "/auth/github/claim/callback?code="+neturl.QueryEscape(code)+"&state="+neturl.QueryEscape(state), nil)
+		callbackReq.Header.Set("Cookie", joinCookieHeader("", start.Result().Cookies()))
+		callback := httptest.NewRecorder()
+		h.ServeHTTP(callback, callbackReq)
+		if callback.Code != http.StatusSeeOther {
+			t.Fatalf("claim github callback status=%d body=%s", callback.Code, callback.Body.String())
+		}
+		complete := doJSONRequestWithHeaders(t, h, http.MethodPost, "/api/v1/claims/github/complete", map[string]any{
+			"human_username": expectedLogin + "-human",
+		}, map[string]string{
+			"Cookie": joinCookieHeader("", callback.Result().Cookies()),
+		})
+		if complete.Code != http.StatusOK {
+			t.Fatalf("claim github complete status=%d body=%s", complete.Code, complete.Body.String())
+		}
+		completeBody := parseJSONBody(t, complete)
+		owner, ok := completeBody["owner"].(map[string]any)
+		if !ok {
+			t.Fatalf("expected owner payload in complete response: %s", complete.Body.String())
+		}
+		if owner["email"] != expectedLogin+"@example.com" {
+			t.Fatalf("unexpected owner email=%v payload=%s", owner["email"], complete.Body.String())
+		}
+		if githubInfo, ok := completeBody["github"].(map[string]any); !ok || githubInfo["username"] != expectedLogin {
+			t.Fatalf("unexpected github payload=%s", complete.Body.String())
+		}
+		balance := doJSONRequestWithHeaders(t, h, http.MethodGet, "/api/v1/token/balance", nil, apiKeyHeaders(apiKey))
+		if balance.Code != http.StatusOK {
+			t.Fatalf("expected rewarded balance read, got code=%d body=%s", balance.Code, balance.Body.String())
+		}
+		expectedBalance := srv.tokenPolicy().InitialToken + 50000 + 500000 + 200000
+		if got := balanceFromResponse(t, balance); got != expectedBalance {
+			t.Fatalf("expected rewarded balance=%d, got=%d body=%s", expectedBalance, got, balance.Body.String())
+		}
+	}
+
+	claimWithCode("github-mock-agent-alice", "gh-code-alice", "alice")
+	claimWithCode("github-mock-agent-bob", "gh-code-bob", "bob")
 }
 
 func TestClaimGitHubCallbackRejectsMissingVerifiedEmail(t *testing.T) {

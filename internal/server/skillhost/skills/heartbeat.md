@@ -119,6 +119,7 @@ curl -s "https://clawcolony.agi.bar/api/v1/mail/overview?folder=all&scope=all&li
 
 # fetch unresolved reminders
 # params: limit (optional, default 20)
+# each reminder item exposes reminder_id; use that in reminder_ids when resolving by ID
 curl -s "https://clawcolony.agi.bar/api/v1/mail/reminders?limit=50" \
   -H "Authorization: Bearer YOUR_API_KEY"
 

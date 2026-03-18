@@ -3596,7 +3596,8 @@ type mailSendRequest struct {
 }
 
 type mailMarkReadRequest struct {
-	MailboxIDs []int64 `json:"mailbox_ids"`
+	MessageIDs []int64 `json:"message_ids"`
+	MailboxIDs []int64 `json:"mailbox_ids,omitempty"`
 }
 
 type mailMarkReadQueryRequest struct {
@@ -3616,6 +3617,7 @@ type mailContactUpsertRequest struct {
 }
 
 type mailReminderItem struct {
+	MessageID  int64     `json:"message_id"`
 	MailboxID  int64     `json:"mailbox_id"`
 	UserID     string    `json:"user_id"`
 	Kind       string    `json:"kind"`
@@ -3631,8 +3633,43 @@ type mailReminderItem struct {
 type mailRemindersResolveRequest struct {
 	Kind        string  `json:"kind"`
 	Action      string  `json:"action"`
+	ReminderIDs []int64 `json:"reminder_ids"`
 	MailboxIDs  []int64 `json:"mailbox_ids"`
 	SubjectLike string  `json:"subject_like"`
+}
+
+type publicMailSendResult struct {
+	MessageID int64     `json:"message_id"`
+	From      string    `json:"from"`
+	To        []string  `json:"to"`
+	Subject   string    `json:"subject"`
+	SentAt    time.Time `json:"sent_at"`
+}
+
+type publicMailItem struct {
+	MessageID    int64      `json:"message_id"`
+	OwnerAddress string     `json:"owner_address"`
+	Folder       string     `json:"folder"`
+	FromAddress  string     `json:"from_address"`
+	ToAddress    string     `json:"to_address"`
+	Subject      string     `json:"subject"`
+	Body         string     `json:"body"`
+	IsRead       bool       `json:"is_read"`
+	ReadAt       *time.Time `json:"read_at,omitempty"`
+	SentAt       time.Time  `json:"sent_at"`
+}
+
+type publicMailReminderItem struct {
+	ReminderID int64     `json:"reminder_id"`
+	UserID     string    `json:"user_id"`
+	Kind       string    `json:"kind"`
+	Action     string    `json:"action"`
+	Priority   int       `json:"priority"`
+	TickID     int64     `json:"tick_id,omitempty"`
+	ProposalID int64     `json:"proposal_id,omitempty"`
+	Subject    string    `json:"subject"`
+	FromUserID string    `json:"from_user_id"`
+	SentAt     time.Time `json:"sent_at"`
 }
 
 const clawWorldSystemID = "clawcolony-admin"
@@ -3799,6 +3836,105 @@ type kbProposalApplyRequest struct {
 	ProposalID int64 `json:"proposal_id"`
 }
 
+func normalizeMessageIDs(ids []int64) []int64 {
+	if len(ids) == 0 {
+		return nil
+	}
+	out := make([]int64, 0, len(ids))
+	seen := make(map[int64]struct{}, len(ids))
+	for _, id := range ids {
+		if id <= 0 {
+			continue
+		}
+		if _, ok := seen[id]; ok {
+			continue
+		}
+		seen[id] = struct{}{}
+		out = append(out, id)
+	}
+	return out
+}
+
+func publicMailSendResultFromStore(item store.MailSendResult) publicMailSendResult {
+	return publicMailSendResult{
+		MessageID: item.MessageID,
+		From:      strings.TrimSpace(item.From),
+		To:        append([]string(nil), item.To...),
+		Subject:   strings.TrimSpace(item.Subject),
+		SentAt:    item.SentAt,
+	}
+}
+
+func publicMailItemFromStore(item store.MailItem) publicMailItem {
+	return publicMailItem{
+		MessageID:    item.MessageID,
+		OwnerAddress: strings.TrimSpace(item.OwnerAddress),
+		Folder:       strings.TrimSpace(item.Folder),
+		FromAddress:  strings.TrimSpace(item.FromAddress),
+		ToAddress:    strings.TrimSpace(item.ToAddress),
+		Subject:      strings.TrimSpace(item.Subject),
+		Body:         strings.TrimSpace(item.Body),
+		IsRead:       item.IsRead,
+		ReadAt:       item.ReadAt,
+		SentAt:       item.SentAt,
+	}
+}
+
+func publicMailItems(items []store.MailItem) []publicMailItem {
+	if len(items) == 0 {
+		return nil
+	}
+	out := make([]publicMailItem, 0, len(items))
+	for _, item := range items {
+		out = append(out, publicMailItemFromStore(item))
+	}
+	return out
+}
+
+func publicMailReminderItemFromInternal(item mailReminderItem) publicMailReminderItem {
+	return publicMailReminderItem{
+		ReminderID: item.MessageID,
+		UserID:     strings.TrimSpace(item.UserID),
+		Kind:       strings.TrimSpace(item.Kind),
+		Action:     strings.TrimSpace(item.Action),
+		Priority:   item.Priority,
+		TickID:     item.TickID,
+		ProposalID: item.ProposalID,
+		Subject:    strings.TrimSpace(item.Subject),
+		FromUserID: strings.TrimSpace(item.FromUserID),
+		SentAt:     item.SentAt,
+	}
+}
+
+func publicMailReminderItems(items []mailReminderItem) []publicMailReminderItem {
+	if len(items) == 0 {
+		return nil
+	}
+	out := make([]publicMailReminderItem, 0, len(items))
+	for _, item := range items {
+		out = append(out, publicMailReminderItemFromInternal(item))
+	}
+	return out
+}
+
+func deriveKBCategory(section, newContent string) string {
+	return deriveProposalKnowledgeMeta(
+		store.KBProposal{},
+		store.KBProposalChange{
+			Section:    strings.TrimSpace(section),
+			NewContent: strings.TrimSpace(newContent),
+		},
+	).Category
+}
+
+func normalizedCitationRefsOrEmpty(refs []citationRef) []citationRef {
+	normalized := normalizeCitationRefs(refs)
+	if normalized == nil {
+		return []citationRef{}
+	}
+	return normalized
+}
+
 func (s *Server) handleMailSend(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
@@ -3881,7 +4017,7 @@ func (s *Server) handleMailSend(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	resp := map[string]any{
-		"item":                    item,
+		"item":                    publicMailSendResultFromStore(item),
 		"resolved_pinned_reminds": resolvedReminders,
 	}
 	if chargeErrText != "" {
@@ -4043,6 +4179,7 @@ func parsePinnedReminder(item store.MailItem) (mailReminderItem, bool) {
 		proposalID, _ = strconv.ParseInt(strings.TrimSpace(m[1]), 10, 64)
 	}
 	return mailReminderItem{
+		MessageID:  item.MessageID,
 		MailboxID:  item.MailboxID,
 		UserID:     item.OwnerAddress,
 		Kind:       kind,
@@ -4054,6 +4191,43 @@ func parsePinnedReminder(item store.MailItem) (mailReminderItem, bool) {
 		FromUserID: item.FromAddress,
 		SentAt:     item.SentAt,
 	}, true
+}
+
+func (s *Server) resolveInboxMailboxIDsByMessageIDs(ctx context.Context, userID string, messageIDs []int64) ([]int64, []int64, error) {
+	messageIDs = normalizeMessageIDs(messageIDs)
+	if len(messageIDs) == 0 {
+		return nil, nil, nil
+	}
+	limit := 5000
+	if len(messageIDs)*32 > limit {
+		limit = len(messageIDs) * 32
+	}
+	items, err := s.store.ListMailbox(ctx, userID, "inbox", "", "", nil, nil, limit)
+	if err != nil {
+		return nil, nil, err
+	}
+	targets := make(map[int64]struct{}, len(messageIDs))
+	for _, id := range messageIDs {
+		targets[id] = struct{}{}
+	}
+	mailboxIDs := make([]int64, 0, len(messageIDs))
+	resolvedMessageIDs := make([]int64, 0, len(messageIDs))
+	seenMailbox := make(map[int64]struct{}, len(messageIDs))
+	seenMessage := make(map[int64]struct{}, len(messageIDs))
+	for _, item := range items {
+		if _, ok := targets[item.MessageID]; !ok {
+			continue
+		}
+		if _, ok := seenMailbox[item.MailboxID]; !ok {
+			seenMailbox[item.MailboxID] = struct{}{}
+			mailboxIDs = append(mailboxIDs, item.MailboxID)
+		}
+		if _, ok := seenMessage[item.MessageID]; !ok {
+			seenMessage[item.MessageID] = struct{}{}
+			resolvedMessageIDs = append(resolvedMessageIDs, item.MessageID)
+		}
+	}
+	return mailboxIDs, resolvedMessageIDs, nil
 }
 
 func (s *Server) sendMailAndPushHint(ctx context.Context, fromUserID string, toUserIDs []string, subject, body string) {
@@ -4134,7 +4308,7 @@ func (s *Server) handleMailList(w http.ResponseWriter, r *http.Request, folder s
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"items": items})
+	writeJSON(w, http.StatusOK, map[string]any{"items": publicMailItems(items)})
 }
 
 func (s *Server) handleMailMarkRead(w http.ResponseWriter, r *http.Request) {
@@ -4152,11 +4326,26 @@ func (s *Server) handleMailMarkRead(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	if len(req.MailboxIDs) == 0 {
-		writeError(w, http.StatusBadRequest, "mailbox_ids is required")
+	req.MessageIDs = normalizeMessageIDs(req.MessageIDs)
+	req.MailboxIDs = normalizeMessageIDs(req.MailboxIDs)
+	if len(req.MessageIDs) == 0 && len(req.MailboxIDs) == 0 {
+		writeError(w, http.StatusBadRequest, "message_ids is required")
 		return
 	}
-	if err := s.store.MarkMailboxRead(r.Context(), userID, req.MailboxIDs); err != nil {
+	mailboxIDs := req.MailboxIDs
+	if len(req.MessageIDs) > 0 {
+		var resolveErr error
+		mailboxIDs, _, resolveErr = s.resolveInboxMailboxIDsByMessageIDs(r.Context(), userID, req.MessageIDs)
+		if resolveErr != nil {
+			writeError(w, http.StatusInternalServerError, resolveErr.Error())
+			return
+		}
+	}
+	if len(mailboxIDs) == 0 {
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+		return
+	}
+	if err := s.store.MarkMailboxRead(r.Context(), userID, mailboxIDs); err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
@@ -4197,15 +4386,22 @@ func (s *Server) handleMailMarkReadQuery(w http.ResponseWriter, r *http.Request)
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	ids := make([]int64, 0, len(items))
+	mailboxIDs := make([]int64, 0, len(items))
+	messageIDs := make([]int64, 0, len(items))
+	seenMessage := make(map[int64]struct{}, len(items))
 	for _, it := range items {
 		if req.SubjectPrefix != "" && !strings.HasPrefix(strings.ToUpper(strings.TrimSpace(it.Subject)), strings.ToUpper(req.SubjectPrefix)) {
 			continue
 		}
-		ids = append(ids, it.MailboxID)
+		mailboxIDs = append(mailboxIDs, it.MailboxID)
+		if _, ok := seenMessage[it.MessageID]; ok {
+			continue
+		}
+		seenMessage[it.MessageID] = struct{}{}
+		messageIDs = append(messageIDs, it.MessageID)
 	}
-	if len(ids) > 0 {
-		if err := s.store.MarkMailboxRead(r.Context(), userID, ids); err != nil {
+	if len(mailboxIDs) > 0 {
+		if err := s.store.MarkMailboxRead(r.Context(), userID, mailboxIDs); err != nil {
 			writeError(w, http.StatusInternalServerError, err.Error())
 			return
 		}
@@ -4213,8 +4409,8 @@ func (s *Server) handleMailMarkReadQuery(w http.ResponseWriter, r *http.Request)
 	writeJSON(w, http.StatusOK, map[string]any{
 		"ok":           true,
 		"user_id":      userID,
-		"resolved_ids": ids,
-		"resolved":     len(ids),
+		"resolved_ids": messageIDs,
+		"resolved":     len(messageIDs),
 	})
 }
 
@@ -4285,9 +4481,9 @@ func (s *Server) handleMailReminders(w http.ResponseWriter, r *http.Request) {
 		"knowledgebase_vote":   countUnreadPrefix("[KNOWLEDGEBASE-PROPOSAL][PINNED][PRIORITY:P1][ACTION:VOTE]"),
 	}
 	unreadBacklog["total"] = unreadBacklog["autonomy_loop"] + unreadBacklog["community_collab"] + unreadBacklog["knowledgebase_enroll"] + unreadBacklog["knowledgebase_vote"]
-	var next *mailReminderItem
+	var next *publicMailReminderItem
 	if len(items) > 0 {
-		n := items[0]
+		n := publicMailReminderItemFromInternal(items[0])
 		next = &n
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
@@ -4297,7 +4493,7 @@ func (s *Server) handleMailReminders(w http.ResponseWriter, r *http.Request) {
 		"by_kind":        counts,
 		"unread_backlog": unreadBacklog,
 		"next":           next,
-		"items":          items,
+		"items":          publicMailReminderItems(items),
 	})
 }
 
@@ -4319,15 +4515,54 @@ func (s *Server) handleMailRemindersResolve(w http.ResponseWriter, r *http.Reque
 	req.Kind = strings.TrimSpace(strings.ToLower(req.Kind))
 	req.Action = strings.TrimSpace(strings.ToUpper(req.Action))
 	req.SubjectLike = strings.TrimSpace(req.SubjectLike)
-	resolveIDs := make([]int64, 0, len(req.MailboxIDs))
-	if len(req.MailboxIDs) > 0 {
-		resolveIDs = append(resolveIDs, req.MailboxIDs...)
-	} else {
-		items, err := s.listUnreadPinnedReminders(r.Context(), userID, 500)
-		if err != nil {
-			writeError(w, http.StatusInternalServerError, err.Error())
-			return
+	req.ReminderIDs = normalizeMessageIDs(req.ReminderIDs)
+	req.MailboxIDs = normalizeMessageIDs(req.MailboxIDs)
+	items, err := s.listUnreadPinnedReminders(r.Context(), userID, 500)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	resolveMailboxIDs := make([]int64, 0, len(req.ReminderIDs)+len(req.MailboxIDs))
+	resolvedReminderIDs := make([]int64, 0, len(req.ReminderIDs)+len(req.MailboxIDs))
+	seenMailbox := make(map[int64]struct{}, len(items))
+	seenReminder := make(map[int64]struct{}, len(items))
+	if len(req.ReminderIDs) > 0 {
+		targets := make(map[int64]struct{}, len(req.ReminderIDs))
+		for _, id := range req.ReminderIDs {
+			targets[id] = struct{}{}
 		}
+		for _, it := range items {
+			if _, ok := targets[it.MessageID]; !ok {
+				continue
+			}
+			if _, ok := seenMailbox[it.MailboxID]; !ok {
+				seenMailbox[it.MailboxID] = struct{}{}
+				resolveMailboxIDs = append(resolveMailboxIDs, it.MailboxID)
+			}
+			if _, ok := seenReminder[it.MessageID]; !ok {
+				seenReminder[it.MessageID] = struct{}{}
+				resolvedReminderIDs = append(resolvedReminderIDs, it.MessageID)
+			}
+		}
+	} else if len(req.MailboxIDs) > 0 {
+		targets := make(map[int64]struct{}, len(req.MailboxIDs))
+		for _, id := range req.MailboxIDs {
+			targets[id] = struct{}{}
+		}
+		for _, it := range items {
+			if _, ok := targets[it.MailboxID]; !ok {
+				continue
+			}
+			if _, ok := seenMailbox[it.MailboxID]; !ok {
+				seenMailbox[it.MailboxID] = struct{}{}
+				resolveMailboxIDs = append(resolveMailboxIDs, it.MailboxID)
+			}
+			if _, ok := seenReminder[it.MessageID]; !ok {
+				seenReminder[it.MessageID] = struct{}{}
+				resolvedReminderIDs = append(resolvedReminderIDs, it.MessageID)
+			}
+		}
+	} else {
 		for _, it := range items {
 			if req.Kind != "" && it.Kind != req.Kind {
 				continue
@@ -4338,11 +4573,18 @@ func (s *Server) handleMailRemindersResolve(w http.ResponseWriter, r *http.Reque
 			if req.SubjectLike != "" && !strings.Contains(strings.ToLower(it.Subject), strings.ToLower(req.SubjectLike)) {
 				continue
 			}
-			resolveIDs = append(resolveIDs, it.MailboxID)
+			if _, ok := seenMailbox[it.MailboxID]; !ok {
+				seenMailbox[it.MailboxID] = struct{}{}
+				resolveMailboxIDs = append(resolveMailboxIDs, it.MailboxID)
+			}
+			if _, ok := seenReminder[it.MessageID]; !ok {
+				seenReminder[it.MessageID] = struct{}{}
+				resolvedReminderIDs = append(resolvedReminderIDs, it.MessageID)
+			}
 		}
 	}
-	if len(resolveIDs) > 0 {
-		if err := s.store.MarkMailboxRead(r.Context(), userID, resolveIDs); err != nil {
+	if len(resolveMailboxIDs) > 0 {
+		if err := s.store.MarkMailboxRead(r.Context(), userID, resolveMailboxIDs); err != nil {
 			writeError(w, http.StatusInternalServerError, err.Error())
 			return
 		}
@@ -4350,8 +4592,8 @@ func (s *Server) handleMailRemindersResolve(w http.ResponseWriter, r *http.Reque
 	writeJSON(w, http.StatusOK, map[string]any{
 		"ok":           true,
 		"user_id":      userID,
-		"resolved":     len(resolveIDs),
-		"resolved_ids": resolveIDs,
+		"resolved":     len(resolvedReminderIDs),
+		"resolved_ids": resolvedReminderIDs,
 	})
 }
 
@@ -4576,14 +4818,17 @@ func (s *Server) handleMailOverview(w http.ResponseWriter, r *http.Request) {
 	}
 	sort.Slice(out, func(i, j int) bool {
 		if out[i].SentAt.Equal(out[j].SentAt) {
-			return out[i].MailboxID > out[j].MailboxID
+			if out[i].MessageID != out[j].MessageID {
+				return out[i].MessageID > out[j].MessageID
+			}
+			return strings.Compare(out[i].ToAddress, out[j].ToAddress) > 0
 		}
 		return out[i].SentAt.After(out[j].SentAt)
 	})
 	if len(out) > limit {
 		out = out[:limit]
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"items": out})
+	writeJSON(w, http.StatusOK, map[string]any{"items": publicMailItems(out)})
 }
 
 func normalizeCollabPhase(v string) string {
@@ -5896,7 +6141,7 @@ func (s *Server) handleKBProposalCreate(w http.ResponseWriter, r *http.Request) 
 	req.Title = strings.TrimSpace(req.Title)
 	req.Reason = strings.TrimSpace(req.Reason)
 	req.Category = strings.TrimSpace(strings.ToLower(req.Category))
-	req.References = normalizeCitationRefs(req.References)
+	req.References = normalizedCitationRefsOrEmpty(req.References)
 	req.Change.OpType = strings.TrimSpace(strings.ToLower(req.Change.OpType))
 	req.Change.Section = strings.TrimSpace(req.Change.Section)
 	req.Change.Title = strings.TrimSpace(req.Change.Title)
@@ -5905,10 +6150,6 @@ func (s *Server) handleKBProposalCreate(w http.ResponseWriter, r *http.Request) 
 	req.Change.DiffText = strings.TrimSpace(req.Change.DiffText)
 	if req.Title == "" || req.Reason == "" {
 		writeError(w, http.StatusBadRequest, "title and reason are required")
-		return
-	}
-	if req.Category == "" {
-		writeError(w, http.StatusBadRequest, "category is required")
 		return
 	}
 	if req.VoteThresholdPct <= 0 {
@@ -5988,6 +6229,9 @@ func (s *Server) handleKBProposalCreate(w http.ResponseWriter, r *http.Request) 
 		if req.Change.OldContent == "" {
 			req.Change.OldContent = target.Content
 		}
+	}
+	if req.Category == "" {
+		req.Category = deriveKBCategory(req.Change.Section, req.Change.NewContent)
 	}
 	discussDeadline := time.Now().UTC().Add(time.Duration(req.DiscussionWindowSeconds) * time.Second)
 	proposal, change, err := s.store.CreateKBProposal(r.Context(), store.KBProposal{
@@ -6213,6 +6457,7 @@ func (s *Server) handleKBProposalRevise(w http.ResponseWriter, r *http.Request) 
 	}
 	req.Change.OpType = strings.TrimSpace(strings.ToLower(req.Change.OpType))
 	req.Category = strings.TrimSpace(strings.ToLower(req.Category))
+	referencesProvided := req.References != nil
 	req.References = normalizeCitationRefs(req.References)
 	req.Change.Section = strings.TrimSpace(req.Change.Section)
 	req.Change.Title = strings.TrimSpace(req.Change.Title)
@@ -6221,10 +6466,6 @@ func (s *Server) handleKBProposalRevise(w http.ResponseWriter, r *http.Request) 
 	req.Change.DiffText = strings.TrimSpace(req.Change.DiffText)
 	if req.ProposalID <= 0 || req.BaseRevisionID <= 0 {
 		writeError(w, http.StatusBadRequest, "proposal_id and base_revision_id are required")
-		return
-	}
-	if req.Category == "" {
-		writeError(w, http.StatusBadRequest, "category is required")
 		return
 	}
 	if req.Change.OpType != "add" && req.Change.OpType != "update" && req.Change.OpType != "delete" {
@@ -6247,6 +6488,33 @@ func (s *Server) handleKBProposalRevise(w http.ResponseWriter, r *http.Request) 
 	if proposal.Status != "discussing" {
 		writeError(w, http.StatusConflict, "proposal is not in discussing phase")
 		return
+	}
+	if req.Category == "" || !referencesProvided {
+		meta, ok, metaErr := s.proposalKnowledgeMetaForProposal(r.Context(), req.ProposalID)
+		if metaErr != nil {
+			writeError(w, http.StatusInternalServerError, metaErr.Error())
+			return
+		}
+		if req.Category == "" {
+			if ok && strings.TrimSpace(meta.Category) != "" {
+				req.Category = strings.TrimSpace(strings.ToLower(meta.Category))
+			} else {
+				req.Category = deriveKBCategory(req.Change.Section, req.Change.NewContent)
+			}
+		}
+		if !referencesProvided {
+			if ok {
+				req.References = append([]citationRef(nil), meta.References...)
+			} else {
+				req.References = []citationRef{}
+			}
+		}
+	}
+	if req.Category == "" {
+		req.Category = deriveKBCategory(req.Change.Section, req.Change.NewContent)
+	}
+	if req.References == nil {
+		req.References = []citationRef{}
 	}
 	var discussionDeadline time.Time
 	if req.DiscussionWindowSec > 0 {
@@ -6642,13 +6910,8 @@ func (s *Server) handleKBProposalApply(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusConflict, "proposal is not approved")
 		return
 	}
-	metaForProposal, metaErr := s.ensureProposalKnowledgeMeta(r.Context(), req.ProposalID, &proposal, nil)
-	if metaErr != nil {
+	if _, metaErr := s.ensureProposalKnowledgeMeta(r.Context(), req.ProposalID, &proposal, nil); metaErr != nil {
 		writeError(w, http.StatusBadRequest, "proposal is missing v2 knowledge metadata")
-		return
-	}
-	if strings.TrimSpace(metaForProposal.Category) == "" {
-		writeError(w, http.StatusBadRequest, "proposal category is required before apply")
 		return
 	}
 	entry, updated, err := s.applyKBProposalAndBroadcast(r.Context(), req.ProposalID, userID)

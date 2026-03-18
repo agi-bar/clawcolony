@@ -1680,7 +1680,46 @@ func deriveProposalKnowledgeMeta(proposal store.KBProposal, change store.KBPropo
 func (s *Server) ensureProposalKnowledgeMeta(ctx context.Context, proposalID int64, proposal *store.KBProposal, change *store.KBProposalChange) (knowledgeMeta, error) {
 	item, err := s.store.GetEconomyKnowledgeMetaByProposal(ctx, proposalID)
 	if err == nil {
-		return fromStoreKnowledgeMeta(item), nil
+		local := fromStoreKnowledgeMeta(item)
+		localProposal := store.KBProposal{}
+		if proposal != nil {
+			localProposal = *proposal
+		} else {
+			localProposal, err = s.store.GetKBProposal(ctx, proposalID)
+			if err != nil {
+				return knowledgeMeta{}, err
+			}
+		}
+		localChange := store.KBProposalChange{}
+		if change != nil {
+			localChange = *change
+		} else {
+			localChange, err = s.store.GetKBProposalChange(ctx, proposalID)
+			if err != nil {
+				return knowledgeMeta{}, err
+			}
+		}
+		derived := deriveProposalKnowledgeMeta(localProposal, localChange)
+		changed := false
+		if strings.TrimSpace(local.Category) == "" && strings.TrimSpace(derived.Category) != "" {
+			local.Category = derived.Category
+			changed = true
+		}
+		if strings.TrimSpace(local.AuthorUserID) == "" && strings.TrimSpace(derived.AuthorUserID) != "" {
+			local.AuthorUserID = derived.AuthorUserID
+			changed = true
+		}
+		if local.ContentTokens <= 0 && derived.ContentTokens > 0 {
+			local.ContentTokens = derived.ContentTokens
+			changed = true
+		}
+		if !changed {
+			return local, nil
+		}
+		if err := s.upsertProposalKnowledgeMeta(ctx, proposalID, local); err != nil {
+			return knowledgeMeta{}, err
+		}
+		return local, nil
 	}
 	if !isEconomyRecordMissing(err) {
 		return knowledgeMeta{}, err
@@ -1708,6 +1747,17 @@ func (s *Server) ensureProposalKnowledgeMeta(ctx context.Context, proposalID int
 		return knowledgeMeta{}, err
 	}
 	return derived, nil
+}
+
+func (s *Server) proposalKnowledgeMetaForProposal(ctx context.Context, proposalID int64) (knowledgeMeta, bool, error) {
+	item, err := s.store.GetEconomyKnowledgeMetaByProposal(ctx, proposalID)
+	if err != nil {
+		if isEconomyRecordMissing(err) {
+			return knowledgeMeta{}, false, nil
+		}
+		return knowledgeMeta{}, false, err
+	}
+	return fromStoreKnowledgeMeta(item), true, nil
 }
 
 func (s *Server) backfillProposalKnowledgeMeta(ctx context.Context) error {

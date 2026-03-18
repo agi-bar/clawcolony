@@ -832,12 +832,15 @@ func TestAPIEventsReturnsCommunicationDetailedEvents(t *testing.T) {
 	if findAPIEvent(scoped.Items, "communication.mail.sent", "mail_message", strconv.FormatInt(fixture.directMessageID, 10)) == nil {
 		t.Fatalf("recipient-scoped events should include the direct mail sent event: %+v", scoped.Items)
 	}
-	received := findAPIEvent(scoped.Items, "communication.mail.received", "mailbox_item", strconv.FormatInt(fixture.directInboxMailboxID, 10))
+	received := findAPIEvent(scoped.Items, "communication.mail.received", "mail_message", strconv.FormatInt(fixture.directMessageID, 10))
 	if received == nil {
 		t.Fatalf("expected recipient-scoped direct mail received event, body=%s", w.Body.String())
 	}
 	if !strings.Contains(received.SummaryEN, "design sync") {
 		t.Fatalf("mail received should expose readable bilingual summary: %+v", *received)
+	}
+	if _, ok := received.Evidence["mailbox_id"]; ok {
+		t.Fatalf("mail received event should not leak mailbox_id: %+v", received.Evidence)
 	}
 	if leaked := findAPIEvent(scoped.Items, "communication.mail.sent", "mail_message", strconv.FormatInt(fixture.unrelatedMessageID, 10)); leaked != nil {
 		t.Fatalf("recipient-scoped events should not include third-party outbox mail: %+v", *leaked)
@@ -845,17 +848,23 @@ func TestAPIEventsReturnsCommunicationDetailedEvents(t *testing.T) {
 	if leakedContact := findAPIEvent(scoped.Items, "communication.contact.updated", "mail_contact", fixture.contactObjectID); leakedContact != nil {
 		t.Fatalf("recipient-scoped events should not include another user's private contact metadata: %+v", *leakedContact)
 	}
-	reminderTriggered := findAPIEvent(scoped.Items, "communication.reminder.triggered", "mail_reminder", strconv.FormatInt(fixture.reminderMailboxID, 10))
+	reminderTriggered := findAPIEvent(scoped.Items, "communication.reminder.triggered", "mail_reminder", strconv.FormatInt(fixture.reminderMessageID, 10))
 	if reminderTriggered == nil {
 		t.Fatalf("expected reminder triggered event, body=%s", w.Body.String())
 	}
 	if reminderTriggered.Actors[0].DisplayName != "Clawcolony" {
 		t.Fatalf("reminder sender should use the user-facing system actor name: %+v", *reminderTriggered)
 	}
-	if findAPIEvent(scoped.Items, "communication.reminder.resolved", "mail_reminder", strconv.FormatInt(fixture.reminderMailboxID, 10)) == nil {
+	if got := reminderTriggered.Evidence["reminder_id"]; got != float64(fixture.reminderMessageID) {
+		t.Fatalf("reminder triggered should expose reminder_id, got=%v", got)
+	}
+	if _, ok := reminderTriggered.Evidence["mailbox_id"]; ok {
+		t.Fatalf("reminder event should not leak mailbox_id: %+v", reminderTriggered.Evidence)
+	}
+	if findAPIEvent(scoped.Items, "communication.reminder.resolved", "mail_reminder", strconv.FormatInt(fixture.reminderMessageID, 10)) == nil {
 		t.Fatalf("recipient-scoped events should include the reminder resolution event: %+v", scoped.Items)
 	}
-	if duplicateReminderMail := findAPIEvent(scoped.Items, "communication.mail.received", "mailbox_item", strconv.FormatInt(fixture.reminderMailboxID, 10)); duplicateReminderMail != nil {
+	if duplicateReminderMail := findAPIEvent(scoped.Items, "communication.mail.received", "mail_message", strconv.FormatInt(fixture.reminderMessageID, 10)); duplicateReminderMail != nil {
 		t.Fatalf("recognized reminder mail should not also appear as a generic received mail event: %+v", *duplicateReminderMail)
 	}
 }
@@ -1512,15 +1521,14 @@ type collaborationEventsFixture struct {
 }
 
 type communicationEventsFixture struct {
-	senderUserID         string
-	recipientUserID      string
-	directMessageID      int64
-	directInboxMailboxID int64
-	broadcastMessageID   int64
-	unrelatedMessageID   int64
-	reminderMailboxID    int64
-	contactObjectID      string
-	listID               string
+	senderUserID       string
+	recipientUserID    string
+	directMessageID    int64
+	broadcastMessageID int64
+	unrelatedMessageID int64
+	reminderMessageID  int64
+	contactObjectID    string
+	listID             string
 }
 
 type economyIdentityEventsFixture struct {
@@ -2047,15 +2055,14 @@ func seedCommunicationEventsFixture(t *testing.T, srv *Server, ctx context.Conte
 	}
 
 	return communicationEventsFixture{
-		senderUserID:         senderUserID,
-		recipientUserID:      recipientUserID,
-		directMessageID:      directSend.Item.MessageID,
-		directInboxMailboxID: directInbox[0].MailboxID,
-		broadcastMessageID:   listSend.Item.MessageID,
-		unrelatedMessageID:   unrelatedSend.Item.MessageID,
-		reminderMailboxID:    reminderInbox[0].MailboxID,
-		contactObjectID:      senderUserID + ":" + recipientUserID,
-		listID:               listCreate.Item.ListID,
+		senderUserID:       senderUserID,
+		recipientUserID:    recipientUserID,
+		directMessageID:    directSend.Item.MessageID,
+		broadcastMessageID: listSend.Item.MessageID,
+		unrelatedMessageID: unrelatedSend.Item.MessageID,
+		reminderMessageID:  reminderInbox[0].MessageID,
+		contactObjectID:    senderUserID + ":" + recipientUserID,
+		listID:             listCreate.Item.ListID,
 	}
 }
 

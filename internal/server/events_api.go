@@ -2941,7 +2941,6 @@ type communicationMailGroup struct {
 	Body       string
 	SentAt     time.Time
 	Recipients []string
-	MailboxIDs []int64
 }
 
 type communicationReminderFact struct {
@@ -3036,7 +3035,6 @@ func buildCommunicationMailSentEvent(group communicationMailGroup, actors map[st
 			"recipient_cnt": len(recipientIDs),
 			"subject":       strings.TrimSpace(group.Subject),
 			"body_excerpt":  bodyExcerpt,
-			"mailbox_ids":   group.MailboxIDs,
 		},
 		Visibility:   eventsDefaultVisibility,
 		sortTime:     group.SentAt.UTC(),
@@ -3059,7 +3057,7 @@ func buildCommunicationMailReceivedEvent(item store.MailItem, actors map[string]
 		summaryEN += " Summary: " + bodyExcerpt + "."
 	}
 	return apiEventItem{
-		EventID:      fmt.Sprintf("mail_received:%020d", item.MailboxID),
+		EventID:      fmt.Sprintf("mail_received:%s:%020d", strings.TrimSpace(item.OwnerAddress), item.MessageID),
 		OccurredAt:   item.SentAt.UTC().Format(eventsTimeLayout),
 		Kind:         "communication.mail.received",
 		Category:     "communication",
@@ -3071,13 +3069,12 @@ func buildCommunicationMailReceivedEvent(item store.MailItem, actors map[string]
 		SummaryEN:    summaryEN,
 		Actors:       apiEventActorsForUsers(actors, item.FromAddress),
 		Targets:      apiEventActorsForUsers(actors, item.OwnerAddress),
-		ObjectType:   "mailbox_item",
-		ObjectID:     strconv.FormatInt(item.MailboxID, 10),
+		ObjectType:   "mail_message",
+		ObjectID:     strconv.FormatInt(item.MessageID, 10),
 		ImpactLevel:  "info",
 		SourceModule: "mail.inbox",
-		SourceRef:    fmt.Sprintf("mailbox:%d", item.MailboxID),
+		SourceRef:    fmt.Sprintf("mail_message:%d", item.MessageID),
 		Evidence: map[string]any{
-			"mailbox_id":    item.MailboxID,
 			"message_id":    item.MessageID,
 			"owner_address": strings.TrimSpace(item.OwnerAddress),
 			"from_address":  strings.TrimSpace(item.FromAddress),
@@ -3122,7 +3119,7 @@ func buildCommunicationReminderTriggeredEvent(reminder communicationReminderFact
 		ObjectID:     reminder.ObjectID,
 		ImpactLevel:  "warning",
 		SourceModule: "mail.reminder",
-		SourceRef:    fmt.Sprintf("mailbox:%d", reminder.MailboxID),
+		SourceRef:    "mail_reminder:" + reminder.ObjectID,
 		Evidence:     communicationReminderEvidence(reminder),
 		Visibility:   eventsDefaultVisibility,
 		sortTime:     reminder.SentAt.UTC(),
@@ -3157,7 +3154,7 @@ func buildCommunicationReminderResolvedEvent(reminder communicationReminderFact,
 		ObjectID:     reminder.ObjectID,
 		ImpactLevel:  "notice",
 		SourceModule: "mail.reminder",
-		SourceRef:    fmt.Sprintf("mailbox:%d", reminder.MailboxID),
+		SourceRef:    "mail_reminder:" + reminder.ObjectID,
 		Evidence:     communicationReminderEvidence(reminder),
 		Visibility:   eventsDefaultVisibility,
 		sortTime:     resolvedAt,
@@ -3278,17 +3275,14 @@ func communicationMailGroups(items []store.MailItem) []communicationMailGroup {
 				Body:       strings.TrimSpace(item.Body),
 				SentAt:     item.SentAt.UTC(),
 				Recipients: []string{},
-				MailboxIDs: []int64{},
 			}
 			grouped[key] = group
 		}
 		group.Recipients = append(group.Recipients, strings.TrimSpace(item.ToAddress))
-		group.MailboxIDs = append(group.MailboxIDs, item.MailboxID)
 	}
 	out := make([]communicationMailGroup, 0, len(grouped))
 	for _, group := range grouped {
 		group.Recipients = collabCleanUserIDs(group.Recipients)
-		sort.Slice(group.MailboxIDs, func(i, j int) bool { return group.MailboxIDs[i] < group.MailboxIDs[j] })
 		out = append(out, *group)
 	}
 	sort.Slice(out, func(i, j int) bool {
@@ -3357,7 +3351,7 @@ func parseCommunicationReminder(item store.MailItem) (communicationReminderFact,
 		SentAt:     item.SentAt.UTC(),
 		ReadAt:     item.ReadAt,
 		IsPinned:   strings.Contains(upper, "[PINNED]"),
-		ObjectID:   strconv.FormatInt(item.MailboxID, 10),
+		ObjectID:   strconv.FormatInt(item.MessageID, 10),
 	}, true
 }
 
@@ -3388,7 +3382,7 @@ func communicationReminderLabel(kind, action string) (string, string) {
 
 func communicationReminderEvidence(reminder communicationReminderFact) map[string]any {
 	return map[string]any{
-		"mailbox_id":   reminder.MailboxID,
+		"reminder_id":  reminder.MessageID,
 		"message_id":   reminder.MessageID,
 		"user_id":      strings.TrimSpace(reminder.UserID),
 		"from_user_id": strings.TrimSpace(reminder.FromUserID),

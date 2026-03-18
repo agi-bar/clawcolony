@@ -471,17 +471,19 @@ func TestLowTokenAlertCooldownFromRuntimeSchedulerSettings(t *testing.T) {
 	}
 }
 
-func TestTokenLeaderboardExcludesInactiveUsersOnly(t *testing.T) {
+func TestTokenLeaderboardMatchesActivePopulation(t *testing.T) {
 	now := time.Date(2026, 3, 18, 12, 0, 0, 0, time.UTC)
 	srv := newTestServerWithStore(&leaderboardTestStore{
 		Store: store.NewInMemory(),
 		bots: []store.Bot{
 			{BotID: "running-user", Name: "running-user", Status: "running", Initialized: true},
+			{BotID: "active-user", Name: "active-user", Status: "active", Initialized: true},
 			{BotID: "inactive-user", Name: "inactive-user", Status: "inactive", Initialized: false},
 			{BotID: "deleted-user", Name: "deleted-user", Status: "deleted", Initialized: false},
 		},
 		accounts: []store.TokenAccount{
 			{BotID: "running-user", Balance: 900, UpdatedAt: now.Add(-time.Minute)},
+			{BotID: "active-user", Balance: 400, UpdatedAt: now.Add(-90 * time.Second)},
 			{BotID: "inactive-user", Balance: 1200, UpdatedAt: now},
 			{BotID: "deleted-user", Balance: 600, UpdatedAt: now.Add(-2 * time.Minute)},
 			{BotID: "missing-user", Balance: 300, UpdatedAt: now.Add(-3 * time.Minute)},
@@ -506,41 +508,87 @@ func TestTokenLeaderboardExcludesInactiveUsersOnly(t *testing.T) {
 		t.Fatalf("unmarshal token leaderboard response: %v", err)
 	}
 
-	if resp.Total != 3 {
-		t.Fatalf("leaderboard total=%d, want 3: %s", resp.Total, w.Body.String())
+	if resp.Total != 2 {
+		t.Fatalf("leaderboard total=%d, want 2 active users: %s", resp.Total, w.Body.String())
 	}
-	if len(resp.Items) != 3 {
-		t.Fatalf("leaderboard items=%d, want 3: %s", len(resp.Items), w.Body.String())
+	if len(resp.Items) != 2 {
+		t.Fatalf("leaderboard items=%d, want 2: %s", len(resp.Items), w.Body.String())
 	}
 	if resp.Items[0].UserID != "running-user" || resp.Items[0].Rank != 1 {
 		t.Fatalf("rank 1=%+v, want running-user rank 1", resp.Items[0])
 	}
-	if resp.Items[1].UserID != "deleted-user" || resp.Items[1].Status != "deleted" {
-		t.Fatalf("rank 2=%+v, want deleted-user kept", resp.Items[1])
-	}
-	if resp.Items[2].UserID != "missing-user" || resp.Items[2].BotFound {
-		t.Fatalf("rank 3=%+v, want missing-user kept with bot_found=false", resp.Items[2])
+	if resp.Items[1].UserID != "active-user" || resp.Items[1].Status != "active" {
+		t.Fatalf("rank 2=%+v, want active-user kept", resp.Items[1])
 	}
 	for _, item := range resp.Items {
-		if item.UserID == "inactive-user" {
-			t.Fatalf("inactive user should be excluded: %s", w.Body.String())
+		if item.UserID == "inactive-user" || item.UserID == "deleted-user" || item.UserID == "missing-user" {
+			t.Fatalf("non-active user should be excluded: %s", w.Body.String())
+		}
+		if !item.BotFound {
+			t.Fatalf("active leaderboard user should always have bot metadata: %s", w.Body.String())
 		}
 	}
 }
 
-func TestTokenLeaderboardLimitAppliesAfterInactiveFiltering(t *testing.T) {
+func TestTokenLeaderboardIncludesActiveUsersWithoutTokenAccount(t *testing.T) {
 	now := time.Date(2026, 3, 18, 13, 0, 0, 0, time.UTC)
 	srv := newTestServerWithStore(&leaderboardTestStore{
 		Store: store.NewInMemory(),
 		bots: []store.Bot{
 			{BotID: "active-high", Name: "active-high", Status: "running", Initialized: true},
+			{BotID: "active-zero", Name: "active-zero", Status: "running", Initialized: true, UpdatedAt: now.Add(-3 * time.Minute)},
 			{BotID: "inactive-top", Name: "inactive-top", Status: "inactive", Initialized: false},
-			{BotID: "active-low", Name: "active-low", Status: "running", Initialized: true},
 		},
 		accounts: []store.TokenAccount{
 			{BotID: "active-high", Balance: 800, UpdatedAt: now.Add(-time.Minute)},
 			{BotID: "inactive-top", Balance: 1000, UpdatedAt: now},
+		},
+	})
+
+	w := doJSONRequest(t, srv.mux, http.MethodGet, "/api/v1/token/leaderboard?limit=10", nil)
+	if w.Code != http.StatusOK {
+		t.Fatalf("token leaderboard status=%d body=%s", w.Code, w.Body.String())
+	}
+
+	var resp struct {
+		Total int `json:"total"`
+		Items []struct {
+			Rank    int    `json:"rank"`
+			UserID  string `json:"user_id"`
+			Balance int64  `json:"balance"`
+		} `json:"items"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("unmarshal token leaderboard response: %v", err)
+	}
+
+	if resp.Total != 2 {
+		t.Fatalf("leaderboard total=%d, want 2 active users: %s", resp.Total, w.Body.String())
+	}
+	if len(resp.Items) != 2 {
+		t.Fatalf("leaderboard items=%d, want 2: %s", len(resp.Items), w.Body.String())
+	}
+	if resp.Items[0].UserID != "active-high" || resp.Items[0].Rank != 1 {
+		t.Fatalf("limited leaderboard first item=%+v, want active-high rank 1", resp.Items[0])
+	}
+	if resp.Items[1].UserID != "active-zero" || resp.Items[1].Balance != 0 {
+		t.Fatalf("second leaderboard item=%+v, want active-zero with 0 balance", resp.Items[1])
+	}
+}
+
+func TestTokenLeaderboardLimitAppliesAfterActivePopulationFiltering(t *testing.T) {
+	now := time.Date(2026, 3, 18, 14, 0, 0, 0, time.UTC)
+	srv := newTestServerWithStore(&leaderboardTestStore{
+		Store: store.NewInMemory(),
+		bots: []store.Bot{
+			{BotID: "active-high", Name: "active-high", Status: "running", Initialized: true},
+			{BotID: "active-low", Name: "active-low", Status: "running", Initialized: true},
+			{BotID: "inactive-top", Name: "inactive-top", Status: "inactive", Initialized: false},
+		},
+		accounts: []store.TokenAccount{
+			{BotID: "active-high", Balance: 800, UpdatedAt: now.Add(-time.Minute)},
 			{BotID: "active-low", Balance: 700, UpdatedAt: now.Add(-2 * time.Minute)},
+			{BotID: "inactive-top", Balance: 1000, UpdatedAt: now},
 		},
 	})
 
@@ -561,10 +609,10 @@ func TestTokenLeaderboardLimitAppliesAfterInactiveFiltering(t *testing.T) {
 	}
 
 	if resp.Total != 2 {
-		t.Fatalf("leaderboard total=%d, want 2 after filtering: %s", resp.Total, w.Body.String())
+		t.Fatalf("leaderboard total=%d, want 2 after active filtering: %s", resp.Total, w.Body.String())
 	}
 	if len(resp.Items) != 1 {
-		t.Fatalf("leaderboard items=%d, want 1: %s", len(resp.Items), w.Body.String())
+		t.Fatalf("leaderboard items=%d, want 1 after limit: %s", len(resp.Items), w.Body.String())
 	}
 	if resp.Items[0].UserID != "active-high" || resp.Items[0].Rank != 1 {
 		t.Fatalf("limited leaderboard first item=%+v, want active-high rank 1", resp.Items[0])

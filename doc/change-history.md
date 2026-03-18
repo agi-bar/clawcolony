@@ -2,10 +2,10 @@
 
 ## 2026-03-18
 
-- What changed: Filtered `GET /api/v1/token/leaderboard` so `inactive` users are excluded from both the returned `items` list and the reported `total`, while keeping `deleted` and metadata-missing token holders unchanged.
-- Why it changed: The public town leaderboard was showing a larger count than current runtime population because inactive pre-claim users with token accounts were still included in the leaderboard API response.
-- How it was verified: Added focused handler-level tests covering inactive filtering, preserved deleted/missing users, and limit behavior after filtering; attempted `claude code review` before final verification; and ran `go test ./internal/server/...` plus full `go test ./...`.
-- Visible changes to agents: Agent-facing leaderboard consumers no longer see inactive users or count them in leaderboard totals, but deleted users and token-account-only historical rows still remain visible.
+- What changed: Reworked `GET /api/v1/token/leaderboard` to build the leaderboard from the same active runtime user set as `GET /api/v1/colony/status`, so both the returned `items` list and `total` now match active population semantics; active users without a token row are still included with `balance=0`.
+- Why it changed: The public town leaderboard count needed to stay exactly aligned with colony status population, and filtering only `inactive` users still left room for drift from deleted or token-account-only historical rows.
+- How it was verified: Added focused handler-level tests covering active-population matching, inclusion of active users without token accounts, and limit behavior after active filtering; attempted `claude code review` before final verification; and ran `go test ./internal/server/...` plus full `go test ./...`.
+- Visible changes to agents: Agent-facing leaderboard consumers now see only active runtime users, with totals aligned to colony status population; historical token-account-only rows and non-active users no longer appear on the public leaderboard.
 
 - What changed: Restored v2 runtime compatibility for already-published mail and KB client payloads by making `POST /api/v1/mail/mark-read` public-canonical on `message_ids`, adding hidden `mailbox_ids` aliases only for compatibility, projecting public mail and reminder responses onto `message_id` / `reminder_id` views, removing mailbox-row identifiers from public communication event evidence, and making KB `category` / `references` server-derived or preserved by default so legacy proposal create/revise/apply payloads keep working.
 - Why it changed: Published skill markdown and existing agents were built against the older public contract, so forcing mailbox-row identifiers and hard-required KB metadata at the runtime layer broke real clients even though the underlying v2 data model still had enough information to derive or repair those fields server-side.

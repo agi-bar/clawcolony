@@ -3421,13 +3421,6 @@ func preferTokenLeaderboardAccount(current, candidate store.TokenAccount) bool {
 	return false
 }
 
-func excludeInactiveTokenLeaderboardBot(bot store.Bot, ok bool) bool {
-	if !ok {
-		return false
-	}
-	return strings.EqualFold(strings.TrimSpace(bot.Status), "inactive")
-}
-
 func (s *Server) handleTokenLeaderboard(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
@@ -3445,21 +3438,19 @@ func (s *Server) handleTokenLeaderboard(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	botByID := make(map[string]store.Bot, len(bots))
-	for _, b := range bots {
+	activeBots := make([]store.Bot, 0, len(bots))
+	for _, b := range s.filterActiveBots(r.Context(), bots) {
 		uid := strings.TrimSpace(b.BotID)
-		if uid == "" {
+		if uid == "" || isExcludedTokenUserID(uid) {
 			continue
 		}
 		botByID[uid] = b
+		activeBots = append(activeBots, b)
 	}
 	accountByUserID := make(map[string]store.TokenAccount, len(accounts))
 	for _, account := range accounts {
 		uid := strings.TrimSpace(account.BotID)
 		if isExcludedTokenUserID(uid) {
-			continue
-		}
-		bot, ok := botByID[uid]
-		if excludeInactiveTokenLeaderboardBot(bot, ok) {
 			continue
 		}
 		current, exists := accountByUserID[uid]
@@ -3468,34 +3459,33 @@ func (s *Server) handleTokenLeaderboard(w http.ResponseWriter, r *http.Request) 
 		}
 		accountByUserID[uid] = account
 	}
-	items := make([]tokenLeaderboardEntry, 0, len(accountByUserID))
-	for uid, account := range accountByUserID {
-		meta, ok := botByID[uid]
-		name := uid
-		nickname := ""
-		status := "missing"
-		initialized := false
+	items := make([]tokenLeaderboardEntry, 0, len(activeBots))
+	for _, meta := range activeBots {
+		uid := strings.TrimSpace(meta.BotID)
+		account, ok := accountByUserID[uid]
+		balance := int64(0)
+		updatedAt := meta.UpdatedAt
 		if ok {
-			name = strings.TrimSpace(meta.Name)
-			nickname = strings.TrimSpace(meta.Nickname)
-			status = strings.TrimSpace(meta.Status)
-			if status == "" {
-				status = "unknown"
-			}
-			initialized = meta.Initialized
+			balance = account.Balance
+			updatedAt = account.UpdatedAt
 		}
+		name := strings.TrimSpace(meta.Name)
 		if name == "" {
 			name = uid
+		}
+		status := strings.TrimSpace(meta.Status)
+		if status == "" {
+			status = "unknown"
 		}
 		items = append(items, tokenLeaderboardEntry{
 			UserID:      uid,
 			Name:        name,
-			Nickname:    nickname,
-			BotFound:    ok,
+			Nickname:    strings.TrimSpace(meta.Nickname),
+			BotFound:    true,
 			Status:      status,
-			Initialized: initialized,
-			Balance:     account.Balance,
-			UpdatedAt:   account.UpdatedAt,
+			Initialized: meta.Initialized,
+			Balance:     balance,
+			UpdatedAt:   updatedAt,
 		})
 	}
 	sortTokenLeaderboardEntries(items)

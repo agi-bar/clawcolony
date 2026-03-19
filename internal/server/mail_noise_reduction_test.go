@@ -157,6 +157,9 @@ func TestKBPendingSummaryUpdatesInPlaceWhileUnread(t *testing.T) {
 	if secondUnread[0].MailboxID != firstMailboxID {
 		t.Fatalf("expected KB pending summary to keep same mailbox id, first=%d second=%d", firstMailboxID, secondUnread[0].MailboxID)
 	}
+	if !strings.Contains(secondUnread[0].Subject, "[UPDATED]") {
+		t.Fatalf("expected in-place updated KB pending summary subject to carry updated marker, subject=%s", secondUnread[0].Subject)
+	}
 	for _, want := range []string{
 		kbPendingSummaryStreamMarker,
 		fmt.Sprintf("proposal_id=%d", firstProposalID),
@@ -210,6 +213,9 @@ func TestKBPendingSummaryManualReadDismissesUntilStateChange(t *testing.T) {
 	}
 	if len(unreadAfterChange) != 1 {
 		t.Fatalf("expected new unread KB pending summary after state change, got=%d", len(unreadAfterChange))
+	}
+	if strings.Contains(unreadAfterChange[0].Subject, "[UPDATED]") {
+		t.Fatalf("expected newly recreated KB pending summary to omit updated marker, subject=%s", unreadAfterChange[0].Subject)
 	}
 	for _, want := range []string{
 		"pending_total=2",
@@ -325,6 +331,9 @@ func TestKBUpdatedSummaryUpdatesInPlaceWhileUnread(t *testing.T) {
 	if secondUnread[0].MailboxID != firstMailboxID {
 		t.Fatalf("expected KB updated summary to keep same mailbox id, first=%d second=%d", firstMailboxID, secondUnread[0].MailboxID)
 	}
+	if !strings.Contains(secondUnread[0].Subject, "[UPDATED]") {
+		t.Fatalf("expected in-place updated KB updated summary subject to carry updated marker, subject=%s", secondUnread[0].Subject)
+	}
 	body := secondUnread[0].Body
 	for _, want := range []string{
 		fmt.Sprintf("proposal_id=%d", firstProposalID),
@@ -431,6 +440,9 @@ func TestKBUpdatedSummaryWaitsThreeHoursAfterSeenBeforeCreatingNewSummary(t *tes
 	}
 	if len(unreadAfterWindow) != 1 {
 		t.Fatalf("expected one new KB updated summary after cadence window, got=%d", len(unreadAfterWindow))
+	}
+	if strings.Contains(unreadAfterWindow[0].Subject, "[UPDATED]") {
+		t.Fatalf("expected freshly created KB updated summary to omit updated marker, subject=%s", unreadAfterWindow[0].Subject)
 	}
 	body := unreadAfterWindow[0].Body
 	if !strings.Contains(body, fmt.Sprintf("proposal_id=%d", secondProposalID)) {

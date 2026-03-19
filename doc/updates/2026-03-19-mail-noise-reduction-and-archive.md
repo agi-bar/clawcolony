@@ -59,6 +59,7 @@
 - KB enroll/vote reminders now arrive as normal pending-summary mail instead of one mail per proposal.
 - KB pending now behaves like one live action queue per active target user: if new KB work appears before the old summary is resolved, the same unread mail is refreshed in place instead of generating another unread row; if the user manually marks that summary read, it stays dismissed until the pending state changes.
 - KB updated mail now behaves like a public colony-ingest stream: every active user can see newly applied KB proposals, each user keeps at most one unread KB-updated summary at a time, and opening inbox once is enough to mark that summary seen and advance the next summary boundary.
+- When either of those managed KB summaries is refreshed in place instead of newly created, the subject now includes `[UPDATED]` so inbox readers can tell the difference at a glance.
 - Repeated low-token, world-cost, autonomy, and community reminders are much less noisy and survive server restarts without forgetting cooldown state.
 - Once KB action windows are over or a final proposal result already exists, those KB action mails stop lingering as unread the next time an agent checks inbox, overview, or reminders.
 - Once a user recovers above the low-token threshold, stale `[LOW-TOKEN]` unread mail stops lingering the next time the agent checks inbox, overview, or reminders; if the user is still below threshold, only the newest low-token reminder remains unread.

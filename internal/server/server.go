@@ -7749,6 +7749,17 @@ func buildKBPendingActionBlock(actionLabel, method, url, auth, jsonBody, success
 	return body.String()
 }
 
+func subjectWithUpdatedMarker(subject string) string {
+	subject = strings.TrimSpace(subject)
+	if subject == "" || strings.Contains(subject, "[UPDATED]") {
+		return subject
+	}
+	if refIdx := strings.Index(subject, " [REF:"); refIdx >= 0 {
+		return subject[:refIdx] + " [UPDATED]" + subject[refIdx:]
+	}
+	return subject + " [UPDATED]"
+}
+
 func buildKBPendingSummaryMail(summary kbPendingSummary, generatedAt time.Time) (string, string) {
 	total := len(summary.Votes) + len(summary.Enrolls)
 	if total == 0 {
@@ -8053,7 +8064,8 @@ func (s *Server) syncKBPendingSummaryForUser(ctx context.Context, userID string,
 		if state.StateHash == stateHash {
 			return state, nil
 		}
-		if err := s.store.UpdateMailMessage(ctx, state.OutstandingMessageID, subject, body, now); err != nil {
+		updatedSubject := subjectWithUpdatedMarker(subject)
+		if err := s.store.UpdateMailMessage(ctx, state.OutstandingMessageID, updatedSubject, body, now); err != nil {
 			return state, err
 		}
 		state.StateHash = stateHash
@@ -8062,7 +8074,7 @@ func (s *Server) syncKBPendingSummaryForUser(ctx context.Context, userID string,
 		if _, err := s.store.UpsertNotificationDeliveryState(ctx, state); err != nil {
 			return state, err
 		}
-		s.pushUnreadMailHint(ctx, clawWorldSystemID, []string{userID}, subject)
+		s.pushUnreadMailHint(ctx, clawWorldSystemID, []string{userID}, updatedSubject)
 		return state, nil
 	}
 	if state.StateHash == stateHash {
@@ -8460,14 +8472,15 @@ func (s *Server) sendKBUpdatedSummaryMails(ctx context.Context) {
 			if state.StateHash == stateHash {
 				continue
 			}
-			if err := s.store.UpdateMailMessage(ctx, state.OutstandingMessageID, subject, body, now); err != nil {
+			updatedSubject := subjectWithUpdatedMarker(subject)
+			if err := s.store.UpdateMailMessage(ctx, state.OutstandingMessageID, updatedSubject, body, now); err != nil {
 				continue
 			}
 			state.StateHash = stateHash
 			state.LastSentAt = now
 			state.LastRemindedAt = now
 			if _, err := s.store.UpsertNotificationDeliveryState(ctx, state); err == nil {
-				s.pushUnreadMailHint(ctx, clawWorldSystemID, []string{userID}, subject)
+				s.pushUnreadMailHint(ctx, clawWorldSystemID, []string{userID}, updatedSubject)
 			}
 			continue
 		}

@@ -1636,8 +1636,8 @@ func (s *PostgresStore) ListMailbox(ctx context.Context, ownerAddress, folder, s
 	if limit <= 0 {
 		limit = 100
 	}
-	if limit > 500 {
-		limit = 500
+	if limit > 5000 {
+		limit = 5000
 	}
 	var fromArg any
 	if fromTime != nil {

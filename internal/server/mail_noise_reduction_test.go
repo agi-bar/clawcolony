@@ -176,6 +176,69 @@ func TestLowTokenAlertResetsAfterRecoveryAboveThreshold(t *testing.T) {
 	}
 }
 
+func TestMailInboxAutoMarksRecoveredLowTokenRead(t *testing.T) {
+	srv := newTestServer()
+	ctx := context.Background()
+	user := newAuthUser(t, srv)
+	balance := int64(1000)
+	threshold := srv.cfg.InitialToken / 5
+	if threshold <= 0 {
+		threshold = 1
+	}
+	consumeAmount := balance - threshold + 1
+	if _, err := srv.store.Consume(ctx, user.id, consumeAmount); err != nil {
+		t.Fatalf("consume below threshold: %v", err)
+	}
+	balance -= consumeAmount
+	if err := srv.runLowEnergyAlertTick(ctx, 1); err != nil {
+		t.Fatalf("low energy tick1: %v", err)
+	}
+
+	unreadBefore, err := srv.store.ListMailbox(ctx, user.id, "inbox", "unread", "[LOW-TOKEN]", nil, nil, 20)
+	if err != nil {
+		t.Fatalf("list unread low-token inbox before recovery: %v", err)
+	}
+	if len(unreadBefore) != 1 {
+		t.Fatalf("expected one unread low-token mail before recovery, got=%d", len(unreadBefore))
+	}
+	if _, ok, err := srv.store.GetNotificationDeliveryState(ctx, user.id, notificationCategoryLowTokenAlert); err != nil {
+		t.Fatalf("get low-token notification state before recovery: %v", err)
+	} else if !ok {
+		t.Fatalf("expected low-token notification state to exist before recovery")
+	}
+
+	rechargeAmount := threshold - balance + 1000
+	if _, err := srv.store.Recharge(ctx, user.id, rechargeAmount); err != nil {
+		t.Fatalf("recharge above threshold: %v", err)
+	}
+
+	inboxResp := doJSONRequestWithHeaders(t, srv.mux, http.MethodGet, "/api/v1/mail/inbox?scope=unread&limit=20", nil, user.headers())
+	if inboxResp.Code != http.StatusOK {
+		t.Fatalf("mail inbox status=%d body=%s", inboxResp.Code, inboxResp.Body.String())
+	}
+
+	unreadAfter, err := srv.store.ListMailbox(ctx, user.id, "inbox", "unread", "[LOW-TOKEN]", nil, nil, 20)
+	if err != nil {
+		t.Fatalf("list unread low-token inbox after recovery: %v", err)
+	}
+	if len(unreadAfter) != 0 {
+		t.Fatalf("expected recovered low-token mail to auto-read, got unread=%d", len(unreadAfter))
+	}
+
+	readAfter, err := srv.store.ListMailbox(ctx, user.id, "inbox", "read", "[LOW-TOKEN]", nil, nil, 20)
+	if err != nil {
+		t.Fatalf("list read low-token inbox after recovery: %v", err)
+	}
+	if len(readAfter) != 1 || !readAfter[0].IsRead {
+		t.Fatalf("expected recovered low-token mail to be marked read, got=%d", len(readAfter))
+	}
+	if _, ok, err := srv.store.GetNotificationDeliveryState(ctx, user.id, notificationCategoryLowTokenAlert); err != nil {
+		t.Fatalf("get low-token notification state after recovery: %v", err)
+	} else if ok {
+		t.Fatalf("expected low-token notification state to be cleared after recovery auto-read")
+	}
+}
+
 func TestMailInboxAutoMarksClosedKBEnrollmentSummaryRead(t *testing.T) {
 	srv := newTestServer()
 	ctx := context.Background()
@@ -234,6 +297,69 @@ func TestMailInboxAutoMarksClosedKBEnrollmentSummaryRead(t *testing.T) {
 	}
 	if len(readAfter) != 1 || !readAfter[0].IsRead {
 		t.Fatalf("expected stale KB enrollment summary to be marked read, got=%d", len(readAfter))
+	}
+}
+
+func TestMailInboxAutoMarksClosedLegacyKBEnrollMailWithoutRevisionRead(t *testing.T) {
+	srv := newTestServer()
+	ctx := context.Background()
+	proposer := newAuthUser(t, srv)
+	recipient := newAuthUser(t, srv)
+
+	createResp := doJSONRequestWithHeaders(t, srv.mux, http.MethodPost, "/api/v1/kb/proposals", map[string]any{
+		"title":                     "closed-legacy-enroll-no-revision",
+		"reason":                    "verify stale legacy KB enroll mail without revision fields is auto-read once the proposal closes",
+		"vote_threshold_pct":        50,
+		"vote_window_seconds":       300,
+		"discussion_window_seconds": 300,
+		"change": map[string]any{
+			"op_type":     "add",
+			"section":     "runtime-mail",
+			"title":       "closed-legacy-enroll-no-revision",
+			"new_content": "stale legacy enroll reminder without revision fields",
+			"diff_text":   "auto-read stale legacy KB enroll mail without revision fields",
+		},
+	}, proposer.headers())
+	if createResp.Code != http.StatusAccepted {
+		t.Fatalf("create proposal status=%d body=%s", createResp.Code, createResp.Body.String())
+	}
+	createBody := parseJSONBody(t, createResp)
+	proposal := createBody["proposal"].(map[string]any)
+	proposalID := int64(proposal["id"].(float64))
+
+	_, err := srv.store.SendMail(ctx, store.MailSendInput{
+		From:    clawWorldSystemID,
+		To:      []string{recipient.id},
+		Subject: "[KNOWLEDGEBASE-PROPOSAL][PRIORITY:P2][ACTION:ENROLL] #" + strconv.FormatInt(proposalID, 10) + " legacy stale without revision",
+		Body:    "proposal_id=" + strconv.FormatInt(proposalID, 10) + "\nreason=legacy enroll mail without revision fields",
+	})
+	if err != nil {
+		t.Fatalf("seed legacy KB enroll reminder without revision: %v", err)
+	}
+
+	unreadBefore, err := srv.store.ListMailbox(ctx, recipient.id, "inbox", "unread", "legacy stale without revision", nil, nil, 20)
+	if err != nil {
+		t.Fatalf("list unread legacy KB enroll before close: %v", err)
+	}
+	if len(unreadBefore) != 1 {
+		t.Fatalf("expected one unread legacy KB enroll mail before close, got=%d", len(unreadBefore))
+	}
+
+	if _, err := srv.store.CloseKBProposal(ctx, proposalID, "rejected", "closed in legacy enroll test", 0, 0, 0, 0, 0, time.Now().UTC()); err != nil {
+		t.Fatalf("close proposal rejected: %v", err)
+	}
+
+	inboxResp := doJSONRequestWithHeaders(t, srv.mux, http.MethodGet, "/api/v1/mail/inbox?scope=unread&limit=20", nil, recipient.headers())
+	if inboxResp.Code != http.StatusOK {
+		t.Fatalf("mail inbox status=%d body=%s", inboxResp.Code, inboxResp.Body.String())
+	}
+
+	unreadAfter, err := srv.store.ListMailbox(ctx, recipient.id, "inbox", "unread", "legacy stale without revision", nil, nil, 20)
+	if err != nil {
+		t.Fatalf("list unread legacy KB enroll after close: %v", err)
+	}
+	if len(unreadAfter) != 0 {
+		t.Fatalf("expected stale legacy KB enroll mail without revision to auto-read after close, got unread=%d", len(unreadAfter))
 	}
 }
 
@@ -460,6 +586,236 @@ func TestMailSystemResolveObsoleteKBDryRunDoesNotMutate(t *testing.T) {
 	}
 	if len(unreadAfter) != 1 {
 		t.Fatalf("expected dry-run to leave unread KB mail untouched, got=%d", len(unreadAfter))
+	}
+}
+
+func TestMailSystemResolveObsoleteKBDryRunSupportsLowTokenClass(t *testing.T) {
+	srv := newTestServer()
+	srv.cfg.InternalSyncToken = "sync-token"
+	ctx := context.Background()
+	user := newAuthUser(t, srv)
+	balance := int64(1000)
+	threshold := srv.cfg.InitialToken / 5
+	if threshold <= 0 {
+		threshold = 1
+	}
+	consumeAmount := balance - threshold + 1
+	if _, err := srv.store.Consume(ctx, user.id, consumeAmount); err != nil {
+		t.Fatalf("consume below threshold: %v", err)
+	}
+	balance -= consumeAmount
+	if err := srv.runLowEnergyAlertTick(ctx, 1); err != nil {
+		t.Fatalf("low energy tick1: %v", err)
+	}
+	if _, ok, err := srv.store.GetNotificationDeliveryState(ctx, user.id, notificationCategoryLowTokenAlert); err != nil {
+		t.Fatalf("get low-token state before dry-run: %v", err)
+	} else if !ok {
+		t.Fatalf("expected low-token state before dry-run")
+	}
+	rechargeAmount := threshold - balance + 1000
+	if _, err := srv.store.Recharge(ctx, user.id, rechargeAmount); err != nil {
+		t.Fatalf("recharge above threshold: %v", err)
+	}
+
+	resp := doJSONRequestWithHeaders(t, srv.mux, http.MethodPost, "/api/v1/mail/system/resolve-obsolete-kb", map[string]any{
+		"dry_run":  true,
+		"classes":  []string{obsoleteMailClassLowToken},
+		"user_ids": []string{user.id},
+	}, map[string]string{
+		"X-Clawcolony-Internal-Token": "sync-token",
+	})
+	if resp.Code != http.StatusOK {
+		t.Fatalf("obsolete low-token dry-run status=%d body=%s", resp.Code, resp.Body.String())
+	}
+	body := parseJSONBody(t, resp)
+	result := body["result"].(map[string]any)
+	if got := int(result["affected_user_count"].(float64)); got != 1 {
+		t.Fatalf("expected low-token dry-run affected_user_count=1 got=%d body=%s", got, resp.Body.String())
+	}
+	if got := int(result["resolved_mailbox_count"].(float64)); got != 1 {
+		t.Fatalf("expected low-token dry-run resolved_mailbox_count=1 got=%d body=%s", got, resp.Body.String())
+	}
+
+	unreadAfter, err := srv.store.ListMailbox(ctx, user.id, "inbox", "unread", "[LOW-TOKEN]", nil, nil, 20)
+	if err != nil {
+		t.Fatalf("list unread low-token inbox after dry-run: %v", err)
+	}
+	if len(unreadAfter) != 1 {
+		t.Fatalf("expected dry-run to leave unread low-token mail untouched, got=%d", len(unreadAfter))
+	}
+	if _, ok, err := srv.store.GetNotificationDeliveryState(ctx, user.id, notificationCategoryLowTokenAlert); err != nil {
+		t.Fatalf("get low-token state after dry-run: %v", err)
+	} else if !ok {
+		t.Fatalf("expected low-token state to remain after dry-run")
+	}
+}
+
+func TestMailSystemResolveObsoleteKBOnlyRequestedClasses(t *testing.T) {
+	srv := newTestServer()
+	srv.cfg.InternalSyncToken = "sync-token"
+	ctx := context.Background()
+	proposer := newAuthUser(t, srv)
+	recipient := newAuthUser(t, srv)
+
+	createResp := doJSONRequestWithHeaders(t, srv.mux, http.MethodPost, "/api/v1/kb/proposals", map[string]any{
+		"title":                     "obsolete-class-filter",
+		"reason":                    "verify obsolete cleanup only resolves explicitly requested classes",
+		"vote_threshold_pct":        50,
+		"vote_window_seconds":       300,
+		"discussion_window_seconds": 300,
+		"change": map[string]any{
+			"op_type":     "add",
+			"section":     "runtime-mail",
+			"title":       "obsolete-class-filter",
+			"new_content": "class filtering cleanup test",
+			"diff_text":   "only low-token cleanup should not touch stale KB mail",
+		},
+	}, proposer.headers())
+	if createResp.Code != http.StatusAccepted {
+		t.Fatalf("create proposal status=%d body=%s", createResp.Code, createResp.Body.String())
+	}
+	createBody := parseJSONBody(t, createResp)
+	proposal := createBody["proposal"].(map[string]any)
+	proposalID := int64(proposal["id"].(float64))
+	if _, err := srv.store.CloseKBProposal(ctx, proposalID, "rejected", "closed for class-filter cleanup", 0, 0, 0, 0, 0, time.Now().UTC()); err != nil {
+		t.Fatalf("close proposal rejected: %v", err)
+	}
+
+	balance := int64(1000)
+	threshold := srv.cfg.InitialToken / 5
+	if threshold <= 0 {
+		threshold = 1
+	}
+	consumeAmount := balance - threshold + 1
+	if _, err := srv.store.Consume(ctx, recipient.id, consumeAmount); err != nil {
+		t.Fatalf("consume below threshold: %v", err)
+	}
+	balance -= consumeAmount
+	if err := srv.runLowEnergyAlertTick(ctx, 1); err != nil {
+		t.Fatalf("low energy tick1: %v", err)
+	}
+	rechargeAmount := threshold - balance + 1000
+	if _, err := srv.store.Recharge(ctx, recipient.id, rechargeAmount); err != nil {
+		t.Fatalf("recharge above threshold: %v", err)
+	}
+
+	kbUnreadBefore, err := srv.store.ListMailbox(ctx, recipient.id, "inbox", "unread", "[KNOWLEDGEBASE-PROPOSAL]", nil, nil, 20)
+	if err != nil {
+		t.Fatalf("list unread KB inbox before class-filter cleanup: %v", err)
+	}
+	if len(kbUnreadBefore) != 1 {
+		t.Fatalf("expected one unread KB mail before class-filter cleanup, got=%d", len(kbUnreadBefore))
+	}
+	lowTokenUnreadBefore, err := srv.store.ListMailbox(ctx, recipient.id, "inbox", "unread", "[LOW-TOKEN]", nil, nil, 20)
+	if err != nil {
+		t.Fatalf("list unread low-token inbox before class-filter cleanup: %v", err)
+	}
+	if len(lowTokenUnreadBefore) != 1 {
+		t.Fatalf("expected one unread low-token mail before class-filter cleanup, got=%d", len(lowTokenUnreadBefore))
+	}
+
+	resp := doJSONRequestWithHeaders(t, srv.mux, http.MethodPost, "/api/v1/mail/system/resolve-obsolete-kb", map[string]any{
+		"dry_run":  false,
+		"classes":  []string{obsoleteMailClassLowToken},
+		"user_ids": []string{recipient.id},
+	}, map[string]string{
+		"X-Clawcolony-Internal-Token": "sync-token",
+	})
+	if resp.Code != http.StatusAccepted {
+		t.Fatalf("obsolete low-token cleanup status=%d body=%s", resp.Code, resp.Body.String())
+	}
+	body := parseJSONBody(t, resp)
+	result := body["result"].(map[string]any)
+	if got := int(result["affected_user_count"].(float64)); got != 1 {
+		t.Fatalf("expected class-filter cleanup affected_user_count=1 got=%d body=%s", got, resp.Body.String())
+	}
+	if got := int(result["resolved_mailbox_count"].(float64)); got != 1 {
+		t.Fatalf("expected class-filter cleanup resolved_mailbox_count=1 got=%d body=%s", got, resp.Body.String())
+	}
+
+	kbUnreadAfter, err := srv.store.ListMailbox(ctx, recipient.id, "inbox", "unread", "[KNOWLEDGEBASE-PROPOSAL]", nil, nil, 20)
+	if err != nil {
+		t.Fatalf("list unread KB inbox after class-filter cleanup: %v", err)
+	}
+	if len(kbUnreadAfter) != 1 {
+		t.Fatalf("expected low-token-only cleanup to leave KB unread untouched, got=%d", len(kbUnreadAfter))
+	}
+	lowTokenUnreadAfter, err := srv.store.ListMailbox(ctx, recipient.id, "inbox", "unread", "[LOW-TOKEN]", nil, nil, 20)
+	if err != nil {
+		t.Fatalf("list unread low-token inbox after class-filter cleanup: %v", err)
+	}
+	if len(lowTokenUnreadAfter) != 0 {
+		t.Fatalf("expected low-token-only cleanup to resolve stale low-token unread, got=%d", len(lowTokenUnreadAfter))
+	}
+	if _, ok, err := srv.store.GetNotificationDeliveryState(ctx, recipient.id, notificationCategoryLowTokenAlert); err != nil {
+		t.Fatalf("get low-token state after class-filter cleanup: %v", err)
+	} else if ok {
+		t.Fatalf("expected low-token notification state to be cleared after class-filter cleanup")
+	}
+}
+
+func TestMailSystemResolveObsoleteKBLowTokenKeepsLatestUnreadWhenStillBelowThreshold(t *testing.T) {
+	srv := newTestServer()
+	srv.cfg.InternalSyncToken = "sync-token"
+	ctx := context.Background()
+	user := newAuthUser(t, srv)
+	threshold := srv.cfg.InitialToken / 5
+	if threshold <= 0 {
+		threshold = 1
+	}
+	if _, err := srv.store.Consume(ctx, user.id, 1000-threshold+1); err != nil {
+		t.Fatalf("consume below threshold: %v", err)
+	}
+
+	subjects := []string{
+		"[LOW-TOKEN] stale-one",
+		"[LOW-TOKEN] stale-two",
+		"[LOW-TOKEN] stale-three",
+	}
+	for _, subject := range subjects {
+		if _, err := srv.store.SendMail(ctx, store.MailSendInput{
+			From:    clawWorldSystemID,
+			To:      []string{user.id},
+			Subject: subject,
+			Body:    "low token cleanup keeps only latest unread when balance remains below threshold",
+		}); err != nil {
+			t.Fatalf("seed low-token mail %q: %v", subject, err)
+		}
+	}
+
+	resp := doJSONRequestWithHeaders(t, srv.mux, http.MethodPost, "/api/v1/mail/system/resolve-obsolete-kb", map[string]any{
+		"dry_run":  false,
+		"classes":  []string{obsoleteMailClassLowToken},
+		"user_ids": []string{user.id},
+	}, map[string]string{
+		"X-Clawcolony-Internal-Token": "sync-token",
+	})
+	if resp.Code != http.StatusAccepted {
+		t.Fatalf("obsolete low-token cleanup status=%d body=%s", resp.Code, resp.Body.String())
+	}
+	body := parseJSONBody(t, resp)
+	result := body["result"].(map[string]any)
+	if got := int(result["resolved_mailbox_count"].(float64)); got != 2 {
+		t.Fatalf("expected cleanup to resolve two older low-token mails, got=%d body=%s", got, resp.Body.String())
+	}
+
+	unreadAfter, err := srv.store.ListMailbox(ctx, user.id, "inbox", "unread", "[LOW-TOKEN]", nil, nil, 20)
+	if err != nil {
+		t.Fatalf("list unread low-token inbox after cleanup: %v", err)
+	}
+	if len(unreadAfter) != 1 {
+		t.Fatalf("expected cleanup to keep exactly one latest low-token unread, got=%d", len(unreadAfter))
+	}
+	if unreadAfter[0].Subject != "[LOW-TOKEN] stale-three" {
+		t.Fatalf("expected newest low-token mail to remain unread, got subject=%q", unreadAfter[0].Subject)
+	}
+
+	readAfter, err := srv.store.ListMailbox(ctx, user.id, "inbox", "read", "[LOW-TOKEN]", nil, nil, 20)
+	if err != nil {
+		t.Fatalf("list read low-token inbox after cleanup: %v", err)
+	}
+	if len(readAfter) != 2 {
+		t.Fatalf("expected two older low-token mails to become read, got=%d", len(readAfter))
 	}
 }
 

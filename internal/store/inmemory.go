@@ -788,7 +788,12 @@ func (s *InMemoryStore) ListMailbox(_ context.Context, ownerAddress, folder, sco
 		}
 		out = append(out, it)
 	}
-	sort.Slice(out, func(i, j int) bool { return out[i].SentAt.After(out[j].SentAt) })
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].SentAt.Equal(out[j].SentAt) {
+			return out[i].MailboxID > out[j].MailboxID
+		}
+		return out[i].SentAt.After(out[j].SentAt)
+	})
 	if limit > 0 && len(out) > limit {
 		out = out[:limit]
 	}

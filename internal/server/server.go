@@ -3665,6 +3665,7 @@ type mailSystemArchiveRequest struct {
 
 type mailSystemResolveObsoleteKBRequest struct {
 	DryRun           bool     `json:"dry_run"`
+	Classes          []string `json:"classes"`
 	UserIDs          []string `json:"user_ids"`
 	Limit            int      `json:"limit"`
 	StartAfterUserID string   `json:"start_after_user_id"`
@@ -3677,11 +3678,11 @@ type obsoleteKBMailCleanupUserResult struct {
 }
 
 type obsoleteKBMailCleanupResult struct {
-	ScannedUserCount     int                                `json:"scanned_user_count"`
-	AffectedUserCount    int                                `json:"affected_user_count"`
-	ResolvedMailboxCount int                                `json:"resolved_mailbox_count"`
-	HasMore              bool                               `json:"has_more"`
-	NextStartAfterUserID string                             `json:"next_start_after_user_id,omitempty"`
+	ScannedUserCount     int                               `json:"scanned_user_count"`
+	AffectedUserCount    int                               `json:"affected_user_count"`
+	ResolvedMailboxCount int                               `json:"resolved_mailbox_count"`
+	HasMore              bool                              `json:"has_more"`
+	NextStartAfterUserID string                            `json:"next_start_after_user_id,omitempty"`
 	Users                []obsoleteKBMailCleanupUserResult `json:"users,omitempty"`
 }
 
@@ -3742,6 +3743,9 @@ const notificationCategoryWorldCostAlert = "world_cost_alert"
 const notificationCategoryAutonomyLoop = "autonomy_loop"
 const notificationCategoryCommunityCollab = "community_collab"
 
+const obsoleteMailClassKBActions = "kb_actions"
+const obsoleteMailClassLowToken = "low_token"
+
 // Skill routing tags — each system mail includes a [SKILL:name] tag in the
 // subject and a skill_url line in the body so agents know which skill doc to
 // consult.
@@ -3786,6 +3790,11 @@ type kbUpdatedSummaryItem struct {
 	EntryID    int64
 	EntryTitle string
 	AppliedAt  time.Time
+}
+
+type lowTokenStatusSnapshot struct {
+	Threshold     int64
+	BalanceByUser map[string]int64
 }
 
 func notificationStateHash(parts ...string) string {
@@ -4391,7 +4400,36 @@ func (s *Server) mailboxItemForUser(ctx context.Context, userID string, mailboxI
 }
 
 func (s *Server) autoResolveObsoleteInboxMail(ctx context.Context, userID string) {
-	s.autoResolveObsoleteKnowledgebaseMail(ctx, userID)
+	ids := make([]int64, 0, 16)
+	seen := make(map[int64]struct{}, 16)
+	addIDs := func(items []int64) {
+		for _, id := range items {
+			if id <= 0 {
+				continue
+			}
+			if _, ok := seen[id]; ok {
+				continue
+			}
+			seen[id] = struct{}{}
+			ids = append(ids, id)
+		}
+	}
+	if kbIDs, err := s.obsoleteKnowledgebaseMailboxIDs(ctx, userID, 5000); err == nil {
+		addIDs(kbIDs)
+	}
+	clearLowTokenState := false
+	if snapshot, err := s.currentLowTokenStatusSnapshot(ctx); err == nil {
+		if lowTokenIDs, shouldClearState, lowTokenErr := s.obsoleteLowTokenMailboxIDs(ctx, userID, 5000, snapshot); lowTokenErr == nil {
+			addIDs(lowTokenIDs)
+			clearLowTokenState = shouldClearState
+		}
+	}
+	if len(ids) > 0 {
+		_ = s.store.MarkMailboxRead(ctx, strings.TrimSpace(userID), ids)
+	}
+	if clearLowTokenState {
+		_ = s.store.DeleteNotificationDeliveryState(ctx, strings.TrimSpace(userID), notificationCategoryLowTokenAlert)
+	}
 }
 
 func (s *Server) autoResolveObsoleteKnowledgebaseMail(ctx context.Context, userID string) {
@@ -4408,7 +4446,7 @@ func (s *Server) obsoleteKnowledgebaseMailboxIDs(ctx context.Context, userID str
 		return nil, nil
 	}
 	if limit <= 0 {
-		limit = 500
+		limit = 5000
 	}
 	items, err := s.store.ListMailbox(ctx, userID, "inbox", "unread", "[KNOWLEDGEBASE", nil, nil, limit)
 	if err != nil || len(items) == 0 {
@@ -4426,6 +4464,119 @@ func (s *Server) obsoleteKnowledgebaseMailboxIDs(ctx context.Context, userID str
 		return nil, nil
 	}
 	return ids, nil
+}
+
+func normalizeObsoleteMailClasses(items []string) ([]string, error) {
+	if len(items) == 0 {
+		return []string{obsoleteMailClassKBActions}, nil
+	}
+	seen := make(map[string]struct{}, len(items))
+	out := make([]string, 0, len(items))
+	appendClass := func(class string) {
+		if _, ok := seen[class]; ok {
+			return
+		}
+		seen[class] = struct{}{}
+		out = append(out, class)
+	}
+	for _, raw := range items {
+		class := strings.TrimSpace(strings.ToLower(raw))
+		switch class {
+		case "":
+			continue
+		case obsoleteMailClassKBActions, obsoleteMailClassLowToken:
+			appendClass(class)
+		default:
+			return nil, fmt.Errorf("unsupported obsolete mail class: %s", raw)
+		}
+	}
+	if len(out) == 0 {
+		return []string{obsoleteMailClassKBActions}, nil
+	}
+	sort.SliceStable(out, func(i, j int) bool {
+		order := func(class string) int {
+			switch class {
+			case obsoleteMailClassKBActions:
+				return 0
+			case obsoleteMailClassLowToken:
+				return 1
+			default:
+				return 99
+			}
+		}
+		return order(out[i]) < order(out[j])
+	})
+	return out, nil
+}
+
+func obsoleteMailClassesContain(classes []string, class string) bool {
+	for _, item := range classes {
+		if item == class {
+			return true
+		}
+	}
+	return false
+}
+
+func (s *Server) currentLowTokenThreshold() int64 {
+	initial := s.cfg.InitialToken
+	if initial <= 0 {
+		initial = 1000
+	}
+	threshold := initial / 5
+	if threshold <= 0 {
+		threshold = 1
+	}
+	return threshold
+}
+
+func (s *Server) currentLowTokenStatusSnapshot(ctx context.Context) (lowTokenStatusSnapshot, error) {
+	accounts, err := s.store.ListTokenAccounts(ctx)
+	if err != nil {
+		return lowTokenStatusSnapshot{}, err
+	}
+	snapshot := lowTokenStatusSnapshot{
+		Threshold:     s.currentLowTokenThreshold(),
+		BalanceByUser: make(map[string]int64, len(accounts)),
+	}
+	for _, item := range accounts {
+		userID := strings.TrimSpace(item.BotID)
+		if userID == "" {
+			continue
+		}
+		snapshot.BalanceByUser[userID] = item.Balance
+	}
+	return snapshot, nil
+}
+
+func (s *Server) obsoleteLowTokenMailboxIDs(ctx context.Context, userID string, limit int, snapshot lowTokenStatusSnapshot) ([]int64, bool, error) {
+	userID = strings.TrimSpace(userID)
+	if userID == "" {
+		return nil, false, nil
+	}
+	if limit <= 0 {
+		limit = 5000
+	}
+	items, err := s.store.ListMailbox(ctx, userID, "inbox", "unread", "[LOW-TOKEN]", nil, nil, limit)
+	if err != nil || len(items) == 0 {
+		return nil, false, err
+	}
+	balance, ok := snapshot.BalanceByUser[userID]
+	if !ok || balance >= snapshot.Threshold {
+		ids := make([]int64, 0, len(items))
+		for _, item := range items {
+			ids = append(ids, item.MailboxID)
+		}
+		return ids, true, nil
+	}
+	if len(items) <= 1 {
+		return nil, false, nil
+	}
+	ids := make([]int64, 0, len(items)-1)
+	for _, item := range items[1:] {
+		ids = append(ids, item.MailboxID)
+	}
+	return ids, false, nil
 }
 
 func normalizeUserIDs(items []string) []string {
@@ -4484,9 +4635,20 @@ func (s *Server) obsoleteKBMailCleanupTargets(ctx context.Context, explicitUserI
 }
 
 func (s *Server) resolveObsoleteKBMailBatch(ctx context.Context, req mailSystemResolveObsoleteKBRequest) (obsoleteKBMailCleanupResult, error) {
+	classes, err := normalizeObsoleteMailClasses(req.Classes)
+	if err != nil {
+		return obsoleteKBMailCleanupResult{}, err
+	}
 	targets, hasMore, nextStartAfter, err := s.obsoleteKBMailCleanupTargets(ctx, req.UserIDs, req.StartAfterUserID, req.Limit)
 	if err != nil {
 		return obsoleteKBMailCleanupResult{}, err
+	}
+	var lowTokenSnapshot lowTokenStatusSnapshot
+	if obsoleteMailClassesContain(classes, obsoleteMailClassLowToken) {
+		lowTokenSnapshot, err = s.currentLowTokenStatusSnapshot(ctx)
+		if err != nil {
+			return obsoleteKBMailCleanupResult{}, err
+		}
 	}
 	result := obsoleteKBMailCleanupResult{
 		ScannedUserCount:     len(targets),
@@ -4497,18 +4659,48 @@ func (s *Server) resolveObsoleteKBMailBatch(ctx context.Context, req mailSystemR
 		Users:                make([]obsoleteKBMailCleanupUserResult, 0, len(targets)),
 	}
 	for _, userID := range targets {
-		ids, listErr := s.obsoleteKnowledgebaseMailboxIDs(ctx, userID, 5000)
-		if listErr != nil {
-			result.Users = append(result.Users, obsoleteKBMailCleanupUserResult{
-				UserID: userID,
-				Error:  listErr.Error(),
-			})
+		ids := make([]int64, 0, 16)
+		seen := make(map[int64]struct{}, 16)
+		addIDs := func(items []int64) {
+			for _, id := range items {
+				if id <= 0 {
+					continue
+				}
+				if _, ok := seen[id]; ok {
+					continue
+				}
+				seen[id] = struct{}{}
+				ids = append(ids, id)
+			}
+		}
+		clearLowTokenState := false
+		if obsoleteMailClassesContain(classes, obsoleteMailClassKBActions) {
+			kbIDs, listErr := s.obsoleteKnowledgebaseMailboxIDs(ctx, userID, 5000)
+			if listErr != nil {
+				result.Users = append(result.Users, obsoleteKBMailCleanupUserResult{
+					UserID: userID,
+					Error:  listErr.Error(),
+				})
+				continue
+			}
+			addIDs(kbIDs)
+		}
+		if obsoleteMailClassesContain(classes, obsoleteMailClassLowToken) {
+			lowTokenIDs, shouldClearState, listErr := s.obsoleteLowTokenMailboxIDs(ctx, userID, 5000, lowTokenSnapshot)
+			if listErr != nil {
+				result.Users = append(result.Users, obsoleteKBMailCleanupUserResult{
+					UserID: userID,
+					Error:  listErr.Error(),
+				})
+				continue
+			}
+			addIDs(lowTokenIDs)
+			clearLowTokenState = shouldClearState
+		}
+		if len(ids) == 0 && !clearLowTokenState {
 			continue
 		}
-		if len(ids) == 0 {
-			continue
-		}
-		if !req.DryRun {
+		if !req.DryRun && len(ids) > 0 {
 			if err := s.store.MarkMailboxRead(ctx, userID, ids); err != nil {
 				result.Users = append(result.Users, obsoleteKBMailCleanupUserResult{
 					UserID: userID,
@@ -4516,6 +4708,18 @@ func (s *Server) resolveObsoleteKBMailBatch(ctx context.Context, req mailSystemR
 				})
 				continue
 			}
+		}
+		if !req.DryRun && clearLowTokenState {
+			if err := s.store.DeleteNotificationDeliveryState(ctx, userID, notificationCategoryLowTokenAlert); err != nil {
+				result.Users = append(result.Users, obsoleteKBMailCleanupUserResult{
+					UserID: userID,
+					Error:  err.Error(),
+				})
+				continue
+			}
+		}
+		if len(ids) == 0 {
+			continue
 		}
 		result.AffectedUserCount++
 		result.ResolvedMailboxCount += len(ids)
@@ -4579,7 +4783,7 @@ func (s *Server) shouldAutoReadObsoleteKnowledgebaseMail(ctx context.Context, us
 }
 
 func (s *Server) shouldAutoReadLegacyKBEnrollMail(ctx context.Context, userID string, item store.MailItem, proposalID int64, hasProposalID bool) bool {
-	if !hasProposalID || !isKBLegacyProposalActionMail(item) {
+	if !hasProposalID {
 		return false
 	}
 	proposal, err := s.store.GetKBProposal(ctx, proposalID)
@@ -5328,6 +5532,12 @@ func (s *Server) handleMailSystemResolveObsoleteKB(w http.ResponseWriter, r *htt
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
+	classes, err := normalizeObsoleteMailClasses(req.Classes)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	req.Classes = classes
 	if req.Limit <= 0 {
 		req.Limit = 500
 	}

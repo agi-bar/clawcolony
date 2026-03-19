@@ -2077,6 +2077,9 @@ func (s *Server) fetchGitHubJSON(ctx context.Context, path string, out any) erro
 	}
 	req.Header.Set("Accept", "application/vnd.github+json")
 	req.Header.Set("User-Agent", "clawcolony-runtime")
+	if token := strings.TrimSpace(os.Getenv("CLAWCOLONY_GITHUB_READ_TOKEN")); token != "" {
+		req.Header.Set("Authorization", "Bearer "+token)
+	}
 	client := &http.Client{Timeout: 10 * time.Second}
 	resp, err := client.Do(req)
 	if err != nil {

@@ -107,6 +107,9 @@ func TestKBPendingSummaryLimitsRecipientMailButPreservesBacklog(t *testing.T) {
 	if len(inbox) != 1 {
 		t.Fatalf("expected one KB pending summary mail within window, got=%d", len(inbox))
 	}
+	if !strings.Contains(inbox[0].Body, kbPendingSummaryStreamMarker) {
+		t.Fatalf("expected KB pending summary to include managed stream marker, body=%s", inbox[0].Body)
+	}
 
 	remindersResp := doJSONRequestWithHeaders(t, srv.mux, http.MethodGet, "/api/v1/mail/reminders?limit=20", nil, recipient.headers())
 	if remindersResp.Code != http.StatusOK {
@@ -119,6 +122,129 @@ func TestKBPendingSummaryLimitsRecipientMailButPreservesBacklog(t *testing.T) {
 	}
 	if got := int(backlog["knowledgebase_enroll"].(float64)); got != 2 {
 		t.Fatalf("expected KB enroll backlog to stay visible as 2, got=%d body=%s", got, remindersResp.Body.String())
+	}
+}
+
+func TestKBPendingSummaryUpdatesInPlaceWhileUnread(t *testing.T) {
+	srv := newTestServer()
+	ctx := context.Background()
+	proposerA := newAuthUser(t, srv)
+	proposerB := newAuthUser(t, srv)
+	recipient := newAuthUser(t, srv)
+
+	firstProposalID := createKBProposalForMailNoiseTest(t, srv, proposerA, "pending-first", "first pending item")
+	firstUnread, err := srv.store.ListMailbox(ctx, recipient.id, "inbox", "unread", "知识库待处理提案", nil, nil, 10)
+	if err != nil {
+		t.Fatalf("list first KB pending summary: %v", err)
+	}
+	if len(firstUnread) != 1 {
+		t.Fatalf("expected one unread KB pending summary after first proposal, got=%d", len(firstUnread))
+	}
+	firstMessageID := firstUnread[0].MessageID
+	firstMailboxID := firstUnread[0].MailboxID
+
+	secondProposalID := createKBProposalForMailNoiseTest(t, srv, proposerB, "pending-second", "second pending item")
+	secondUnread, err := srv.store.ListMailbox(ctx, recipient.id, "inbox", "unread", "知识库待处理提案", nil, nil, 10)
+	if err != nil {
+		t.Fatalf("list second KB pending summary: %v", err)
+	}
+	if len(secondUnread) != 1 {
+		t.Fatalf("expected one unread KB pending summary after second proposal, got=%d", len(secondUnread))
+	}
+	if secondUnread[0].MessageID != firstMessageID {
+		t.Fatalf("expected KB pending summary to update in place, first_message_id=%d second_message_id=%d", firstMessageID, secondUnread[0].MessageID)
+	}
+	if secondUnread[0].MailboxID != firstMailboxID {
+		t.Fatalf("expected KB pending summary to keep same mailbox id, first=%d second=%d", firstMailboxID, secondUnread[0].MailboxID)
+	}
+	for _, want := range []string{
+		kbPendingSummaryStreamMarker,
+		fmt.Sprintf("proposal_id=%d", firstProposalID),
+		fmt.Sprintf("proposal_id=%d", secondProposalID),
+		"pending_total=2",
+		"enroll_count=2",
+		"https://clawcolony.agi.bar/api/v1/kb/proposals/enroll",
+	} {
+		if !strings.Contains(secondUnread[0].Body, want) {
+			t.Fatalf("expected updated KB pending body to contain %q, body=%s", want, secondUnread[0].Body)
+		}
+	}
+}
+
+func TestKBPendingSummaryManualReadDismissesUntilStateChange(t *testing.T) {
+	srv := newTestServer()
+	ctx := context.Background()
+	proposerA := newAuthUser(t, srv)
+	proposerB := newAuthUser(t, srv)
+	recipient := newAuthUser(t, srv)
+
+	createKBProposalForMailNoiseTest(t, srv, proposerA, "dismiss-first", "first dismissible pending item")
+	initialUnread, err := srv.store.ListMailbox(ctx, recipient.id, "inbox", "unread", "知识库待处理提案", nil, nil, 10)
+	if err != nil {
+		t.Fatalf("list initial KB pending summary: %v", err)
+	}
+	if len(initialUnread) != 1 {
+		t.Fatalf("expected one initial unread KB pending summary, got=%d", len(initialUnread))
+	}
+
+	markReadResp := doJSONRequestWithHeaders(t, srv.mux, http.MethodPost, "/api/v1/mail/mark-read", map[string]any{
+		"message_ids": []int64{initialUnread[0].MessageID},
+	}, recipient.headers())
+	if markReadResp.Code != http.StatusOK {
+		t.Fatalf("mark read status=%d body=%s", markReadResp.Code, markReadResp.Body.String())
+	}
+
+	srv.sendKBPendingSummaryMails(ctx, []string{recipient.id})
+	unreadAfterDismiss, err := srv.store.ListMailbox(ctx, recipient.id, "inbox", "unread", "知识库待处理提案", nil, nil, 10)
+	if err != nil {
+		t.Fatalf("list KB pending summary after dismiss: %v", err)
+	}
+	if len(unreadAfterDismiss) != 0 {
+		t.Fatalf("expected no unread KB pending summary while state is unchanged after manual dismiss, got=%d", len(unreadAfterDismiss))
+	}
+
+	createKBProposalForMailNoiseTest(t, srv, proposerB, "dismiss-second", "second pending item changes the state")
+	unreadAfterChange, err := srv.store.ListMailbox(ctx, recipient.id, "inbox", "unread", "知识库待处理提案", nil, nil, 10)
+	if err != nil {
+		t.Fatalf("list KB pending summary after state change: %v", err)
+	}
+	if len(unreadAfterChange) != 1 {
+		t.Fatalf("expected new unread KB pending summary after state change, got=%d", len(unreadAfterChange))
+	}
+	for _, want := range []string{
+		"pending_total=2",
+		"dismiss-first",
+		"dismiss-second",
+	} {
+		if !strings.Contains(unreadAfterChange[0].Body, want) {
+			t.Fatalf("expected updated KB pending summary after state change to contain %q, body=%s", want, unreadAfterChange[0].Body)
+		}
+	}
+}
+
+func TestKBPendingSummaryDoesNotTruncateItemsAboveTwenty(t *testing.T) {
+	srv := newTestServer()
+	ctx := context.Background()
+	proposer := newAuthUser(t, srv)
+	recipient := newAuthUser(t, srv)
+
+	for i := 1; i <= 21; i++ {
+		createKBProposalForMailNoiseTest(t, srv, proposer, fmt.Sprintf("bulk-%02d", i), fmt.Sprintf("reason-%02d", i))
+	}
+
+	unread, err := srv.store.ListMailbox(ctx, recipient.id, "inbox", "unread", "知识库待处理提案", nil, nil, 10)
+	if err != nil {
+		t.Fatalf("list KB pending summary after bulk proposals: %v", err)
+	}
+	if len(unread) != 1 {
+		t.Fatalf("expected one unread KB pending summary after bulk proposals, got=%d", len(unread))
+	}
+	body := unread[0].Body
+	if strings.Contains(body, "未展开") {
+		t.Fatalf("expected KB pending summary to avoid truncation markers, body=%s", body)
+	}
+	if got := strings.Count(body, "action_label=enroll"); got != 21 {
+		t.Fatalf("expected 21 enroll action blocks in bulk summary, got=%d body=%s", got, body)
 	}
 }
 
@@ -606,19 +732,6 @@ func TestMailRemindersAutoMarksClosedKBVoteReminderRead(t *testing.T) {
 	if enrollResp.Code != http.StatusAccepted {
 		t.Fatalf("enroll voter status=%d body=%s", enrollResp.Code, enrollResp.Body.String())
 	}
-	state, ok, err := srv.store.GetNotificationDeliveryState(ctx, voter.id, notificationCategoryKBPendingSummary)
-	if err != nil {
-		t.Fatalf("get KB pending summary state: %v", err)
-	}
-	if !ok {
-		t.Fatalf("expected KB pending summary state to exist after enrollment")
-	}
-	backdated := state
-	backdated.LastSentAt = time.Now().UTC().Add(-kbPendingSummaryMinInterval - time.Minute)
-	backdated.LastRemindedAt = backdated.LastSentAt
-	if _, err := srv.store.UpsertNotificationDeliveryState(ctx, backdated); err != nil {
-		t.Fatalf("backdate KB pending summary state: %v", err)
-	}
 	startResp := doJSONRequestWithHeaders(t, srv.mux, http.MethodPost, "/api/v1/kb/proposals/start-vote", map[string]any{
 		"proposal_id": proposalID,
 	}, proposer.headers())
@@ -796,6 +909,138 @@ func TestMailSystemResolveObsoleteKBDryRunDoesNotMutate(t *testing.T) {
 	}
 	if len(unreadAfter) != 1 {
 		t.Fatalf("expected dry-run to leave unread KB mail untouched, got=%d", len(unreadAfter))
+	}
+}
+
+func TestMailSystemResolveObsoleteKBDryRunSupportsKBPendingCompact(t *testing.T) {
+	srv := newTestServer()
+	srv.cfg.InternalSyncToken = "sync-token"
+	ctx := context.Background()
+	proposer := newAuthUser(t, srv)
+	recipient := newAuthUser(t, srv)
+
+	proposalID := createKBProposalForMailNoiseTest(t, srv, proposer, "pending-compact-dry-run", "verify KB pending compact dry-run previews duplicate cleanup")
+	proposal, err := srv.store.GetKBProposal(ctx, proposalID)
+	if err != nil {
+		t.Fatalf("get proposal: %v", err)
+	}
+	if _, err := srv.store.SendMail(ctx, store.MailSendInput{
+		From:    clawWorldSystemID,
+		To:      []string{recipient.id},
+		Subject: fmt.Sprintf("[KNOWLEDGEBASE-PROPOSAL][PRIORITY:P2][ACTION:ENROLL] #%d legacy duplicate", proposalID),
+		Body:    fmt.Sprintf("proposal_id=%d\ncurrent_revision_id=%d\nreason=legacy duplicate", proposalID, proposal.CurrentRevisionID),
+	}); err != nil {
+		t.Fatalf("seed legacy pending duplicate: %v", err)
+	}
+	if _, err := srv.store.SendMail(ctx, store.MailSendInput{
+		From:    clawWorldSystemID,
+		To:      []string{recipient.id},
+		Subject: "[KNOWLEDGEBASE-PROPOSAL][PRIORITY:P2][ACTION:ENROLL] 知识库待处理提案 1 项 [REF:knowledge-base.md]",
+		Body:    "pending_total=1\nvote_count=0\nenroll_count=1\n\n待招募\n1. proposal_id=" + strconv.FormatInt(proposalID, 10),
+	}); err != nil {
+		t.Fatalf("seed old summary duplicate: %v", err)
+	}
+
+	unreadBefore, err := srv.store.ListMailbox(ctx, recipient.id, "inbox", "unread", "[KNOWLEDGEBASE-PROPOSAL]", nil, nil, 20)
+	if err != nil {
+		t.Fatalf("list unread KB pending inbox before compact dry-run: %v", err)
+	}
+	if len(unreadBefore) != 3 {
+		t.Fatalf("expected three unread KB pending mails before compact dry-run, got=%d", len(unreadBefore))
+	}
+
+	resp := doJSONRequestWithHeaders(t, srv.mux, http.MethodPost, "/api/v1/mail/system/resolve-obsolete-kb", map[string]any{
+		"dry_run":  true,
+		"classes":  []string{obsoleteMailClassKBPendingCompact},
+		"user_ids": []string{recipient.id},
+	}, map[string]string{
+		"X-Clawcolony-Internal-Token": "sync-token",
+	})
+	if resp.Code != http.StatusOK {
+		t.Fatalf("KB pending compact dry-run status=%d body=%s", resp.Code, resp.Body.String())
+	}
+	body := parseJSONBody(t, resp)
+	result := body["result"].(map[string]any)
+	if got := int(result["affected_user_count"].(float64)); got != 1 {
+		t.Fatalf("expected KB pending compact dry-run affected_user_count=1 got=%d body=%s", got, resp.Body.String())
+	}
+	if got := int(result["resolved_mailbox_count"].(float64)); got != 2 {
+		t.Fatalf("expected KB pending compact dry-run resolved_mailbox_count=2 got=%d body=%s", got, resp.Body.String())
+	}
+
+	unreadAfter, err := srv.store.ListMailbox(ctx, recipient.id, "inbox", "unread", "[KNOWLEDGEBASE-PROPOSAL]", nil, nil, 20)
+	if err != nil {
+		t.Fatalf("list unread KB pending inbox after compact dry-run: %v", err)
+	}
+	if len(unreadAfter) != 3 {
+		t.Fatalf("expected KB pending compact dry-run to leave unread mail untouched, got=%d", len(unreadAfter))
+	}
+}
+
+func TestMailSystemResolveObsoleteKBPendingCompactExecutesAndKeepsSingleManagedUnread(t *testing.T) {
+	srv := newTestServer()
+	srv.cfg.InternalSyncToken = "sync-token"
+	ctx := context.Background()
+	proposer := newAuthUser(t, srv)
+	recipient := newAuthUser(t, srv)
+
+	proposalID := createKBProposalForMailNoiseTest(t, srv, proposer, "pending-compact-execute", "verify KB pending compact keeps one managed unread")
+	proposal, err := srv.store.GetKBProposal(ctx, proposalID)
+	if err != nil {
+		t.Fatalf("get proposal: %v", err)
+	}
+	if _, err := srv.store.SendMail(ctx, store.MailSendInput{
+		From:    clawWorldSystemID,
+		To:      []string{recipient.id},
+		Subject: fmt.Sprintf("[KNOWLEDGEBASE-PROPOSAL][PRIORITY:P2][ACTION:ENROLL] #%d legacy duplicate", proposalID),
+		Body:    fmt.Sprintf("proposal_id=%d\ncurrent_revision_id=%d\nreason=legacy duplicate", proposalID, proposal.CurrentRevisionID),
+	}); err != nil {
+		t.Fatalf("seed legacy pending duplicate: %v", err)
+	}
+	if _, err := srv.store.SendMail(ctx, store.MailSendInput{
+		From:    clawWorldSystemID,
+		To:      []string{recipient.id},
+		Subject: "[KNOWLEDGEBASE-PROPOSAL][PRIORITY:P2][ACTION:ENROLL] 知识库待处理提案 1 项 [REF:knowledge-base.md]",
+		Body:    "pending_total=1\nvote_count=0\nenroll_count=1\n\n待招募\n1. proposal_id=" + strconv.FormatInt(proposalID, 10),
+	}); err != nil {
+		t.Fatalf("seed old summary duplicate: %v", err)
+	}
+
+	resp := doJSONRequestWithHeaders(t, srv.mux, http.MethodPost, "/api/v1/mail/system/resolve-obsolete-kb", map[string]any{
+		"dry_run":  false,
+		"classes":  []string{obsoleteMailClassKBPendingCompact},
+		"user_ids": []string{recipient.id},
+	}, map[string]string{
+		"X-Clawcolony-Internal-Token": "sync-token",
+	})
+	if resp.Code != http.StatusAccepted {
+		t.Fatalf("KB pending compact execute status=%d body=%s", resp.Code, resp.Body.String())
+	}
+	body := parseJSONBody(t, resp)
+	result := body["result"].(map[string]any)
+	if got := int(result["affected_user_count"].(float64)); got != 1 {
+		t.Fatalf("expected KB pending compact execute affected_user_count=1 got=%d body=%s", got, resp.Body.String())
+	}
+	if got := int(result["resolved_mailbox_count"].(float64)); got != 2 {
+		t.Fatalf("expected KB pending compact execute resolved_mailbox_count=2 got=%d body=%s", got, resp.Body.String())
+	}
+
+	unreadAfter, err := srv.store.ListMailbox(ctx, recipient.id, "inbox", "unread", "[KNOWLEDGEBASE-PROPOSAL]", nil, nil, 20)
+	if err != nil {
+		t.Fatalf("list unread KB pending inbox after compact execute: %v", err)
+	}
+	if len(unreadAfter) != 1 {
+		t.Fatalf("expected KB pending compact execute to keep exactly one unread managed summary, got=%d", len(unreadAfter))
+	}
+	if !strings.Contains(unreadAfter[0].Body, kbPendingSummaryStreamMarker) {
+		t.Fatalf("expected remaining unread KB pending mail to be managed summary, body=%s", unreadAfter[0].Body)
+	}
+	readDuplicates, err := srv.store.ListMailbox(ctx, recipient.id, "inbox", "read", "duplicate", nil, nil, 20)
+	if err != nil {
+		t.Fatalf("list read duplicates after compact execute: %v", err)
+	}
+	if len(readDuplicates) != 1 {
+		t.Fatalf("expected legacy duplicate to be marked read, got=%d", len(readDuplicates))
 	}
 }
 

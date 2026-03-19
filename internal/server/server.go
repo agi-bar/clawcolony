@@ -3744,6 +3744,7 @@ const notificationCategoryAutonomyLoop = "autonomy_loop"
 const notificationCategoryCommunityCollab = "community_collab"
 
 const obsoleteMailClassKBActions = "kb_actions"
+const obsoleteMailClassKBUpdates = "kb_updates"
 const obsoleteMailClassLowToken = "low_token"
 
 // Skill routing tags — each system mail includes a [SKILL:name] tag in the
@@ -3768,6 +3769,7 @@ func refTag(name string) string {
 var reminderTickPattern = regexp.MustCompile(`(?i)\btick=(\d+)\b`)
 var reminderProposalPattern = regexp.MustCompile(`(?i)#(\d+)`)
 var reminderActionPattern = regexp.MustCompile(`(?i)\[ACTION:([A-Z0-9_+\-]+)\]`)
+var kbUpdatedProposalPattern = regexp.MustCompile(`(?m)proposal_id=(\d+)`)
 
 type kbPendingSummaryItem struct {
 	ProposalID int64
@@ -4417,6 +4419,9 @@ func (s *Server) autoResolveObsoleteInboxMail(ctx context.Context, userID string
 	if kbIDs, err := s.obsoleteKnowledgebaseMailboxIDs(ctx, userID, 5000); err == nil {
 		addIDs(kbIDs)
 	}
+	if kbUpdatedIDs, err := s.obsoleteKBUpdatedMailboxIDs(ctx, userID, 5000); err == nil {
+		addIDs(kbUpdatedIDs)
+	}
 	clearLowTokenState := false
 	if snapshot, err := s.currentLowTokenStatusSnapshot(ctx); err == nil {
 		if lowTokenIDs, shouldClearState, lowTokenErr := s.obsoleteLowTokenMailboxIDs(ctx, userID, 5000, snapshot); lowTokenErr == nil {
@@ -4430,6 +4435,31 @@ func (s *Server) autoResolveObsoleteInboxMail(ctx context.Context, userID string
 	if clearLowTokenState {
 		_ = s.store.DeleteNotificationDeliveryState(ctx, strings.TrimSpace(userID), notificationCategoryLowTokenAlert)
 	}
+}
+
+func (s *Server) obsoleteKBUpdatedMailboxIDs(ctx context.Context, userID string, limit int) ([]int64, error) {
+	userID = strings.TrimSpace(userID)
+	if userID == "" {
+		return nil, nil
+	}
+	if limit <= 0 {
+		limit = 5000
+	}
+	items, err := s.store.ListMailbox(ctx, userID, "inbox", "unread", "[KNOWLEDGEBASE Updated]", nil, nil, limit)
+	if err != nil || len(items) == 0 {
+		return nil, err
+	}
+	ids := make([]int64, 0, len(items))
+	for _, item := range items {
+		if !s.shouldAutoReadKBUpdatedMail(ctx, item) {
+			continue
+		}
+		ids = append(ids, item.MailboxID)
+	}
+	if len(ids) == 0 {
+		return nil, nil
+	}
+	return ids, nil
 }
 
 func (s *Server) autoResolveObsoleteKnowledgebaseMail(ctx context.Context, userID string) {
@@ -4484,7 +4514,7 @@ func normalizeObsoleteMailClasses(items []string) ([]string, error) {
 		switch class {
 		case "":
 			continue
-		case obsoleteMailClassKBActions, obsoleteMailClassLowToken:
+		case obsoleteMailClassKBActions, obsoleteMailClassKBUpdates, obsoleteMailClassLowToken:
 			appendClass(class)
 		default:
 			return nil, fmt.Errorf("unsupported obsolete mail class: %s", raw)
@@ -4498,8 +4528,10 @@ func normalizeObsoleteMailClasses(items []string) ([]string, error) {
 			switch class {
 			case obsoleteMailClassKBActions:
 				return 0
-			case obsoleteMailClassLowToken:
+			case obsoleteMailClassKBUpdates:
 				return 1
+			case obsoleteMailClassLowToken:
+				return 2
 			default:
 				return 99
 			}
@@ -4685,6 +4717,17 @@ func (s *Server) resolveObsoleteKBMailBatch(ctx context.Context, req mailSystemR
 			}
 			addIDs(kbIDs)
 		}
+		if obsoleteMailClassesContain(classes, obsoleteMailClassKBUpdates) {
+			kbUpdatedIDs, listErr := s.obsoleteKBUpdatedMailboxIDs(ctx, userID, 5000)
+			if listErr != nil {
+				result.Users = append(result.Users, obsoleteKBMailCleanupUserResult{
+					UserID: userID,
+					Error:  listErr.Error(),
+				})
+				continue
+			}
+			addIDs(kbUpdatedIDs)
+		}
 		if obsoleteMailClassesContain(classes, obsoleteMailClassLowToken) {
 			lowTokenIDs, shouldClearState, listErr := s.obsoleteLowTokenMailboxIDs(ctx, userID, 5000, lowTokenSnapshot)
 			if listErr != nil {
@@ -4736,7 +4779,7 @@ func (s *Server) shouldAutoReadObsoleteKnowledgebaseMail(ctx context.Context, us
 	subject := strings.TrimSpace(item.Subject)
 	upper := strings.ToUpper(subject)
 	if strings.Contains(upper, "[KNOWLEDGEBASE UPDATED]") {
-		return false
+		return s.shouldAutoReadKBUpdatedMail(ctx, item)
 	}
 	if !strings.HasPrefix(upper, "[KNOWLEDGEBASE-PROPOSAL]") {
 		return false
@@ -4780,6 +4823,51 @@ func (s *Server) shouldAutoReadObsoleteKnowledgebaseMail(ctx context.Context, us
 	default:
 		return false
 	}
+}
+
+func parseKBUpdatedProposalIDs(body string) []int64 {
+	matches := kbUpdatedProposalPattern.FindAllStringSubmatch(strings.TrimSpace(body), -1)
+	if len(matches) == 0 {
+		return nil
+	}
+	out := make([]int64, 0, len(matches))
+	seen := make(map[int64]struct{}, len(matches))
+	for _, match := range matches {
+		if len(match) != 2 {
+			continue
+		}
+		proposalID, err := strconv.ParseInt(strings.TrimSpace(match[1]), 10, 64)
+		if err != nil || proposalID <= 0 {
+			continue
+		}
+		if _, ok := seen[proposalID]; ok {
+			continue
+		}
+		seen[proposalID] = struct{}{}
+		out = append(out, proposalID)
+	}
+	return out
+}
+
+func (s *Server) shouldAutoReadKBUpdatedMail(ctx context.Context, item store.MailItem) bool {
+	subject := strings.TrimSpace(item.Subject)
+	if !strings.HasPrefix(strings.ToUpper(subject), "[KNOWLEDGEBASE UPDATED]") {
+		return false
+	}
+	proposalIDs := parseKBUpdatedProposalIDs(item.Body)
+	if len(proposalIDs) == 0 {
+		return false
+	}
+	for _, proposalID := range proposalIDs {
+		proposal, err := s.store.GetKBProposal(ctx, proposalID)
+		if err != nil {
+			return false
+		}
+		if !strings.EqualFold(strings.TrimSpace(proposal.Status), "applied") {
+			return false
+		}
+	}
+	return true
 }
 
 func (s *Server) shouldAutoReadLegacyKBEnrollMail(ctx context.Context, userID string, item store.MailItem, proposalID int64, hasProposalID bool) bool {

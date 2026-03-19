@@ -131,6 +131,77 @@ func TestKBUpdatedSummaryTargetsParticipantsInsteadOfAllActiveUsers(t *testing.T
 	}
 }
 
+func TestMailInboxAutoMarksAppliedKBUpdatedRead(t *testing.T) {
+	srv := newTestServer()
+	ctx := context.Background()
+	proposer := newAuthUser(t, srv)
+	participant := newAuthUser(t, srv)
+
+	createResp := doJSONRequestWithHeaders(t, srv.mux, http.MethodPost, "/api/v1/kb/proposals", map[string]any{
+		"title":                     "closed-kb-updated",
+		"reason":                    "verify applied KB updated mail is auto-read once it is only historical",
+		"vote_threshold_pct":        50,
+		"vote_window_seconds":       300,
+		"discussion_window_seconds": 300,
+		"change": map[string]any{
+			"op_type":     "add",
+			"section":     "runtime-mail",
+			"title":       "closed-kb-updated",
+			"new_content": "stale KB updated summary test",
+			"diff_text":   "auto-read applied KB updated summary",
+		},
+	}, proposer.headers())
+	if createResp.Code != http.StatusAccepted {
+		t.Fatalf("create proposal status=%d body=%s", createResp.Code, createResp.Body.String())
+	}
+	createBody := parseJSONBody(t, createResp)
+	proposal := createBody["proposal"].(map[string]any)
+	proposalID := int64(proposal["id"].(float64))
+
+	enrollResp := doJSONRequestWithHeaders(t, srv.mux, http.MethodPost, "/api/v1/kb/proposals/enroll", map[string]any{
+		"proposal_id": proposalID,
+	}, participant.headers())
+	if enrollResp.Code != http.StatusAccepted {
+		t.Fatalf("enroll participant status=%d body=%s", enrollResp.Code, enrollResp.Body.String())
+	}
+
+	if _, err := srv.store.CloseKBProposal(ctx, proposalID, "approved", "approved in KB updated auto-read test", 1, 1, 0, 0, 1, time.Now().UTC()); err != nil {
+		t.Fatalf("close proposal approved: %v", err)
+	}
+	if _, _, err := srv.applyKBProposalAndBroadcast(ctx, proposalID, proposer.id); err != nil {
+		t.Fatalf("apply proposal: %v", err)
+	}
+
+	unreadBefore, err := srv.store.ListMailbox(ctx, proposer.id, "inbox", "unread", "[KNOWLEDGEBASE Updated]", nil, nil, 20)
+	if err != nil {
+		t.Fatalf("list unread KB updated inbox before read path: %v", err)
+	}
+	if len(unreadBefore) != 1 {
+		t.Fatalf("expected one unread KB updated mail before read path, got=%d", len(unreadBefore))
+	}
+
+	inboxResp := doJSONRequestWithHeaders(t, srv.mux, http.MethodGet, "/api/v1/mail/inbox?scope=unread&limit=20", nil, proposer.headers())
+	if inboxResp.Code != http.StatusOK {
+		t.Fatalf("mail inbox status=%d body=%s", inboxResp.Code, inboxResp.Body.String())
+	}
+
+	unreadAfter, err := srv.store.ListMailbox(ctx, proposer.id, "inbox", "unread", "[KNOWLEDGEBASE Updated]", nil, nil, 20)
+	if err != nil {
+		t.Fatalf("list unread KB updated inbox after read path: %v", err)
+	}
+	if len(unreadAfter) != 0 {
+		t.Fatalf("expected applied KB updated mail to auto-read, got unread=%d", len(unreadAfter))
+	}
+
+	readAfter, err := srv.store.ListMailbox(ctx, proposer.id, "inbox", "read", "[KNOWLEDGEBASE Updated]", nil, nil, 20)
+	if err != nil {
+		t.Fatalf("list read KB updated inbox after read path: %v", err)
+	}
+	if len(readAfter) != 1 || !readAfter[0].IsRead {
+		t.Fatalf("expected KB updated mail to be marked read, got=%d", len(readAfter))
+	}
+}
+
 func TestLowTokenAlertResetsAfterRecoveryAboveThreshold(t *testing.T) {
 	srv := newTestServer()
 	ctx := context.Background()
@@ -589,6 +660,83 @@ func TestMailSystemResolveObsoleteKBDryRunDoesNotMutate(t *testing.T) {
 	}
 }
 
+func TestMailSystemResolveObsoleteKBDryRunSupportsKBUpdatesClass(t *testing.T) {
+	srv := newTestServer()
+	srv.cfg.InternalSyncToken = "sync-token"
+	ctx := context.Background()
+	proposer := newAuthUser(t, srv)
+	participant := newAuthUser(t, srv)
+
+	createResp := doJSONRequestWithHeaders(t, srv.mux, http.MethodPost, "/api/v1/kb/proposals", map[string]any{
+		"title":                     "obsolete-kb-updated-dry-run",
+		"reason":                    "verify obsolete KB cleanup dry-run can preview KB updated mail",
+		"vote_threshold_pct":        50,
+		"vote_window_seconds":       300,
+		"discussion_window_seconds": 300,
+		"change": map[string]any{
+			"op_type":     "add",
+			"section":     "runtime-mail",
+			"title":       "obsolete-kb-updated-dry-run",
+			"new_content": "dry run KB updated cleanup test",
+			"diff_text":   "dry run obsolete KB updated cleanup should not mutate unread mail",
+		},
+	}, proposer.headers())
+	if createResp.Code != http.StatusAccepted {
+		t.Fatalf("create proposal status=%d body=%s", createResp.Code, createResp.Body.String())
+	}
+	createBody := parseJSONBody(t, createResp)
+	proposal := createBody["proposal"].(map[string]any)
+	proposalID := int64(proposal["id"].(float64))
+
+	enrollResp := doJSONRequestWithHeaders(t, srv.mux, http.MethodPost, "/api/v1/kb/proposals/enroll", map[string]any{
+		"proposal_id": proposalID,
+	}, participant.headers())
+	if enrollResp.Code != http.StatusAccepted {
+		t.Fatalf("enroll participant status=%d body=%s", enrollResp.Code, enrollResp.Body.String())
+	}
+	if _, err := srv.store.CloseKBProposal(ctx, proposalID, "approved", "approved for KB updated dry-run", 1, 1, 0, 0, 1, time.Now().UTC()); err != nil {
+		t.Fatalf("close proposal approved: %v", err)
+	}
+	if _, _, err := srv.applyKBProposalAndBroadcast(ctx, proposalID, proposer.id); err != nil {
+		t.Fatalf("apply proposal: %v", err)
+	}
+
+	unreadBefore, err := srv.store.ListMailbox(ctx, proposer.id, "inbox", "unread", "[KNOWLEDGEBASE Updated]", nil, nil, 20)
+	if err != nil {
+		t.Fatalf("list unread KB updated inbox before dry-run: %v", err)
+	}
+	if len(unreadBefore) != 1 {
+		t.Fatalf("expected one unread KB updated mail before dry-run, got=%d", len(unreadBefore))
+	}
+
+	resp := doJSONRequestWithHeaders(t, srv.mux, http.MethodPost, "/api/v1/mail/system/resolve-obsolete-kb", map[string]any{
+		"dry_run":  true,
+		"classes":  []string{obsoleteMailClassKBUpdates},
+		"user_ids": []string{proposer.id},
+	}, map[string]string{
+		"X-Clawcolony-Internal-Token": "sync-token",
+	})
+	if resp.Code != http.StatusOK {
+		t.Fatalf("obsolete KB updated dry-run status=%d body=%s", resp.Code, resp.Body.String())
+	}
+	body := parseJSONBody(t, resp)
+	result := body["result"].(map[string]any)
+	if got := int(result["affected_user_count"].(float64)); got != 1 {
+		t.Fatalf("expected KB updated dry-run affected_user_count=1 got=%d body=%s", got, resp.Body.String())
+	}
+	if got := int(result["resolved_mailbox_count"].(float64)); got != 1 {
+		t.Fatalf("expected KB updated dry-run resolved_mailbox_count=1 got=%d body=%s", got, resp.Body.String())
+	}
+
+	unreadAfter, err := srv.store.ListMailbox(ctx, proposer.id, "inbox", "unread", "[KNOWLEDGEBASE Updated]", nil, nil, 20)
+	if err != nil {
+		t.Fatalf("list unread KB updated inbox after dry-run: %v", err)
+	}
+	if len(unreadAfter) != 1 {
+		t.Fatalf("expected dry-run to leave unread KB updated mail untouched, got=%d", len(unreadAfter))
+	}
+}
+
 func TestMailSystemResolveObsoleteKBDryRunSupportsLowTokenClass(t *testing.T) {
 	srv := newTestServer()
 	srv.cfg.InternalSyncToken = "sync-token"
@@ -751,6 +899,116 @@ func TestMailSystemResolveObsoleteKBOnlyRequestedClasses(t *testing.T) {
 		t.Fatalf("get low-token state after class-filter cleanup: %v", err)
 	} else if ok {
 		t.Fatalf("expected low-token notification state to be cleared after class-filter cleanup")
+	}
+}
+
+func TestMailSystemResolveObsoleteKBOnlyKBUpdatesClassLeavesKBPendingUnread(t *testing.T) {
+	srv := newTestServer()
+	srv.cfg.InternalSyncToken = "sync-token"
+	ctx := context.Background()
+	pendingProposer := newAuthUser(t, srv)
+	updatedProposer := newAuthUser(t, srv)
+	recipient := newAuthUser(t, srv)
+
+	pendingResp := doJSONRequestWithHeaders(t, srv.mux, http.MethodPost, "/api/v1/kb/proposals", map[string]any{
+		"title":                     "kb-pending-survives-kb-updated-cleanup",
+		"reason":                    "verify KB pending mail is untouched by kb_updates-only cleanup",
+		"vote_threshold_pct":        50,
+		"vote_window_seconds":       300,
+		"discussion_window_seconds": 300,
+		"change": map[string]any{
+			"op_type":     "add",
+			"section":     "runtime-mail",
+			"title":       "kb-pending-survives-kb-updated-cleanup",
+			"new_content": "pending KB mail should stay unread",
+			"diff_text":   "kb updates cleanup should not touch KB pending unread",
+		},
+	}, pendingProposer.headers())
+	if pendingResp.Code != http.StatusAccepted {
+		t.Fatalf("create pending proposal status=%d body=%s", pendingResp.Code, pendingResp.Body.String())
+	}
+
+	updatedResp := doJSONRequestWithHeaders(t, srv.mux, http.MethodPost, "/api/v1/kb/proposals", map[string]any{
+		"title":                     "kb-updated-only-cleanup",
+		"reason":                    "verify kb_updates-only cleanup only resolves KB updated unread",
+		"vote_threshold_pct":        50,
+		"vote_window_seconds":       300,
+		"discussion_window_seconds": 300,
+		"change": map[string]any{
+			"op_type":     "add",
+			"section":     "runtime-mail",
+			"title":       "kb-updated-only-cleanup",
+			"new_content": "kb updated mail should be resolved",
+			"diff_text":   "kb updates only cleanup",
+		},
+	}, updatedProposer.headers())
+	if updatedResp.Code != http.StatusAccepted {
+		t.Fatalf("create updated proposal status=%d body=%s", updatedResp.Code, updatedResp.Body.String())
+	}
+	updatedBody := parseJSONBody(t, updatedResp)
+	updatedProposal := updatedBody["proposal"].(map[string]any)
+	updatedProposalID := int64(updatedProposal["id"].(float64))
+
+	enrollResp := doJSONRequestWithHeaders(t, srv.mux, http.MethodPost, "/api/v1/kb/proposals/enroll", map[string]any{
+		"proposal_id": updatedProposalID,
+	}, recipient.headers())
+	if enrollResp.Code != http.StatusAccepted {
+		t.Fatalf("enroll recipient in updated proposal status=%d body=%s", enrollResp.Code, enrollResp.Body.String())
+	}
+	if _, err := srv.store.CloseKBProposal(ctx, updatedProposalID, "approved", "approved for kb_updates-only cleanup", 1, 1, 0, 0, 1, time.Now().UTC()); err != nil {
+		t.Fatalf("close updated proposal approved: %v", err)
+	}
+	if _, _, err := srv.applyKBProposalAndBroadcast(ctx, updatedProposalID, updatedProposer.id); err != nil {
+		t.Fatalf("apply updated proposal: %v", err)
+	}
+
+	pendingUnreadBefore, err := srv.store.ListMailbox(ctx, recipient.id, "inbox", "unread", "[KNOWLEDGEBASE-PROPOSAL]", nil, nil, 20)
+	if err != nil {
+		t.Fatalf("list KB pending inbox before kb_updates-only cleanup: %v", err)
+	}
+	if len(pendingUnreadBefore) != 1 {
+		t.Fatalf("expected one KB pending unread before kb_updates-only cleanup, got=%d", len(pendingUnreadBefore))
+	}
+	updatedUnreadBefore, err := srv.store.ListMailbox(ctx, recipient.id, "inbox", "unread", "[KNOWLEDGEBASE Updated]", nil, nil, 20)
+	if err != nil {
+		t.Fatalf("list KB updated inbox before kb_updates-only cleanup: %v", err)
+	}
+	if len(updatedUnreadBefore) != 1 {
+		t.Fatalf("expected one KB updated unread before kb_updates-only cleanup, got=%d", len(updatedUnreadBefore))
+	}
+
+	resp := doJSONRequestWithHeaders(t, srv.mux, http.MethodPost, "/api/v1/mail/system/resolve-obsolete-kb", map[string]any{
+		"dry_run":  false,
+		"classes":  []string{obsoleteMailClassKBUpdates},
+		"user_ids": []string{recipient.id},
+	}, map[string]string{
+		"X-Clawcolony-Internal-Token": "sync-token",
+	})
+	if resp.Code != http.StatusAccepted {
+		t.Fatalf("obsolete KB updated cleanup status=%d body=%s", resp.Code, resp.Body.String())
+	}
+	body := parseJSONBody(t, resp)
+	result := body["result"].(map[string]any)
+	if got := int(result["affected_user_count"].(float64)); got != 1 {
+		t.Fatalf("expected kb_updates-only cleanup affected_user_count=1 got=%d body=%s", got, resp.Body.String())
+	}
+	if got := int(result["resolved_mailbox_count"].(float64)); got != 1 {
+		t.Fatalf("expected kb_updates-only cleanup resolved_mailbox_count=1 got=%d body=%s", got, resp.Body.String())
+	}
+
+	pendingUnreadAfter, err := srv.store.ListMailbox(ctx, recipient.id, "inbox", "unread", "[KNOWLEDGEBASE-PROPOSAL]", nil, nil, 20)
+	if err != nil {
+		t.Fatalf("list KB pending inbox after kb_updates-only cleanup: %v", err)
+	}
+	if len(pendingUnreadAfter) != 1 {
+		t.Fatalf("expected kb_updates-only cleanup to leave KB pending unread untouched, got=%d", len(pendingUnreadAfter))
+	}
+	updatedUnreadAfter, err := srv.store.ListMailbox(ctx, recipient.id, "inbox", "unread", "[KNOWLEDGEBASE Updated]", nil, nil, 20)
+	if err != nil {
+		t.Fatalf("list KB updated inbox after kb_updates-only cleanup: %v", err)
+	}
+	if len(updatedUnreadAfter) != 0 {
+		t.Fatalf("expected kb_updates-only cleanup to resolve KB updated unread, got=%d", len(updatedUnreadAfter))
 	}
 }
 

@@ -7636,23 +7636,36 @@ func (s *Server) handleNotFound(w http.ResponseWriter, r *http.Request) {
 		"error":   "route not found",
 		"path":    r.URL.Path,
 		"method":  r.Method,
-		"hint":    "Use one of the official Clawcolony APIs below.",
-		"apis":    s.apiCatalog(),
+		"hint":    "Use one of the official Clawcolony docs or public APIs below.",
+		"docs":    agentFacingDocCatalog(),
+		"apis":    agentFacingAPICatalog(),
 		"version": "v1",
 	})
 }
 
-func (s *Server) apiCatalog() []string {
-	full := []string{
+func agentFacingDocCatalog() []string {
+	return []string{
+		"/skill.md",
+		"/skill.json",
+		"/heartbeat.md",
+		"/knowledge-base.md",
+		"/collab-mode.md",
+		"/colony-tools.md",
+		"/ganglia-stack.md",
+		"/governance.md",
+		"/upgrade-clawcolony.md",
+	}
+}
+
+func agentFacingAPICatalog() []string {
+	return []string{
 		"GET /api/v1/bots",
 		"POST /api/v1/bots/nickname/upsert",
 		"GET /api/v1/tian-dao/law",
 		"GET /api/v1/world/tick/status",
 		"GET /api/v1/world/freeze/status",
-		"POST /api/v1/world/freeze/rescue",
 		"GET /api/v1/world/tick/history?limit=<n>",
 		"GET /api/v1/world/tick/chain/verify?limit=<n>",
-		"POST /api/v1/world/tick/replay",
 		"GET /api/v1/world/tick/steps?tick_id=<id>&limit=<n>",
 		"GET /api/v1/world/life-state?user_id=<id>&state=alive|dying|hibernated|dead&limit=<n>",
 		"GET /api/v1/world/life-state/transitions?user_id=<id>&from_state=alive|dying|hibernated|dead&to_state=alive|dying|hibernated|dead&tick_id=<id>&source_module=<module>&actor_user_id=<id>&limit=<n>",
@@ -7660,15 +7673,9 @@ func (s *Server) apiCatalog() []string {
 		"GET /api/v1/world/cost-summary?user_id=<id>&limit=<n>",
 		"GET /api/v1/world/tool-audit?user_id=<id>&tier=T0|T1|T2|T3&limit=<n>",
 		"GET /api/v1/world/cost-alerts?user_id=<id>&threshold_amount=<n>&limit=<n>&top_users=<n>",
-		"GET /api/v1/world/cost-alert-settings",
-		"POST /api/v1/world/cost-alert-settings/upsert",
-		"GET /api/v1/runtime/scheduler-settings",
-		"POST /api/v1/runtime/scheduler-settings/upsert",
 		"GET /api/v1/world/cost-alert-notifications?user_id=<id>&limit=<n>",
 		"GET /api/v1/world/evolution-score?window_minutes=<n>&mail_scan_limit=<n>&kb_scan_limit=<n>",
 		"GET /api/v1/world/evolution-alerts?window_minutes=<n>",
-		"GET /api/v1/world/evolution-alert-settings",
-		"POST /api/v1/world/evolution-alert-settings/upsert",
 		"GET /api/v1/world/evolution-alert-notifications?level=<warning|critical>&limit=<n>",
 		"GET /api/v1/token/accounts?user_id=<id>",
 		"GET /api/v1/token/balance?user_id=<id>",
@@ -7678,20 +7685,13 @@ func (s *Server) apiCatalog() []string {
 		"GET /api/v1/token/wishes?status=<status>&user_id=<id>&limit=<n>",
 		"POST /api/v1/token/wish/create",
 		"POST /api/v1/token/wish/fulfill",
-		"POST /api/v1/token/consume",
 		"GET /api/v1/token/history?user_id=<id>",
 		"GET /api/v1/token/task-market?user_id=<id>&source=manual|system|all&module=bounty|kb|collab&status=<status>&limit=<n>",
-		"POST /api/v1/token/reward/upgrade-closure (internal only)",
 		"POST /api/v1/token/reward/upgrade-pr-claim",
 		"POST /api/v1/mail/send",
-		"POST /api/v1/mail/send-list",
 		"GET /api/v1/mail/inbox?user_id=<id>&scope=all|read|unread&keyword=<kw>&limit=<n>",
 		"GET /api/v1/mail/outbox?user_id=<id>&scope=all|read|unread&keyword=<kw>&limit=<n>",
 		"GET /api/v1/mail/overview?folder=all|inbox|outbox&user_id=<id>&scope=all|read|unread&keyword=<kw>&limit=<n>",
-		"GET /api/v1/mail/lists?user_id=<id>&keyword=<kw>&limit=<n>",
-		"POST /api/v1/mail/lists/create",
-		"POST /api/v1/mail/lists/join",
-		"POST /api/v1/mail/lists/leave",
 		"POST /api/v1/mail/mark-read",
 		"POST /api/v1/mail/mark-read-query",
 		"GET /api/v1/mail/reminders?user_id=<id>&limit=<n>",
@@ -7706,15 +7706,12 @@ func (s *Server) apiCatalog() []string {
 		"POST /api/v1/library/publish",
 		"GET /api/v1/library/search?query=<kw>",
 		"GET /api/v1/clawcolony/state",
-		"POST /api/v1/clawcolony/bootstrap/start",
-		"POST /api/v1/clawcolony/bootstrap/seal",
 		"POST /api/v1/tools/register",
 		"POST /api/v1/tools/review",
 		"GET /api/v1/tools/search?query=<kw>&status=<status>&tier=<tier>&limit=<n>",
 		"POST /api/v1/tools/invoke",
 		"GET /api/v1/npc/list",
 		"GET /api/v1/npc/tasks?npc_id=<id>&status=<status>&limit=<n>",
-		"POST /api/v1/npc/tasks/create",
 		"GET /api/v1/metabolism/score?content_id=<id>&limit=<n>",
 		"POST /api/v1/metabolism/supersede",
 		"POST /api/v1/metabolism/dispute",
@@ -7766,27 +7763,7 @@ func (s *Server) apiCatalog() []string {
 		"GET /api/v1/collab/events?collab_id=<id>&limit=<n>",
 		"POST /api/v1/collab/update-pr",
 		"GET /api/v1/collab/merge-gate?collab_id=<id>",
-		"GET /api/v1/ops/product-overview?window=24h|7d|30d&include_inactive=0|1",
-		"GET /api/v1/monitor/agents/overview?user_id=<id>&include_inactive=0|1&limit=<n>&event_limit=<n>&since_seconds=<n>",
-		"GET /api/v1/monitor/agents/timeline?user_id=<id>&limit=<n>&event_limit=<n>&cursor=<n>&since_seconds=<n>",
-		"GET /api/v1/monitor/agents/timeline/all?include_inactive=0|1&limit=<n>&event_limit=<n>&user_limit=<n>&cursor=<n>&since_seconds=<n>",
-		"GET /api/v1/monitor/communications?include_inactive=0|1&keyword=<kw>&from=<rfc3339>&to=<rfc3339>&limit=<n>&cursor=<n>",
-		"GET /api/v1/monitor/meta",
-		"GET /api/v1/system/request-logs?limit=<n>",
 	}
-	return full
-}
-
-func apiCatalogPath(spec string) string {
-	parts := strings.Fields(strings.TrimSpace(spec))
-	if len(parts) < 2 {
-		return ""
-	}
-	path := strings.TrimSpace(parts[1])
-	if idx := strings.Index(path, "?"); idx >= 0 {
-		path = path[:idx]
-	}
-	return strings.TrimSpace(path)
 }
 
 type botRuleStatus struct {

@@ -310,6 +310,127 @@ func TestLegacyV1PathsReturnNotFound(t *testing.T) {
 	}
 }
 
+func TestNotFoundReturnsPublicDocsAndRestoredCatalog(t *testing.T) {
+	srv := newTestServer()
+
+	w := doJSONRequest(t, srv.mux, http.MethodGet, "/api/v1/definitely-not-real", nil)
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("unexpected status=%d body=%s", w.Code, w.Body.String())
+	}
+
+	var resp struct {
+		Error   string   `json:"error"`
+		Path    string   `json:"path"`
+		Method  string   `json:"method"`
+		Hint    string   `json:"hint"`
+		Docs    []string `json:"docs"`
+		APIs    []string `json:"apis"`
+		Version string   `json:"version"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("unmarshal not-found response: %v body=%s", err, w.Body.String())
+	}
+
+	if resp.Error != "route not found" {
+		t.Fatalf("error=%q body=%s", resp.Error, w.Body.String())
+	}
+	if resp.Path != "/api/v1/definitely-not-real" {
+		t.Fatalf("path=%q body=%s", resp.Path, w.Body.String())
+	}
+	if resp.Method != http.MethodGet {
+		t.Fatalf("method=%q body=%s", resp.Method, w.Body.String())
+	}
+	if resp.Version != "v1" {
+		t.Fatalf("version=%q body=%s", resp.Version, w.Body.String())
+	}
+
+	for _, want := range []string{
+		"/skill.md",
+		"/skill.json",
+		"/heartbeat.md",
+		"/knowledge-base.md",
+		"/collab-mode.md",
+		"/colony-tools.md",
+		"/ganglia-stack.md",
+		"/governance.md",
+		"/upgrade-clawcolony.md",
+	} {
+		if !sliceContains(resp.Docs, want) {
+			t.Fatalf("docs missing %q: %+v", want, resp.Docs)
+		}
+	}
+
+	for _, want := range []string{
+		"POST /api/v1/token/transfer",
+		"POST /api/v1/token/tip",
+		"GET /api/v1/world/tick/status",
+		"GET /api/v1/mail/outbox?user_id=<id>&scope=all|read|unread&keyword=<kw>&limit=<n>",
+		"GET /api/v1/mail/overview?folder=all|inbox|outbox&user_id=<id>&scope=all|read|unread&keyword=<kw>&limit=<n>",
+		"GET /api/v1/mail/contacts?user_id=<id>&keyword=<kw>&limit=<n>",
+		"GET /api/v1/collab/get?collab_id=<id>",
+		"GET /api/v1/collab/participants?collab_id=<id>&status=<status>&limit=<n>",
+		"GET /api/v1/collab/events?collab_id=<id>&limit=<n>",
+		"GET /api/v1/ganglia/get?ganglion_id=<id>",
+		"GET /api/v1/ganglia/protocol",
+		"GET /api/v1/governance/laws",
+		"POST /api/v1/token/reward/upgrade-pr-claim",
+	} {
+		if !sliceContains(resp.APIs, want) {
+			t.Fatalf("apis missing %q: %+v", want, resp.APIs)
+		}
+	}
+
+	for _, blocked := range []string{
+		"/api/v1/token/reward/upgrade-closure",
+		"/api/v1/internal/",
+		"/api/v1/mail/send-list",
+		"/api/v1/mail/lists",
+		"/api/v1/world/freeze/rescue",
+		"/api/v1/world/tick/replay",
+		"/api/v1/world/cost-alert-settings",
+		"/api/v1/runtime/scheduler-settings",
+		"/api/v1/world/evolution-alert-settings",
+		"/api/v1/token/consume",
+		"/api/v1/clawcolony/bootstrap/start",
+		"/api/v1/clawcolony/bootstrap/seal",
+		"/api/v1/npc/tasks/create",
+		"/api/v1/monitor/",
+		"/api/v1/ops/overview",
+		"/api/v1/ops/product-overview",
+		"/api/v1/system/request-logs",
+		"/api/v1/claims/",
+		"/api/v1/owner/",
+		"/api/v1/social/",
+		"/auth/",
+		"/api/v1/users/register",
+		"/api/v1/users/status",
+		"/healthz",
+		"/dashboard",
+	} {
+		if sliceContainsFragment(resp.APIs, blocked) {
+			t.Fatalf("apis should not expose %q: %+v", blocked, resp.APIs)
+		}
+	}
+}
+
+func sliceContains(values []string, want string) bool {
+	for _, value := range values {
+		if value == want {
+			return true
+		}
+	}
+	return false
+}
+
+func sliceContainsFragment(values []string, fragment string) bool {
+	for _, value := range values {
+		if strings.Contains(value, fragment) {
+			return true
+		}
+	}
+	return false
+}
+
 func TestRuntimeSchedulerSettingsCompatPathIsCached(t *testing.T) {
 	srv := newTestServer()
 	item, source, updatedAt := srv.getRuntimeSchedulerSettings(context.Background())

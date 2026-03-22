@@ -6184,8 +6184,14 @@ func (s *Server) handleGovernanceProtocol(w http.ResponseWriter, r *http.Request
 		"states":   []string{"discussing", "voting", "approved", "rejected", "applied"},
 		"defaults": map[string]any{
 			"vote_threshold_pct":        80,
-			"vote_window_seconds":       300,
-			"discussion_window_seconds": 300,
+			"vote_window_seconds":       defaultKBProposalWindowSeconds,
+			"discussion_window_seconds": defaultKBProposalWindowSeconds,
+		},
+		"limits": map[string]any{
+			"window_seconds": map[string]any{
+				"min": minWorkflowWindowSeconds,
+				"max": maxWorkflowWindowSeconds,
+			},
 		},
 		"requirements": map[string]any{
 			"vote_requires_ack":       true,
@@ -6336,16 +6342,16 @@ func (s *Server) handleKBProposalCreate(w http.ResponseWriter, r *http.Request) 
 		writeError(w, http.StatusBadRequest, "vote_threshold_pct must be <= 100")
 		return
 	}
-	if req.VoteWindowSeconds <= 0 {
-		req.VoteWindowSeconds = 300
-	}
-	if req.DiscussionWindowSeconds <= 0 {
-		req.DiscussionWindowSeconds = 300
-	}
-	if req.DiscussionWindowSeconds > 86400 {
-		writeError(w, http.StatusBadRequest, "discussion_window_seconds must be <= 86400")
+	if err := validateOptionalWorkflowWindowSeconds("vote_window_seconds", req.VoteWindowSeconds); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
+	if err := validateOptionalWorkflowWindowSeconds("discussion_window_seconds", req.DiscussionWindowSeconds); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	req.VoteWindowSeconds = normalizeWorkflowWindowSeconds(req.VoteWindowSeconds, defaultKBProposalWindowSeconds)
+	req.DiscussionWindowSeconds = normalizeWorkflowWindowSeconds(req.DiscussionWindowSeconds, defaultKBProposalWindowSeconds)
 	if req.Change.OpType != "add" && req.Change.OpType != "update" && req.Change.OpType != "delete" {
 		writeError(w, http.StatusBadRequest, "change.op_type must be add|update|delete")
 		return
@@ -6699,6 +6705,10 @@ func (s *Server) handleKBProposalRevise(w http.ResponseWriter, r *http.Request) 
 	}
 	if req.References == nil {
 		req.References = []citationRef{}
+	}
+	if err := validateOptionalWorkflowWindowSeconds("discussion_window_seconds", req.DiscussionWindowSec); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
 	}
 	var discussionDeadline time.Time
 	if req.DiscussionWindowSec > 0 {
@@ -7230,10 +7240,10 @@ func (s *Server) genesisBootstrapSnapshotForProposal(ctx context.Context, propos
 		st.RequiredCosigns = 1
 	}
 	if st.ReviewWindowSeconds <= 0 {
-		st.ReviewWindowSeconds = 300
+		st.ReviewWindowSeconds = defaultGenesisReviewWindowSeconds
 	}
 	if st.VoteWindowSeconds <= 0 {
-		st.VoteWindowSeconds = 300
+		st.VoteWindowSeconds = defaultGenesisVoteWindowSeconds
 	}
 	return st, true, nil
 }
@@ -7286,13 +7296,13 @@ func (s *Server) kbAdvanceGenesisBootstrapDiscussing(ctx context.Context, propos
 			changed = true
 		}
 		if cur.ReviewWindowSeconds <= 0 {
-			cur.ReviewWindowSeconds = 300
+			cur.ReviewWindowSeconds = defaultGenesisReviewWindowSeconds
 			changed = true
 		}
 		if cur.VoteWindowSeconds <= 0 {
 			cur.VoteWindowSeconds = proposal.VoteWindowSeconds
 			if cur.VoteWindowSeconds <= 0 {
-				cur.VoteWindowSeconds = 300
+				cur.VoteWindowSeconds = defaultGenesisVoteWindowSeconds
 			}
 			changed = true
 		}
@@ -7371,7 +7381,7 @@ func (s *Server) kbAdvanceGenesisBootstrapDiscussing(ctx context.Context, propos
 			voteWindow = proposal.VoteWindowSeconds
 		}
 		if voteWindow <= 0 {
-			voteWindow = 300
+			voteWindow = defaultGenesisVoteWindowSeconds
 		}
 		deadline := now.Add(time.Duration(voteWindow) * time.Second)
 		item, serr := s.store.StartKBProposalVoting(ctx, proposal.ID, deadline)
@@ -7468,7 +7478,7 @@ func (s *Server) kbAutoProgressDiscussing(ctx context.Context) {
 		}
 		voteWindow := p.VoteWindowSeconds
 		if voteWindow <= 0 {
-			voteWindow = 300
+			voteWindow = defaultKBProposalWindowSeconds
 		}
 		if voteWindow > 86400 {
 			voteWindow = 86400

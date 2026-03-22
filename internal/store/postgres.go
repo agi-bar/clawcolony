@@ -452,7 +452,7 @@ func (s *PostgresStore) migrate(ctx context.Context) error {
 			current_revision_id BIGINT NOT NULL DEFAULT 0,
 			voting_revision_id BIGINT NOT NULL DEFAULT 0,
 			vote_threshold_pct INT NOT NULL DEFAULT 80,
-			vote_window_seconds INT NOT NULL DEFAULT 300,
+			vote_window_seconds INT NOT NULL DEFAULT 3600,
 			enrolled_count INT NOT NULL DEFAULT 0,
 			vote_yes INT NOT NULL DEFAULT 0,
 			vote_no INT NOT NULL DEFAULT 0,
@@ -468,6 +468,7 @@ func (s *PostgresStore) migrate(ctx context.Context) error {
 		`ALTER TABLE kb_proposals ADD COLUMN IF NOT EXISTS current_revision_id BIGINT NOT NULL DEFAULT 0`,
 		`ALTER TABLE kb_proposals ADD COLUMN IF NOT EXISTS voting_revision_id BIGINT NOT NULL DEFAULT 0`,
 		`ALTER TABLE kb_proposals ADD COLUMN IF NOT EXISTS discussion_deadline_at TIMESTAMPTZ NULL`,
+		`ALTER TABLE kb_proposals ALTER COLUMN vote_window_seconds SET DEFAULT 3600`,
 		`CREATE INDEX IF NOT EXISTS idx_kb_proposals_status_updated ON kb_proposals(status, updated_at DESC)`,
 		`CREATE TABLE IF NOT EXISTS kb_proposal_changes (
 			id BIGSERIAL PRIMARY KEY,

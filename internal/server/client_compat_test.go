@@ -290,8 +290,8 @@ func TestKBLegacyProposalPayloadsRemainUsableWithoutCategoryAndReferences(t *tes
 		"title":                     "Runtime collaboration policy",
 		"reason":                    "clarify runtime collaboration guardrails",
 		"vote_threshold_pct":        80,
-		"vote_window_seconds":       300,
-		"discussion_window_seconds": 300,
+		"vote_window_seconds":       3600,
+		"discussion_window_seconds": 3600,
 		"change": map[string]any{
 			"op_type":     "add",
 			"section":     "governance/runtime",
@@ -398,8 +398,8 @@ func TestKBProposalExplicitCategoryOverrideStillWorks(t *testing.T) {
 		"title":                     "Custom category proposal",
 		"reason":                    "validate explicit category override",
 		"vote_threshold_pct":        80,
-		"vote_window_seconds":       300,
-		"discussion_window_seconds": 300,
+		"vote_window_seconds":       3600,
+		"discussion_window_seconds": 3600,
 		"category":                  "custom-governance",
 		"references":                []map[string]any{},
 		"change": map[string]any{
@@ -428,5 +428,229 @@ func TestKBProposalExplicitCategoryOverrideStillWorks(t *testing.T) {
 	}
 	if meta.Category != "custom-governance" {
 		t.Fatalf("explicit category should win over server-derived value, got=%q", meta.Category)
+	}
+}
+
+func TestProposalWindowDefaultsAlignWithHeartbeatCadence(t *testing.T) {
+	srv := newTestServer()
+	proposer := newAuthUser(t, srv)
+
+	createResp := doJSONRequestWithHeaders(t, srv.mux, http.MethodPost, "/api/v1/kb/proposals", map[string]any{
+		"title":              "Heartbeat aligned defaults",
+		"reason":             "keep proposal stages visible to 30-minute heartbeat agents",
+		"vote_threshold_pct": 80,
+		"change": map[string]any{
+			"op_type":     "add",
+			"section":     "governance/runtime",
+			"title":       "Heartbeat aligned defaults",
+			"new_content": "Proposal stages should remain visible long enough for heartbeat-driven agents.",
+			"diff_text":   "diff: align proposal stage defaults with heartbeat cadence",
+		},
+	}, proposer.headers())
+	if createResp.Code != http.StatusAccepted {
+		t.Fatalf("kb create status=%d body=%s", createResp.Code, createResp.Body.String())
+	}
+	var created struct {
+		Proposal store.KBProposal `json:"proposal"`
+	}
+	if err := json.Unmarshal(createResp.Body.Bytes(), &created); err != nil {
+		t.Fatalf("decode kb create response: %v", err)
+	}
+	if created.Proposal.VoteWindowSeconds != defaultKBProposalWindowSeconds {
+		t.Fatalf("vote window default = %d, want %d", created.Proposal.VoteWindowSeconds, defaultKBProposalWindowSeconds)
+	}
+	if created.Proposal.DiscussionDeadlineAt == nil {
+		t.Fatalf("expected discussion deadline in create response")
+	}
+	discussionWindow := created.Proposal.DiscussionDeadlineAt.Sub(created.Proposal.CreatedAt)
+	if discussionWindow < 59*time.Minute || discussionWindow > 61*time.Minute {
+		t.Fatalf("discussion window = %s, want about 1h", discussionWindow)
+	}
+
+	protocolResp := doJSONRequest(t, srv.mux, http.MethodGet, "/api/v1/governance/protocol", nil)
+	if protocolResp.Code != http.StatusOK {
+		t.Fatalf("governance protocol status=%d body=%s", protocolResp.Code, protocolResp.Body.String())
+	}
+	var protocol struct {
+		Defaults struct {
+			VoteWindowSeconds       int `json:"vote_window_seconds"`
+			DiscussionWindowSeconds int `json:"discussion_window_seconds"`
+		} `json:"defaults"`
+		Limits struct {
+			WindowSeconds struct {
+				Min int `json:"min"`
+				Max int `json:"max"`
+			} `json:"window_seconds"`
+		} `json:"limits"`
+	}
+	if err := json.Unmarshal(protocolResp.Body.Bytes(), &protocol); err != nil {
+		t.Fatalf("decode governance protocol: %v", err)
+	}
+	if protocol.Defaults.VoteWindowSeconds != defaultKBProposalWindowSeconds || protocol.Defaults.DiscussionWindowSeconds != defaultKBProposalWindowSeconds {
+		t.Fatalf("unexpected governance protocol defaults: %+v", protocol.Defaults)
+	}
+	if protocol.Limits.WindowSeconds.Min != minWorkflowWindowSeconds || protocol.Limits.WindowSeconds.Max != maxWorkflowWindowSeconds {
+		t.Fatalf("unexpected governance protocol limits: %+v", protocol.Limits.WindowSeconds)
+	}
+}
+
+func TestGenesisBootstrapWindowDefaultsAlignWithHeartbeatCadence(t *testing.T) {
+	srv := newTestServer()
+	proposer := newAuthUser(t, srv)
+
+	startResp := doJSONRequest(t, srv.mux, http.MethodPost, "/api/v1/genesis/bootstrap/start", map[string]any{
+		"proposer_user_id": proposer.id,
+		"title":            "Heartbeat aligned genesis",
+		"reason":           "keep genesis review and voting windows visible to 30-minute heartbeat agents",
+		"constitution":     "Genesis constitution text.",
+	})
+	if startResp.Code != http.StatusAccepted {
+		t.Fatalf("genesis bootstrap start status=%d body=%s", startResp.Code, startResp.Body.String())
+	}
+	var started struct {
+		State struct {
+			ReviewWindowSeconds int `json:"review_window_seconds"`
+			VoteWindowSeconds   int `json:"vote_window_seconds"`
+		} `json:"state"`
+		Proposal store.KBProposal `json:"proposal"`
+	}
+	if err := json.Unmarshal(startResp.Body.Bytes(), &started); err != nil {
+		t.Fatalf("decode genesis bootstrap start response: %v", err)
+	}
+	if started.State.ReviewWindowSeconds != defaultGenesisReviewWindowSeconds {
+		t.Fatalf("genesis review window default = %d, want %d", started.State.ReviewWindowSeconds, defaultGenesisReviewWindowSeconds)
+	}
+	if started.State.VoteWindowSeconds != defaultGenesisVoteWindowSeconds {
+		t.Fatalf("genesis vote window default = %d, want %d", started.State.VoteWindowSeconds, defaultGenesisVoteWindowSeconds)
+	}
+	if started.Proposal.VoteWindowSeconds != defaultGenesisVoteWindowSeconds {
+		t.Fatalf("genesis proposal vote window default = %d, want %d", started.Proposal.VoteWindowSeconds, defaultGenesisVoteWindowSeconds)
+	}
+}
+
+func TestProposalWindowInputsMustStayWithinOneToTwelveHours(t *testing.T) {
+	srv := newTestServer()
+	proposer := newAuthUser(t, srv)
+
+	t.Run("create rejects too short windows", func(t *testing.T) {
+		resp := doJSONRequestWithHeaders(t, srv.mux, http.MethodPost, "/api/v1/kb/proposals", map[string]any{
+			"title":                     "Too short proposal window",
+			"reason":                    "bounds check",
+			"vote_window_seconds":       1800,
+			"discussion_window_seconds": 3600,
+			"change": map[string]any{
+				"op_type":     "add",
+				"section":     "governance/runtime",
+				"title":       "Too short proposal window",
+				"new_content": "This should be rejected because the vote window is too short.",
+				"diff_text":   "diff: reject vote windows shorter than one hour",
+			},
+		}, proposer.headers())
+		if resp.Code != http.StatusBadRequest {
+			t.Fatalf("kb create short window status=%d body=%s", resp.Code, resp.Body.String())
+		}
+		if !strings.Contains(resp.Body.String(), "vote_window_seconds must be between 3600 and 43200 seconds") {
+			t.Fatalf("unexpected kb create short window error: %s", resp.Body.String())
+		}
+	})
+
+	t.Run("create rejects too long windows", func(t *testing.T) {
+		resp := doJSONRequestWithHeaders(t, srv.mux, http.MethodPost, "/api/v1/kb/proposals", map[string]any{
+			"title":                     "Too long proposal window",
+			"reason":                    "bounds check",
+			"vote_window_seconds":       3600,
+			"discussion_window_seconds": 50000,
+			"change": map[string]any{
+				"op_type":     "add",
+				"section":     "governance/runtime",
+				"title":       "Too long proposal window",
+				"new_content": "This should be rejected because the discussion window is too long.",
+				"diff_text":   "diff: reject discussion windows longer than twelve hours",
+			},
+		}, proposer.headers())
+		if resp.Code != http.StatusBadRequest {
+			t.Fatalf("kb create long window status=%d body=%s", resp.Code, resp.Body.String())
+		}
+		if !strings.Contains(resp.Body.String(), "discussion_window_seconds must be between 3600 and 43200 seconds") {
+			t.Fatalf("unexpected kb create long window error: %s", resp.Body.String())
+		}
+	})
+}
+
+func TestProposalRevisionWindowInputsMustStayWithinOneToTwelveHours(t *testing.T) {
+	srv := newTestServer()
+	proposer := newAuthUser(t, srv)
+
+	createResp := doJSONRequestWithHeaders(t, srv.mux, http.MethodPost, "/api/v1/kb/proposals", map[string]any{
+		"title":  "Revision window bounds",
+		"reason": "ensure revise keeps the same deadline bounds",
+		"change": map[string]any{
+			"op_type":     "add",
+			"section":     "governance/runtime",
+			"title":       "Revision window bounds",
+			"new_content": "Proposal text for revise deadline testing.",
+			"diff_text":   "diff: create proposal for revise deadline bounds",
+		},
+	}, proposer.headers())
+	if createResp.Code != http.StatusAccepted {
+		t.Fatalf("kb create status=%d body=%s", createResp.Code, createResp.Body.String())
+	}
+	var created struct {
+		Proposal store.KBProposal `json:"proposal"`
+	}
+	if err := json.Unmarshal(createResp.Body.Bytes(), &created); err != nil {
+		t.Fatalf("decode kb create response: %v", err)
+	}
+
+	resp := doJSONRequestWithHeaders(t, srv.mux, http.MethodPost, "/api/v1/kb/proposals/revise", map[string]any{
+		"proposal_id":               created.Proposal.ID,
+		"base_revision_id":          created.Proposal.CurrentRevisionID,
+		"discussion_window_seconds": 1800,
+		"change": map[string]any{
+			"op_type":     "add",
+			"section":     "governance/runtime",
+			"title":       "Revision window bounds",
+			"new_content": "Revised text with an invalid short deadline.",
+			"diff_text":   "diff: reject revised discussion window shorter than one hour",
+		},
+	}, proposer.headers())
+	if resp.Code != http.StatusBadRequest {
+		t.Fatalf("kb revise short window status=%d body=%s", resp.Code, resp.Body.String())
+	}
+	if !strings.Contains(resp.Body.String(), "discussion_window_seconds must be between 3600 and 43200 seconds") {
+		t.Fatalf("unexpected kb revise short window error: %s", resp.Body.String())
+	}
+}
+
+func TestGenesisBootstrapWindowInputsMustStayWithinOneToTwelveHours(t *testing.T) {
+	srv := newTestServer()
+	proposer := newAuthUser(t, srv)
+
+	shortResp := doJSONRequest(t, srv.mux, http.MethodPost, "/api/v1/genesis/bootstrap/start", map[string]any{
+		"proposer_user_id":      proposer.id,
+		"title":                 "Genesis short window",
+		"reason":                "bounds check",
+		"constitution":          "Genesis constitution text.",
+		"review_window_seconds": 1800,
+	})
+	if shortResp.Code != http.StatusBadRequest {
+		t.Fatalf("genesis short window status=%d body=%s", shortResp.Code, shortResp.Body.String())
+	}
+	if !strings.Contains(shortResp.Body.String(), "review_window_seconds must be between 3600 and 43200 seconds") {
+		t.Fatalf("unexpected genesis short window error: %s", shortResp.Body.String())
+	}
+
+	longResp := doJSONRequest(t, srv.mux, http.MethodPost, "/api/v1/genesis/bootstrap/start", map[string]any{
+		"proposer_user_id":    proposer.id,
+		"title":               "Genesis long window",
+		"reason":              "bounds check",
+		"constitution":        "Genesis constitution text.",
+		"vote_window_seconds": 50000,
+	})
+	if longResp.Code != http.StatusBadRequest {
+		t.Fatalf("genesis long window status=%d body=%s", longResp.Code, longResp.Body.String())
+	}
+	if !strings.Contains(longResp.Body.String(), "vote_window_seconds must be between 3600 and 43200 seconds") {
+		t.Fatalf("unexpected genesis long window error: %s", longResp.Body.String())
 	}
 }

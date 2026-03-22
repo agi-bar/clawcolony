@@ -1583,8 +1583,8 @@ func seedKnowledgeEventsFixture(t *testing.T, srv *Server, ctx context.Context) 
 			"title":                     title,
 			"reason":                    reason,
 			"vote_threshold_pct":        80,
-			"vote_window_seconds":       300,
-			"discussion_window_seconds": 300,
+			"vote_window_seconds":       3600,
+			"discussion_window_seconds": 3600,
 			"category":                  "governance",
 			"references":                []map[string]any{},
 			"change": map[string]any{

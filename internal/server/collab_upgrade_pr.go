@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	neturl "net/url"
@@ -592,6 +593,7 @@ func (s *Server) runUpgradePRTick(ctx context.Context, tickID int64) error {
 		return err
 	}
 	var firstErr error
+	pending := make([]store.CollabSession, 0, len(sessions))
 	for _, session := range sessions {
 		if session.Phase == "closed" || session.Phase == "failed" {
 			continue
@@ -599,11 +601,69 @@ func (s *Server) runUpgradePRTick(ctx context.Context, tickID int64) error {
 		if strings.TrimSpace(session.PRURL) == "" {
 			continue
 		}
-		if err := s.syncUpgradePRState(ctx, session); err != nil && firstErr == nil {
-			firstErr = err
+		if closed, err := s.closeUpgradePRFromCachedState(ctx, session); err != nil {
+			if firstErr == nil {
+				firstErr = err
+			}
+			continue
+		} else if closed {
+			continue
+		}
+		pending = append(pending, session)
+	}
+	if retryAfter := s.githubRateLimitRetryAfter(time.Now().UTC()); retryAfter > 0 {
+		return firstErr
+	}
+	for _, session := range pending {
+		if err := s.syncUpgradePRState(ctx, session); err != nil {
+			var rateLimitErr *githubRateLimitError
+			if errors.As(err, &rateLimitErr) {
+				s.recordGitHubRateLimit(rateLimitErr)
+				break
+			}
+			if firstErr == nil {
+				firstErr = err
+			}
 		}
 	}
 	return firstErr
+}
+
+func (s *Server) closeUpgradePRFromCachedState(ctx context.Context, session store.CollabSession) (bool, error) {
+	switch strings.ToLower(strings.TrimSpace(session.GitHubPRState)) {
+	case "merged":
+		_, _, err := s.closeCollabInternal(ctx, session, "closed", "upgrade_pr merged on GitHub (cached state)", clawWorldSystemID)
+		return true, err
+	case "closed":
+		_, _, err := s.closeCollabInternal(ctx, session, "failed", "upgrade_pr pull request closed without merge (cached state)", clawWorldSystemID)
+		return true, err
+	default:
+		return false, nil
+	}
+}
+
+func (s *Server) githubRateLimitRetryAfter(now time.Time) time.Duration {
+	s.githubRateLimitMu.RLock()
+	defer s.githubRateLimitMu.RUnlock()
+	if !s.githubRateLimitUntil.After(now) {
+		return 0
+	}
+	return s.githubRateLimitUntil.Sub(now)
+}
+
+func (s *Server) recordGitHubRateLimit(rateLimitErr *githubRateLimitError) {
+	if rateLimitErr == nil {
+		return
+	}
+	now := time.Now().UTC()
+	until := rateLimitErr.BackoffUntil(now)
+	s.githubRateLimitMu.Lock()
+	defer s.githubRateLimitMu.Unlock()
+	if !until.After(s.githubRateLimitUntil) {
+		return
+	}
+	s.githubRateLimitUntil = until
+	log.Printf("upgrade_pr_tick github_api_backoff status=%d until=%s", rateLimitErr.StatusCode, until.Format(time.RFC3339))
 }
 
 func (s *Server) syncUpgradePRState(ctx context.Context, session store.CollabSession) error {

@@ -51,6 +51,8 @@ type Server struct {
 	identityActivationMu sync.Mutex
 	socialStartMu        sync.Mutex
 	socialStartLast      map[string]time.Time
+	githubRateLimitMu    sync.RWMutex
+	githubRateLimitUntil time.Time
 	mailNotifyMu         sync.Mutex
 	mailNotified         map[string]time.Time
 	alertNotifyMu        sync.Mutex
@@ -9118,7 +9120,7 @@ func (s *Server) closeKBProposalByStats(
 		if _, metaErr := s.ensureProposalKnowledgeMeta(ctx, proposal.ID, &closed, nil); metaErr != nil {
 			log.Printf("kb_auto_apply_meta_backfill_failed proposal_id=%d err=%v", proposal.ID, metaErr)
 		}
-		entry, applied, applyErr := s.applyKBProposalAndBroadcast(ctx, proposal.ID, clawWorldSystemID)
+		entry, applied, applyErr := s.applyKBProposalAndBroadcast(ctx, proposal.ID, proposal.ProposerUserID)
 		if applyErr != nil {
 			_, _, _ = s.saveGenesisBootstrapStateForProposal(ctx, proposal.ID, func(cur *genesisState) bool {
 				cur.BootstrapPhase = "approved"

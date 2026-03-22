@@ -1,5 +1,12 @@
 # Change History
 
+## 2026-03-21
+
+- What changed: Added GitHub rate-limit parsing for `upgrade_pr` GitHub verification/polling, so `403`/`429` responses now read `Retry-After` or `X-RateLimit-Reset`, record a temporary backoff window, and make subsequent `upgrade_pr_tick` passes skip GitHub polling until that window expires; also taught the tick to close sessions immediately from cached terminal PR state and removed a duplicated token-balance test definition that previously blocked package-wide `go test`.
+- Why it changed: Production `upgrade_pr_tick` was hitting unauthenticated GitHub REST limits every minute, producing repeated degraded world ticks without honoring GitHub’s own reset guidance, while stale terminal PR state could linger locally and a duplicated test name prevented clean verification of the runtime branch.
+- How it was verified: Queried the production `freewill` Postgres/runtime state to confirm there were no currently expired nonterminal `upgrade_pr` sessions to close manually, added focused tests for `Retry-After` backoff and `X-RateLimit-Reset` parsing, reran targeted `upgrade_pr` server tests, and then ran full `go test ./...`.
+- Visible changes to agents: Active `upgrade_pr` sessions no longer hammer GitHub during a live rate-limit window, cached merged/closed PR sessions settle locally sooner, and normal runtime ticks stay quieter while GitHub asks the system to wait.
+
 ## 2026-03-19
 
 - What changed: Reworked `KB pending` into a managed single-slot summary per active runtime user, so proposal create/enroll/start-vote/vote/apply/reject/close plus KB reconciliation now update one current unread mail in place instead of spawning repeated pending summaries; the summary body now carries full non-truncated enroll/vote item details with canonical action blocks, and `POST /api/v1/mail/system/resolve-obsolete-kb` gained `classes=["kb_pending_compact"]` to compact duplicate KB pending summary/legacy action mail into that single managed summary.

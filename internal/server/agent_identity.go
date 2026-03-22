@@ -20,6 +20,7 @@ import (
 	"os"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -2077,6 +2078,9 @@ func (s *Server) fetchGitHubJSON(ctx context.Context, path string, out any) erro
 	}
 	req.Header.Set("Accept", "application/vnd.github+json")
 	req.Header.Set("User-Agent", "clawcolony-runtime")
+	if token := strings.TrimSpace(os.Getenv("CLAWCOLONY_GITHUB_READ_TOKEN")); token != "" {
+		req.Header.Set("Authorization", "Bearer "+token)
+	}
 	client := &http.Client{Timeout: 10 * time.Second}
 	resp, err := client.Do(req)
 	if err != nil {
@@ -2085,9 +2089,82 @@ func (s *Server) fetchGitHubJSON(ctx context.Context, path string, out any) erro
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 2048))
-		return fmt.Errorf("github verification request failed: status=%d body=%s", resp.StatusCode, strings.TrimSpace(string(body)))
+		bodyText := strings.TrimSpace(string(body))
+		if rateLimitErr := newGitHubRateLimitError(resp.StatusCode, resp.Header, bodyText, time.Now().UTC()); rateLimitErr != nil {
+			return rateLimitErr
+		}
+		return fmt.Errorf("github verification request failed: status=%d body=%s", resp.StatusCode, bodyText)
 	}
 	return json.NewDecoder(resp.Body).Decode(out)
+}
+
+type githubRateLimitError struct {
+	StatusCode int
+	Body       string
+	RetryAfter time.Duration
+	ResetAt    time.Time
+}
+
+func (e *githubRateLimitError) Error() string {
+	return fmt.Sprintf("github verification request failed: status=%d body=%s", e.StatusCode, e.Body)
+}
+
+func (e *githubRateLimitError) BackoffUntil(now time.Time) time.Time {
+	until := time.Time{}
+	if e.RetryAfter > 0 {
+		until = now.Add(e.RetryAfter)
+	}
+	if !e.ResetAt.IsZero() && e.ResetAt.After(until) {
+		until = e.ResetAt
+	}
+	if until.IsZero() {
+		until = now.Add(time.Minute)
+	}
+	return until
+}
+
+func newGitHubRateLimitError(statusCode int, headers http.Header, body string, now time.Time) *githubRateLimitError {
+	body = strings.TrimSpace(body)
+	if statusCode != http.StatusTooManyRequests && !(statusCode == http.StatusForbidden && strings.Contains(strings.ToLower(body), "rate limit")) {
+		return nil
+	}
+	err := &githubRateLimitError{
+		StatusCode: statusCode,
+		Body:       body,
+	}
+	if retryAfter := parseRetryAfterHeader(headers.Get("Retry-After"), now); retryAfter > 0 {
+		err.RetryAfter = retryAfter
+	}
+	if resetAt := parseGitHubRateLimitReset(headers.Get("X-RateLimit-Reset")); !resetAt.IsZero() {
+		err.ResetAt = resetAt
+	}
+	return err
+}
+
+func parseRetryAfterHeader(raw string, now time.Time) time.Duration {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return 0
+	}
+	if seconds, err := strconv.Atoi(raw); err == nil && seconds > 0 {
+		return time.Duration(seconds) * time.Second
+	}
+	if retryAt, err := http.ParseTime(raw); err == nil && retryAt.After(now) {
+		return retryAt.Sub(now)
+	}
+	return 0
+}
+
+func parseGitHubRateLimitReset(raw string) time.Time {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return time.Time{}
+	}
+	seconds, err := strconv.ParseInt(raw, 10, 64)
+	if err != nil || seconds <= 0 {
+		return time.Time{}
+	}
+	return time.Unix(seconds, 0).UTC()
 }
 
 func (s *Server) claimSafeUsername(ctx context.Context, userID, base string) (string, error) {

@@ -12,13 +12,17 @@ import (
 )
 
 type fakeUpgradePRGitHub struct {
-	t        *testing.T
-	repo     string
-	number   int
-	pull     githubPullRequestRecord
-	comments map[int64]githubIssueCommentRecord
-	reviews  []githubPullReviewRecord
-	server   *httptest.Server
+	t               *testing.T
+	repo            string
+	number          int
+	pull            githubPullRequestRecord
+	comments        map[int64]githubIssueCommentRecord
+	reviews         []githubPullReviewRecord
+	requestHook     func(http.ResponseWriter, *http.Request) bool
+	pullRequests    int
+	commentRequests int
+	reviewRequests  int
+	server          *httptest.Server
 }
 
 func newFakeUpgradePRGitHub(t *testing.T, repo string, number int) *fakeUpgradePRGitHub {
@@ -34,10 +38,18 @@ func newFakeUpgradePRGitHub(t *testing.T, repo string, number int) *fakeUpgradeP
 		w.Header().Set("Content-Type", "application/json")
 		switch {
 		case r.URL.Path == fmt.Sprintf("/repos/%s/pulls/%d", fixture.repo, fixture.number):
+			fixture.pullRequests++
+			if fixture.requestHook != nil && fixture.requestHook(w, r) {
+				return
+			}
 			if err := json.NewEncoder(w).Encode(fixture.pull); err != nil {
 				t.Fatalf("encode fake pull: %v", err)
 			}
 		case strings.HasPrefix(r.URL.Path, fmt.Sprintf("/repos/%s/issues/comments/", fixture.repo)):
+			fixture.commentRequests++
+			if fixture.requestHook != nil && fixture.requestHook(w, r) {
+				return
+			}
 			idText := strings.TrimPrefix(r.URL.Path, fmt.Sprintf("/repos/%s/issues/comments/", fixture.repo))
 			id, err := strconv.ParseInt(strings.TrimSpace(idText), 10, 64)
 			if err != nil {
@@ -53,6 +65,10 @@ func newFakeUpgradePRGitHub(t *testing.T, repo string, number int) *fakeUpgradeP
 				t.Fatalf("encode fake comment: %v", err)
 			}
 		case r.URL.Path == fmt.Sprintf("/repos/%s/pulls/%d/reviews", fixture.repo, fixture.number):
+			fixture.reviewRequests++
+			if fixture.requestHook != nil && fixture.requestHook(w, r) {
+				return
+			}
 			if err := json.NewEncoder(w).Encode(fixture.reviews); err != nil {
 				t.Fatalf("encode fake reviews: %v", err)
 			}

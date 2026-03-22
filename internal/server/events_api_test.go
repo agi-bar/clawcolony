@@ -556,7 +556,7 @@ func TestAPIEventsReturnsKnowledgeDetailedEvents(t *testing.T) {
 	if applied == nil {
 		t.Fatalf("expected applied knowledge proposal event, body=%s", w.Body.String())
 	}
-	if !strings.Contains(applied.SummaryZH, "知识库") || !strings.Contains(applied.SummaryZH, "系统") {
+	if !strings.Contains(applied.SummaryZH, "知识库") || !strings.Contains(applied.SummaryZH, "小钳") {
 		t.Fatalf("applied event should explain the user-facing apply result: %+v", *applied)
 	}
 

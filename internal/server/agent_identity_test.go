@@ -465,37 +465,6 @@ func TestTokenBalanceWithoutUserIDStillRequiresAuthentication(t *testing.T) {
 	}
 }
 
-func TestTokenBalanceAllowsPublicUserIDQueryWithoutAPIKey(t *testing.T) {
-	xOAuth := enableXOAuthForTest(t)
-	defer xOAuth.Close()
-
-	srv := newTestServer()
-	h := identityTestHandler(srv)
-
-	userID, _, claimLink := registerAgentForTest(t, h, "frontend-balance-agent", "mail")
-	_, cookie := claimAgentForTest(t, h, claimLink, "frontend-balance@example.com", "frontend-human")
-
-	rewardAgentViaXOAuthForTest(t, h, userID, cookie)
-
-	balance := doJSONRequest(t, h, http.MethodGet, "/api/v1/token/balance?user_id="+neturl.QueryEscape(userID), nil)
-	if balance.Code != http.StatusOK {
-		t.Fatalf("expected token balance read by user_id query, got code=%d body=%s", balance.Code, balance.Body.String())
-	}
-	if got := balanceFromResponse(t, balance); got <= 0 {
-		t.Fatalf("expected positive rewarded balance, got=%d body=%s", got, balance.Body.String())
-	}
-}
-
-func TestTokenBalanceWithoutUserIDStillRequiresAuthentication(t *testing.T) {
-	srv := newTestServer()
-	h := identityTestHandler(srv)
-
-	balance := doJSONRequest(t, h, http.MethodGet, "/api/v1/token/balance", nil)
-	if balance.Code != http.StatusUnauthorized {
-		t.Fatalf("expected unauthorized token balance read without user_id or api_key, got code=%d body=%s", balance.Code, balance.Body.String())
-	}
-}
-
 func TestClaimRequestMagicLinkRejectsExpiredClaimToken(t *testing.T) {
 	srv := newTestServer()
 	h := identityTestHandler(srv)

@@ -1,5 +1,12 @@
 # Change History
 
+## 2026-03-22
+
+- What changed: Removed the accidental duplicate copies of `TestTokenBalanceAllowsPublicUserIDQueryWithoutAPIKey` and `TestTokenBalanceWithoutUserIDStillRequiresAuthentication` from [`internal/server/agent_identity_test.go`](/Users/waken/workspace/clawcolony/internal/server/agent_identity_test.go), leaving one canonical copy of each test.
+- Why it changed: `go test` for `internal/server` was failing at compile time because the same two test functions were defined twice in the same package, blocking verification for unrelated runtime changes.
+- How it was verified: Ran `claude -p` review on the duplicate definitions, which confirmed the second pair was character-for-character identical and safe to remove without losing coverage; then reran `go test ./internal/server` and `go test ./...`.
+- Visible changes to agents: No runtime behavior changed; this only restores the test suite's ability to compile past the duplicated token-balance auth tests.
+
 ## 2026-03-21
 
 - What changed: Reworked the `404` help payload in [`internal/server/server.go`](/Users/waken/workspace/clawcolony/internal/server/server.go) to keep a broad public API catalog instead of the too-small starter subset, restored the previously advertised public runtime routes (including token transfer/tip, mail read surfaces, collab detail flows, governance/ganglia reads, and other public runtime paths), kept the new `docs` field, removed `mail/send-list` plus `mail/lists*` from the advertised recovery catalog, and after an auth-path and usage audit also removed `POST /api/v1/world/freeze/rescue` plus several dashboard/control-plane style routes from the advertised catalog: `world/tick/replay`, `world/cost-alert-settings*`, `runtime/scheduler-settings*`, `world/evolution-alert-settings*`, `token/consume`, `clawcolony/bootstrap/*`, and `npc/tasks/create`. The remaining advertised removals stay limited to routes that were actually rechecked as non-agent-facing: internal-only reward/sync paths, operator/monitor/log endpoints, human-owner/browser flows, low-value mail-list surfaces, and low-level control/settings paths. The canonical docs list now also includes `/skill.json`.

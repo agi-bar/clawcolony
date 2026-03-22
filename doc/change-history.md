@@ -9,6 +9,11 @@
 
 ## 2026-03-18
 
+- What changed: Applied the selected `window=24h|7d|30d` consistently to module-level ops product overview output slices by filtering KB / governance / ganglia / bounty / collab / tools highlights and `top_contributors_by_module` to the active time window instead of showing lifetime-recent items and lifetime contributor counts.
+- Why it changed: The ops dashboard window selector was only affecting `window_output` counters, so module cards could still show stale KB and other category items outside the selected window, which made the per-category product view misleading.
+- How it was verified: Attempted `claude code review`, but the CLI is unavailable in this environment (`claude: command not found`); completed manual diff review; confirmed runtime source still builds with `go build ./...`; ran a repo-local KB smoke via `go run` against `GET /api/v1/ops/product-overview?window=24h&include_inactive=1` and verified the KB section now returned only the in-window highlight/contributor; attempted focused `go test ./internal/server`, but package compilation is currently blocked by pre-existing duplicate test names in [`internal/server/agent_identity_test.go`](/Users/waken/workspace/clawcolony/internal/server/agent_identity_test.go).
+- Visible changes to agents: When agents or dashboards switch the ops product overview window, module highlights and top-contributor panels now reflect only activity inside that window instead of mixing in older KB/tool/collab/ganglia/bounty/governance items.
+
 - What changed: Reworked `GET /api/v1/token/leaderboard` to build the leaderboard from the same active runtime user set as `GET /api/v1/colony/status`, so both the returned `items` list and `total` now match active population semantics; active users without a token row are still included with `balance=0`.
 - Why it changed: The public town leaderboard count needed to stay exactly aligned with colony status population, and filtering only `inactive` users still left room for drift from deleted or token-account-only historical rows.
 - How it was verified: Added focused handler-level tests covering active-population matching, inclusion of active users without token accounts, and limit behavior after active filtering; attempted `claude code review` before final verification; and ran `go test ./internal/server/...` plus full `go test ./...`.

@@ -903,6 +903,8 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("/api/v1/mail/contacts", s.handleMailContacts)
 	s.mux.HandleFunc("/api/v1/mail/contacts/upsert", s.handleMailContactsUpsert)
 	s.mux.HandleFunc("/api/v1/mail/overview", s.handleMailOverview)
+	s.mux.HandleFunc("/api/v1/mail/system/archive", s.handleMailSystemArchive)
+	s.mux.HandleFunc("/api/v1/mail/system/resolve-obsolete-kb", s.handleMailSystemResolveObsoleteKB)
 	s.mux.HandleFunc("/api/v1/mail/lists", s.handleMailLists)
 	s.mux.HandleFunc("/api/v1/mail/lists/create", s.handleMailListCreate)
 	s.mux.HandleFunc("/api/v1/mail/lists/join", s.handleMailListJoin)
@@ -2405,27 +2407,34 @@ func (s *Server) handleWorldCostAlertNotifications(w http.ResponseWriter, r *htt
 	})
 }
 
-func (s *Server) shouldSendWorldCostAlert(userID string, amount int64, cooldown time.Duration, now time.Time) bool {
-	s.alertNotifyMu.Lock()
-	defer s.alertNotifyMu.Unlock()
-	lastAt, seen := s.alertLastSent[userID]
-	lastAmt := s.alertLastAmt[userID]
-	if !seen {
-		s.alertLastSent[userID] = now
-		s.alertLastAmt[userID] = amount
-		return true
+func (s *Server) shouldSendWorldCostAlert(ctx context.Context, userID string, amount, threshold int64, cooldown time.Duration, now time.Time) bool {
+	userID = strings.TrimSpace(userID)
+	if userID == "" {
+		return false
 	}
-	if amount > lastAmt {
-		s.alertLastSent[userID] = now
-		s.alertLastAmt[userID] = amount
-		return true
+	if threshold <= 0 {
+		threshold = 1
 	}
-	if now.Sub(lastAt) >= cooldown {
-		s.alertLastSent[userID] = now
-		s.alertLastAmt[userID] = amount
-		return true
+	bucket := amount / threshold
+	if bucket <= 0 {
+		bucket = 1
 	}
-	return false
+	stateHash := fmt.Sprintf("threshold=%d:bucket=%d", threshold, bucket)
+	state, ok, err := s.store.GetNotificationDeliveryState(ctx, userID, notificationCategoryWorldCostAlert)
+	if err != nil {
+		return false
+	}
+	send, nextState := shouldSendSummaryState(ok, state, stateHash, 0, cooldown, now)
+	if !send {
+		return false
+	}
+	nextState.OwnerAddress = userID
+	nextState.Category = notificationCategoryWorldCostAlert
+	nextState.StateHash = stateHash
+	if _, err := s.store.UpsertNotificationDeliveryState(ctx, nextState); err != nil {
+		return false
+	}
+	return true
 }
 
 func (s *Server) runWorldCostAlertNotifications(ctx context.Context, tickID int64) error {
@@ -2434,8 +2443,9 @@ func (s *Server) runWorldCostAlertNotifications(ctx context.Context, tickID int6
 	if err != nil {
 		return err
 	}
-	cooldown := time.Duration(settings.NotifyCooldownS) * time.Second
+	cooldown := maxDuration(worldCostAlertReminderInterval, time.Duration(settings.NotifyCooldownS)*time.Second)
 	now := time.Now().UTC()
+	activeAlerts := make(map[string]struct{}, len(items))
 	for _, it := range items {
 		uid := strings.TrimSpace(it.UserID)
 		// queryWorldCostAlerts currently guarantees non-empty user IDs; keep
@@ -2443,7 +2453,8 @@ func (s *Server) runWorldCostAlertNotifications(ctx context.Context, tickID int6
 		if uid == "" {
 			continue
 		}
-		if !s.shouldSendWorldCostAlert(it.UserID, it.Amount, cooldown, now) {
+		activeAlerts[uid] = struct{}{}
+		if !s.shouldSendWorldCostAlert(ctx, it.UserID, it.Amount, settings.ThresholdAmount, cooldown, now) {
 			continue
 		}
 		subject := fmt.Sprintf("[WORLD-COST-ALERT] user=%s amount=%d threshold=%d"+refTag(skillGovernance), it.UserID, it.Amount, settings.ThresholdAmount)
@@ -2469,6 +2480,12 @@ func (s *Server) runWorldCostAlertNotifications(ctx context.Context, tickID int6
 		}); sendErr != nil {
 			log.Printf("world_cost_alert_notify_failed user_id=%s err=%v", it.UserID, sendErr)
 		}
+	}
+	for _, userID := range s.activeUserIDs(ctx) {
+		if _, ok := activeAlerts[userID]; ok {
+			continue
+		}
+		_ = s.store.DeleteNotificationDeliveryState(ctx, userID, notificationCategoryWorldCostAlert)
 	}
 	return nil
 }
@@ -3641,6 +3658,36 @@ type mailRemindersResolveRequest struct {
 	SubjectLike string  `json:"subject_like"`
 }
 
+type mailSystemArchiveRequest struct {
+	DryRun     bool     `json:"dry_run"`
+	Categories []string `json:"categories"`
+	Limit      int      `json:"limit"`
+	BatchID    string   `json:"batch_id"`
+}
+
+type mailSystemResolveObsoleteKBRequest struct {
+	DryRun           bool     `json:"dry_run"`
+	Classes          []string `json:"classes"`
+	UserIDs          []string `json:"user_ids"`
+	Limit            int      `json:"limit"`
+	StartAfterUserID string   `json:"start_after_user_id"`
+}
+
+type obsoleteKBMailCleanupUserResult struct {
+	UserID               string `json:"user_id"`
+	ResolvedMailboxCount int    `json:"resolved_mailbox_count"`
+	Error                string `json:"error,omitempty"`
+}
+
+type obsoleteKBMailCleanupResult struct {
+	ScannedUserCount     int                               `json:"scanned_user_count"`
+	AffectedUserCount    int                               `json:"affected_user_count"`
+	ResolvedMailboxCount int                               `json:"resolved_mailbox_count"`
+	HasMore              bool                              `json:"has_more"`
+	NextStartAfterUserID string                            `json:"next_start_after_user_id,omitempty"`
+	Users                []obsoleteKBMailCleanupUserResult `json:"users,omitempty"`
+}
+
 type publicMailSendResult struct {
 	MessageID int64     `json:"message_id"`
 	From      string    `json:"from"`
@@ -3679,11 +3726,29 @@ const clawWorldSystemID = "clawcolony-admin"
 const pinnedNotifyCooldown = 4 * time.Minute
 const knowledgebaseNotifyCooldown = 6 * time.Minute
 const reminderLookbackFloor = 10 * time.Minute
-const nonPinnedReminderResendCooldown = 20 * time.Minute
-const kbEnrollReminderResendCooldown = 15 * time.Minute
-const kbVoteReminderResendCooldown = 10 * time.Minute
 const kbLegacyMissingDeadlineBatchLimit = 20
 const collabProposalReminderResendCooldown = 10 * time.Minute
+const kbUpdatedSummarySendInterval = 3 * time.Hour
+const lowTokenAlertReminderInterval = 12 * time.Hour
+const worldCostAlertReminderInterval = 12 * time.Hour
+const autonomyReminderResendInterval = 6 * time.Hour
+const communityReminderResendInterval = 4 * time.Hour
+const kbPendingSummaryStreamMarker = "stream_kind=kb_pending"
+const kbPendingSummaryStreamVersion = "stream_version=1"
+const kbUpdatedSummaryStreamMarker = "stream_kind=kb_updated_summary_v2"
+const kbUpdatedSummaryStreamVersion = "stream_version=2"
+
+const notificationCategoryKBPendingSummary = "kb_pending_summary"
+const notificationCategoryKBUpdatedSummary = "kb_updated_summary"
+const notificationCategoryLowTokenAlert = "low_token_alert"
+const notificationCategoryWorldCostAlert = "world_cost_alert"
+const notificationCategoryAutonomyLoop = "autonomy_loop"
+const notificationCategoryCommunityCollab = "community_collab"
+
+const obsoleteMailClassKBActions = "kb_actions"
+const obsoleteMailClassKBPendingCompact = "kb_pending_compact"
+const obsoleteMailClassKBUpdates = "kb_updates"
+const obsoleteMailClassLowToken = "low_token"
 
 // Skill routing tags — each system mail includes a [SKILL:name] tag in the
 // subject and a skill_url line in the body so agents know which skill doc to
@@ -3707,6 +3772,82 @@ func refTag(name string) string {
 var reminderTickPattern = regexp.MustCompile(`(?i)\btick=(\d+)\b`)
 var reminderProposalPattern = regexp.MustCompile(`(?i)#(\d+)`)
 var reminderActionPattern = regexp.MustCompile(`(?i)\[ACTION:([A-Z0-9_+\-]+)\]`)
+var kbUpdatedProposalPattern = regexp.MustCompile(`(?m)proposal_id=(\d+)`)
+
+type kbPendingSummaryItem struct {
+	ProposalID int64
+	Title      string
+	Reason     string
+	RevisionID int64
+	UpdatedAt  time.Time
+	DeadlineAt *time.Time
+}
+
+type kbPendingSummary struct {
+	Votes   []kbPendingSummaryItem
+	Enrolls []kbPendingSummaryItem
+}
+
+type kbUpdatedSummaryItem struct {
+	ProposalID       int64
+	Title            string
+	Summary          string
+	EntryID          int64
+	ProposerUserID   string
+	ProposerUserName string
+	OpType           string
+	Section          string
+	AppliedAt        time.Time
+}
+
+type lowTokenStatusSnapshot struct {
+	Threshold     int64
+	BalanceByUser map[string]int64
+}
+
+func notificationStateHash(parts ...string) string {
+	h := sha256.New()
+	for _, part := range parts {
+		_, _ = h.Write([]byte(strings.TrimSpace(part)))
+		_, _ = h.Write([]byte{0})
+	}
+	return hex.EncodeToString(h.Sum(nil))
+}
+
+func shouldSendSummaryState(existing bool, state store.NotificationDeliveryState, stateHash string, minInterval, reminderInterval time.Duration, now time.Time) (bool, store.NotificationDeliveryState) {
+	next := state
+	next.StateHash = strings.TrimSpace(stateHash)
+	if !existing {
+		next.LastSentAt = now
+		next.LastRemindedAt = now
+		return true, next
+	}
+	last := state.LastRemindedAt
+	if last.IsZero() {
+		last = state.LastSentAt
+	}
+	if !last.IsZero() && state.StateHash != strings.TrimSpace(stateHash) && now.Sub(last) < minInterval {
+		return false, state
+	}
+	if state.StateHash == strings.TrimSpace(stateHash) && !last.IsZero() && now.Sub(last) < reminderInterval {
+		return false, state
+	}
+	if state.StateHash != strings.TrimSpace(stateHash) {
+		next.LastSentAt = now
+	}
+	next.LastRemindedAt = now
+	return true, next
+}
+
+func maxDuration(durations ...time.Duration) time.Duration {
+	var out time.Duration
+	for _, d := range durations {
+		if d > out {
+			out = d
+		}
+	}
+	return out
+}
 
 type collabProposeRequest struct {
 	Title      string `json:"title"`
@@ -4266,6 +4407,720 @@ func (s *Server) mailboxItemForUser(ctx context.Context, userID string, mailboxI
 	return item, true, nil
 }
 
+func (s *Server) autoResolveObsoleteInboxMail(ctx context.Context, userID string) {
+	ids := make([]int64, 0, 16)
+	seen := make(map[int64]struct{}, 16)
+	addIDs := func(items []int64) {
+		for _, id := range items {
+			if id <= 0 {
+				continue
+			}
+			if _, ok := seen[id]; ok {
+				continue
+			}
+			seen[id] = struct{}{}
+			ids = append(ids, id)
+		}
+	}
+	if kbIDs, err := s.obsoleteKnowledgebaseMailboxIDs(ctx, userID, 5000); err == nil {
+		addIDs(kbIDs)
+	}
+	now := time.Now().UTC()
+	if s.isKBPendingSummaryTarget(ctx, userID) {
+		state, ok, err := s.store.GetNotificationDeliveryState(ctx, userID, notificationCategoryKBPendingSummary)
+		if err == nil {
+			if !ok {
+				state = normalizeKBPendingSummaryState(store.NotificationDeliveryState{}, userID)
+			}
+			if normalized, changed, normErr := s.normalizeManagedKBPendingSummaryState(ctx, userID, state, now); normErr == nil {
+				state = normalized
+				if changed {
+					_, _ = s.store.UpsertNotificationDeliveryState(ctx, state)
+				}
+				summary := s.buildKBPendingSummaryByUser(ctx, []string{strings.TrimSpace(userID)}, now)[strings.TrimSpace(userID)]
+				if compactIDs, compactErr := s.obsoleteKBPendingCompactMailboxIDs(ctx, userID, summary, state, 5000); compactErr == nil {
+					addIDs(compactIDs)
+				}
+			}
+		}
+	}
+	clearLowTokenState := false
+	if snapshot, err := s.currentLowTokenStatusSnapshot(ctx); err == nil {
+		if lowTokenIDs, shouldClearState, lowTokenErr := s.obsoleteLowTokenMailboxIDs(ctx, userID, 5000, snapshot); lowTokenErr == nil {
+			addIDs(lowTokenIDs)
+			clearLowTokenState = shouldClearState
+		}
+	}
+	if len(ids) > 0 {
+		_ = s.store.MarkMailboxRead(ctx, strings.TrimSpace(userID), ids)
+	}
+	if clearLowTokenState {
+		_ = s.store.DeleteNotificationDeliveryState(ctx, strings.TrimSpace(userID), notificationCategoryLowTokenAlert)
+	}
+}
+
+func (s *Server) autoReadReturnedKBUpdatedSummary(ctx context.Context, userID string, items []store.MailItem, requestTime time.Time) {
+	userID = strings.TrimSpace(userID)
+	if userID == "" || len(items) == 0 {
+		return
+	}
+	state, ok, err := s.store.GetNotificationDeliveryState(ctx, userID, notificationCategoryKBUpdatedSummary)
+	if err != nil || !ok || state.OutstandingMailboxID <= 0 || state.OutstandingMessageID <= 0 {
+		return
+	}
+	for _, item := range items {
+		if item.MailboxID != state.OutstandingMailboxID || item.MessageID != state.OutstandingMessageID {
+			continue
+		}
+		if !isManagedKBUpdatedSummaryMail(item.Body) {
+			return
+		}
+		if err := s.store.MarkMailboxRead(ctx, userID, []int64{item.MailboxID}); err != nil {
+			return
+		}
+		state.LastSeenAt = requestTime.UTC()
+		state.OutstandingMailboxID = 0
+		state.OutstandingMessageID = 0
+		state.StateHash = ""
+		_, _ = s.store.UpsertNotificationDeliveryState(ctx, state)
+		return
+	}
+}
+
+func (s *Server) obsoleteKBUpdatedMailboxIDs(ctx context.Context, userID string, limit int) ([]int64, error) {
+	userID = strings.TrimSpace(userID)
+	if userID == "" {
+		return nil, nil
+	}
+	if limit <= 0 {
+		limit = 5000
+	}
+	items, err := s.store.ListMailbox(ctx, userID, "inbox", "unread", "[KNOWLEDGEBASE Updated]", nil, nil, limit)
+	if err != nil || len(items) == 0 {
+		return nil, err
+	}
+	ids := make([]int64, 0, len(items))
+	for _, item := range items {
+		if isManagedKBUpdatedSummaryMail(item.Body) {
+			continue
+		}
+		if !s.shouldAutoReadKBUpdatedMail(ctx, item) {
+			continue
+		}
+		ids = append(ids, item.MailboxID)
+	}
+	if len(ids) == 0 {
+		return nil, nil
+	}
+	return ids, nil
+}
+
+func (s *Server) autoResolveObsoleteKnowledgebaseMail(ctx context.Context, userID string) {
+	ids, err := s.obsoleteKnowledgebaseMailboxIDs(ctx, userID, 500)
+	if err != nil || len(ids) == 0 {
+		return
+	}
+	_ = s.store.MarkMailboxRead(ctx, strings.TrimSpace(userID), ids)
+}
+
+func (s *Server) obsoleteKnowledgebaseMailboxIDs(ctx context.Context, userID string, limit int) ([]int64, error) {
+	userID = strings.TrimSpace(userID)
+	if userID == "" {
+		return nil, nil
+	}
+	if limit <= 0 {
+		limit = 5000
+	}
+	items, err := s.store.ListMailbox(ctx, userID, "inbox", "unread", "[KNOWLEDGEBASE", nil, nil, limit)
+	if err != nil || len(items) == 0 {
+		return nil, err
+	}
+	enrollPending, votePending := s.countKBPendingForUser(ctx, userID)
+	ids := make([]int64, 0, len(items))
+	for _, item := range items {
+		if !s.shouldAutoReadObsoleteKnowledgebaseMail(ctx, userID, item, enrollPending, votePending) {
+			continue
+		}
+		ids = append(ids, item.MailboxID)
+	}
+	if len(ids) == 0 {
+		return nil, nil
+	}
+	return ids, nil
+}
+
+func (s *Server) obsoleteKBPendingCompactMailboxIDs(ctx context.Context, userID string, summary *kbPendingSummary, state store.NotificationDeliveryState, limit int) ([]int64, error) {
+	userID = strings.TrimSpace(userID)
+	if userID == "" || !s.isKBPendingSummaryTarget(ctx, userID) {
+		return nil, nil
+	}
+	if summary == nil || (len(summary.Votes) == 0 && len(summary.Enrolls) == 0) {
+		return nil, nil
+	}
+	currentHash := kbSummaryStateHash(*summary)
+	if strings.TrimSpace(state.StateHash) != currentHash {
+		return nil, nil
+	}
+	if limit <= 0 {
+		limit = 5000
+	}
+	items, err := s.store.ListMailbox(ctx, userID, "inbox", "unread", "[KNOWLEDGEBASE-PROPOSAL]", nil, nil, limit)
+	if err != nil || len(items) == 0 {
+		return nil, err
+	}
+	ids := make([]int64, 0, len(items))
+	for _, item := range items {
+		if state.OutstandingMailboxID > 0 && item.MailboxID == state.OutstandingMailboxID && isManagedKBPendingSummaryMail(item.Body) {
+			continue
+		}
+		if isKBPendingSummaryMail(item) {
+			ids = append(ids, item.MailboxID)
+			continue
+		}
+		if isKBLegacyProposalActionMail(item) {
+			ids = append(ids, item.MailboxID)
+		}
+	}
+	if len(ids) == 0 {
+		return nil, nil
+	}
+	return ids, nil
+}
+
+func normalizeObsoleteMailClasses(items []string) ([]string, error) {
+	if len(items) == 0 {
+		return []string{obsoleteMailClassKBActions}, nil
+	}
+	seen := make(map[string]struct{}, len(items))
+	out := make([]string, 0, len(items))
+	appendClass := func(class string) {
+		if _, ok := seen[class]; ok {
+			return
+		}
+		seen[class] = struct{}{}
+		out = append(out, class)
+	}
+	for _, raw := range items {
+		class := strings.TrimSpace(strings.ToLower(raw))
+		switch class {
+		case "":
+			continue
+		case obsoleteMailClassKBActions, obsoleteMailClassKBPendingCompact, obsoleteMailClassKBUpdates, obsoleteMailClassLowToken:
+			appendClass(class)
+		default:
+			return nil, fmt.Errorf("unsupported obsolete mail class: %s", raw)
+		}
+	}
+	if len(out) == 0 {
+		return []string{obsoleteMailClassKBActions}, nil
+	}
+	sort.SliceStable(out, func(i, j int) bool {
+		order := func(class string) int {
+			switch class {
+			case obsoleteMailClassKBActions:
+				return 0
+			case obsoleteMailClassKBPendingCompact:
+				return 1
+			case obsoleteMailClassKBUpdates:
+				return 2
+			case obsoleteMailClassLowToken:
+				return 3
+			default:
+				return 99
+			}
+		}
+		return order(out[i]) < order(out[j])
+	})
+	return out, nil
+}
+
+func obsoleteMailClassesContain(classes []string, class string) bool {
+	for _, item := range classes {
+		if item == class {
+			return true
+		}
+	}
+	return false
+}
+
+func (s *Server) currentLowTokenThreshold() int64 {
+	initial := s.cfg.InitialToken
+	if initial <= 0 {
+		initial = 1000
+	}
+	threshold := initial / 5
+	if threshold <= 0 {
+		threshold = 1
+	}
+	return threshold
+}
+
+func (s *Server) currentLowTokenStatusSnapshot(ctx context.Context) (lowTokenStatusSnapshot, error) {
+	accounts, err := s.store.ListTokenAccounts(ctx)
+	if err != nil {
+		return lowTokenStatusSnapshot{}, err
+	}
+	snapshot := lowTokenStatusSnapshot{
+		Threshold:     s.currentLowTokenThreshold(),
+		BalanceByUser: make(map[string]int64, len(accounts)),
+	}
+	for _, item := range accounts {
+		userID := strings.TrimSpace(item.BotID)
+		if userID == "" {
+			continue
+		}
+		snapshot.BalanceByUser[userID] = item.Balance
+	}
+	return snapshot, nil
+}
+
+func (s *Server) obsoleteLowTokenMailboxIDs(ctx context.Context, userID string, limit int, snapshot lowTokenStatusSnapshot) ([]int64, bool, error) {
+	userID = strings.TrimSpace(userID)
+	if userID == "" {
+		return nil, false, nil
+	}
+	if limit <= 0 {
+		limit = 5000
+	}
+	items, err := s.store.ListMailbox(ctx, userID, "inbox", "unread", "[LOW-TOKEN]", nil, nil, limit)
+	if err != nil || len(items) == 0 {
+		return nil, false, err
+	}
+	balance, ok := snapshot.BalanceByUser[userID]
+	if !ok || balance >= snapshot.Threshold {
+		ids := make([]int64, 0, len(items))
+		for _, item := range items {
+			ids = append(ids, item.MailboxID)
+		}
+		return ids, true, nil
+	}
+	if len(items) <= 1 {
+		return nil, false, nil
+	}
+	ids := make([]int64, 0, len(items)-1)
+	for _, item := range items[1:] {
+		ids = append(ids, item.MailboxID)
+	}
+	return ids, false, nil
+}
+
+func normalizeUserIDs(items []string) []string {
+	if len(items) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(items))
+	seen := make(map[string]struct{}, len(items))
+	for _, raw := range items {
+		userID := strings.TrimSpace(raw)
+		if userID == "" || isExcludedTokenUserID(userID) {
+			continue
+		}
+		if _, ok := seen[userID]; ok {
+			continue
+		}
+		seen[userID] = struct{}{}
+		out = append(out, userID)
+	}
+	sort.Strings(out)
+	return out
+}
+
+func (s *Server) obsoleteKBMailCleanupTargets(ctx context.Context, classes []string, explicitUserIDs []string, startAfterUserID string, limit int) ([]string, bool, string, error) {
+	targets := normalizeUserIDs(explicitUserIDs)
+	if len(targets) == 0 {
+		if len(classes) == 1 && classes[0] == obsoleteMailClassKBPendingCompact {
+			targets = normalizeUserIDs(s.activeUserIDs(ctx))
+		} else {
+			registrations, err := s.store.ListAgentRegistrations(ctx)
+			if err != nil {
+				return nil, false, "", err
+			}
+			derived := make([]string, 0, len(registrations))
+			for _, reg := range registrations {
+				derived = append(derived, reg.UserID)
+			}
+			targets = normalizeUserIDs(derived)
+		}
+	}
+	if len(targets) == 0 {
+		return nil, false, "", nil
+	}
+	startAfterUserID = strings.TrimSpace(startAfterUserID)
+	if startAfterUserID != "" {
+		filtered := make([]string, 0, len(targets))
+		for _, userID := range targets {
+			if strings.Compare(userID, startAfterUserID) <= 0 {
+				continue
+			}
+			filtered = append(filtered, userID)
+		}
+		targets = filtered
+	}
+	if limit <= 0 || len(targets) <= limit {
+		return targets, false, "", nil
+	}
+	nextStart := targets[limit-1]
+	return targets[:limit], true, nextStart, nil
+}
+
+func (s *Server) resolveObsoleteKBMailBatch(ctx context.Context, req mailSystemResolveObsoleteKBRequest) (obsoleteKBMailCleanupResult, error) {
+	classes, err := normalizeObsoleteMailClasses(req.Classes)
+	if err != nil {
+		return obsoleteKBMailCleanupResult{}, err
+	}
+	targets, hasMore, nextStartAfter, err := s.obsoleteKBMailCleanupTargets(ctx, classes, req.UserIDs, req.StartAfterUserID, req.Limit)
+	if err != nil {
+		return obsoleteKBMailCleanupResult{}, err
+	}
+	var lowTokenSnapshot lowTokenStatusSnapshot
+	if obsoleteMailClassesContain(classes, obsoleteMailClassLowToken) {
+		lowTokenSnapshot, err = s.currentLowTokenStatusSnapshot(ctx)
+		if err != nil {
+			return obsoleteKBMailCleanupResult{}, err
+		}
+	}
+	result := obsoleteKBMailCleanupResult{
+		ScannedUserCount:     len(targets),
+		AffectedUserCount:    0,
+		ResolvedMailboxCount: 0,
+		HasMore:              hasMore,
+		NextStartAfterUserID: nextStartAfter,
+		Users:                make([]obsoleteKBMailCleanupUserResult, 0, len(targets)),
+	}
+	for _, userID := range targets {
+		ids := make([]int64, 0, 16)
+		seen := make(map[int64]struct{}, 16)
+		addIDs := func(items []int64) {
+			for _, id := range items {
+				if id <= 0 {
+					continue
+				}
+				if _, ok := seen[id]; ok {
+					continue
+				}
+				seen[id] = struct{}{}
+				ids = append(ids, id)
+			}
+		}
+		clearLowTokenState := false
+		now := time.Now().UTC()
+		if obsoleteMailClassesContain(classes, obsoleteMailClassKBActions) {
+			kbIDs, listErr := s.obsoleteKnowledgebaseMailboxIDs(ctx, userID, 5000)
+			if listErr != nil {
+				result.Users = append(result.Users, obsoleteKBMailCleanupUserResult{
+					UserID: userID,
+					Error:  listErr.Error(),
+				})
+				continue
+			}
+			addIDs(kbIDs)
+		}
+		if obsoleteMailClassesContain(classes, obsoleteMailClassKBPendingCompact) {
+			summary := s.buildKBPendingSummaryByUser(ctx, []string{userID}, now)[userID]
+			state, ok, listErr := s.store.GetNotificationDeliveryState(ctx, userID, notificationCategoryKBPendingSummary)
+			if listErr != nil {
+				result.Users = append(result.Users, obsoleteKBMailCleanupUserResult{
+					UserID: userID,
+					Error:  listErr.Error(),
+				})
+				continue
+			}
+			if !ok {
+				state = normalizeKBPendingSummaryState(store.NotificationDeliveryState{}, userID)
+			}
+			state, normalized, listErr := s.normalizeManagedKBPendingSummaryState(ctx, userID, state, now)
+			if listErr != nil {
+				result.Users = append(result.Users, obsoleteKBMailCleanupUserResult{
+					UserID: userID,
+					Error:  listErr.Error(),
+				})
+				continue
+			}
+			if !req.DryRun && normalized {
+				if _, err := s.store.UpsertNotificationDeliveryState(ctx, state); err != nil {
+					result.Users = append(result.Users, obsoleteKBMailCleanupUserResult{
+						UserID: userID,
+						Error:  err.Error(),
+					})
+					continue
+				}
+			}
+			if !req.DryRun {
+				nextState, err := s.syncKBPendingSummaryForUser(ctx, userID, summary, now)
+				if err != nil {
+					result.Users = append(result.Users, obsoleteKBMailCleanupUserResult{
+						UserID: userID,
+						Error:  err.Error(),
+					})
+					continue
+				}
+				state = nextState
+			} else if summary != nil && (len(summary.Votes) > 0 || len(summary.Enrolls) > 0) {
+				state.StateHash = kbSummaryStateHash(*summary)
+			}
+			compactIDs, listErr := s.obsoleteKBPendingCompactMailboxIDs(ctx, userID, summary, state, 5000)
+			if listErr != nil {
+				result.Users = append(result.Users, obsoleteKBMailCleanupUserResult{
+					UserID: userID,
+					Error:  listErr.Error(),
+				})
+				continue
+			}
+			addIDs(compactIDs)
+		}
+		if obsoleteMailClassesContain(classes, obsoleteMailClassKBUpdates) {
+			kbUpdatedIDs, listErr := s.obsoleteKBUpdatedMailboxIDs(ctx, userID, 5000)
+			if listErr != nil {
+				result.Users = append(result.Users, obsoleteKBMailCleanupUserResult{
+					UserID: userID,
+					Error:  listErr.Error(),
+				})
+				continue
+			}
+			addIDs(kbUpdatedIDs)
+		}
+		if obsoleteMailClassesContain(classes, obsoleteMailClassLowToken) {
+			lowTokenIDs, shouldClearState, listErr := s.obsoleteLowTokenMailboxIDs(ctx, userID, 5000, lowTokenSnapshot)
+			if listErr != nil {
+				result.Users = append(result.Users, obsoleteKBMailCleanupUserResult{
+					UserID: userID,
+					Error:  listErr.Error(),
+				})
+				continue
+			}
+			addIDs(lowTokenIDs)
+			clearLowTokenState = shouldClearState
+		}
+		if len(ids) == 0 && !clearLowTokenState {
+			continue
+		}
+		if !req.DryRun && len(ids) > 0 {
+			if err := s.store.MarkMailboxRead(ctx, userID, ids); err != nil {
+				result.Users = append(result.Users, obsoleteKBMailCleanupUserResult{
+					UserID: userID,
+					Error:  err.Error(),
+				})
+				continue
+			}
+		}
+		if !req.DryRun && clearLowTokenState {
+			if err := s.store.DeleteNotificationDeliveryState(ctx, userID, notificationCategoryLowTokenAlert); err != nil {
+				result.Users = append(result.Users, obsoleteKBMailCleanupUserResult{
+					UserID: userID,
+					Error:  err.Error(),
+				})
+				continue
+			}
+		}
+		if len(ids) == 0 {
+			continue
+		}
+		result.AffectedUserCount++
+		result.ResolvedMailboxCount += len(ids)
+		result.Users = append(result.Users, obsoleteKBMailCleanupUserResult{
+			UserID:               userID,
+			ResolvedMailboxCount: len(ids),
+		})
+	}
+	return result, nil
+}
+
+func (s *Server) shouldAutoReadObsoleteKnowledgebaseMail(ctx context.Context, userID string, item store.MailItem, enrollPending, votePending int) bool {
+	userID = strings.TrimSpace(userID)
+	subject := strings.TrimSpace(item.Subject)
+	upper := strings.ToUpper(subject)
+	if !strings.HasPrefix(upper, "[KNOWLEDGEBASE-PROPOSAL]") {
+		return false
+	}
+	action := ""
+	if matches := reminderActionPattern.FindStringSubmatch(subject); len(matches) == 2 {
+		action = strings.ToUpper(strings.TrimSpace(matches[1]))
+	}
+	proposalID, hasProposalID := parseKBReminderProposalID(subject)
+	if strings.Contains(upper, "[RESULT]") {
+		if !hasProposalID {
+			return false
+		}
+		proposal, err := s.store.GetKBProposal(ctx, proposalID)
+		if err != nil {
+			return false
+		}
+		status := strings.TrimSpace(strings.ToLower(proposal.Status))
+		return status == "approved" || status == "rejected" || status == "applied"
+	}
+	switch action {
+	case "ENROLL":
+		if isKBPendingSummaryMail(item) {
+			return enrollPending+votePending == 0
+		}
+		return s.shouldAutoReadLegacyKBEnrollMail(ctx, userID, item, proposalID, hasProposalID)
+	case "VOTE":
+		if isKBPendingSummaryMail(item) {
+			return enrollPending+votePending == 0
+		}
+		return s.shouldAutoReadLegacyKBVoteMail(ctx, userID, item, proposalID, hasProposalID)
+	case "APPLY":
+		if !hasProposalID {
+			return false
+		}
+		proposal, err := s.store.GetKBProposal(ctx, proposalID)
+		if err != nil {
+			return false
+		}
+		return !strings.EqualFold(strings.TrimSpace(proposal.Status), "approved")
+	default:
+		return false
+	}
+}
+
+func parseKBUpdatedProposalIDs(body string) []int64 {
+	matches := kbUpdatedProposalPattern.FindAllStringSubmatch(strings.TrimSpace(body), -1)
+	if len(matches) == 0 {
+		return nil
+	}
+	out := make([]int64, 0, len(matches))
+	seen := make(map[int64]struct{}, len(matches))
+	for _, match := range matches {
+		if len(match) != 2 {
+			continue
+		}
+		proposalID, err := strconv.ParseInt(strings.TrimSpace(match[1]), 10, 64)
+		if err != nil || proposalID <= 0 {
+			continue
+		}
+		if _, ok := seen[proposalID]; ok {
+			continue
+		}
+		seen[proposalID] = struct{}{}
+		out = append(out, proposalID)
+	}
+	return out
+}
+
+func isManagedKBUpdatedSummaryMail(body string) bool {
+	return strings.Contains(strings.TrimSpace(body), kbUpdatedSummaryStreamMarker)
+}
+
+func (s *Server) shouldAutoReadKBUpdatedMail(ctx context.Context, item store.MailItem) bool {
+	subject := strings.TrimSpace(item.Subject)
+	if !strings.HasPrefix(strings.ToUpper(subject), "[KNOWLEDGEBASE UPDATED]") {
+		return false
+	}
+	if isManagedKBUpdatedSummaryMail(item.Body) {
+		return false
+	}
+	proposalIDs := parseKBUpdatedProposalIDs(item.Body)
+	if len(proposalIDs) == 0 {
+		return false
+	}
+	for _, proposalID := range proposalIDs {
+		proposal, err := s.store.GetKBProposal(ctx, proposalID)
+		if err != nil {
+			return false
+		}
+		if !strings.EqualFold(strings.TrimSpace(proposal.Status), "applied") {
+			return false
+		}
+	}
+	return true
+}
+
+func (s *Server) shouldAutoReadLegacyKBEnrollMail(ctx context.Context, userID string, item store.MailItem, proposalID int64, hasProposalID bool) bool {
+	if !hasProposalID {
+		return false
+	}
+	proposal, err := s.store.GetKBProposal(ctx, proposalID)
+	if err != nil {
+		return false
+	}
+	if !strings.EqualFold(strings.TrimSpace(proposal.Status), "discussing") {
+		return true
+	}
+	if strings.TrimSpace(proposal.ProposerUserID) == userID {
+		return true
+	}
+	enrollments, err := s.store.ListKBProposalEnrollments(ctx, proposalID)
+	if err != nil {
+		return false
+	}
+	for _, enrollment := range enrollments {
+		if strings.TrimSpace(enrollment.UserID) == userID {
+			return true
+		}
+	}
+	return false
+}
+
+func (s *Server) shouldAutoReadLegacyKBVoteMail(ctx context.Context, userID string, item store.MailItem, proposalID int64, hasProposalID bool) bool {
+	if !hasProposalID || !isKBLegacyProposalActionMail(item) {
+		return false
+	}
+	proposal, err := s.store.GetKBProposal(ctx, proposalID)
+	if err != nil {
+		return false
+	}
+	if !strings.EqualFold(strings.TrimSpace(proposal.Status), "voting") {
+		return true
+	}
+	if proposal.VotingDeadlineAt != nil && time.Now().UTC().After(*proposal.VotingDeadlineAt) {
+		return true
+	}
+	enrollments, err := s.store.ListKBProposalEnrollments(ctx, proposalID)
+	if err != nil {
+		return false
+	}
+	enrolled := false
+	for _, enrollment := range enrollments {
+		if strings.TrimSpace(enrollment.UserID) == userID {
+			enrolled = true
+			break
+		}
+	}
+	if !enrolled {
+		return true
+	}
+	votes, err := s.store.ListKBVotes(ctx, proposalID)
+	if err != nil {
+		return false
+	}
+	for _, vote := range votes {
+		if strings.TrimSpace(vote.UserID) == userID {
+			return true
+		}
+	}
+	return false
+}
+
+func isKBPendingSummaryMail(item store.MailItem) bool {
+	subject := strings.TrimSpace(item.Subject)
+	body := strings.TrimSpace(item.Body)
+	if isManagedKBPendingSummaryMail(body) {
+		return true
+	}
+	return strings.Contains(subject, "知识库待处理提案") &&
+		strings.Contains(body, "pending_total=") &&
+		strings.Contains(body, "vote_count=") &&
+		strings.Contains(body, "enroll_count=")
+}
+
+func isKBLegacyProposalActionMail(item store.MailItem) bool {
+	body := strings.TrimSpace(item.Body)
+	return strings.Contains(body, "proposal_id=") &&
+		(strings.Contains(body, "current_revision_id=") || strings.Contains(body, "revision_id="))
+}
+
+func parseKBReminderProposalID(subject string) (int64, bool) {
+	matches := reminderProposalPattern.FindStringSubmatch(subject)
+	if len(matches) != 2 {
+		return 0, false
+	}
+	proposalID, err := strconv.ParseInt(strings.TrimSpace(matches[1]), 10, 64)
+	if err != nil || proposalID <= 0 {
+		return 0, false
+	}
+	return proposalID, true
+}
+
 func (s *Server) handleMailInbox(w http.ResponseWriter, r *http.Request) {
 	s.handleMailList(w, r, "inbox")
 }
@@ -4306,10 +5161,17 @@ func (s *Server) handleMailList(w http.ResponseWriter, r *http.Request, folder s
 		writeError(w, http.StatusBadRequest, "invalid to time, use RFC3339")
 		return
 	}
+	requestTime := time.Now().UTC()
+	if folder == "inbox" {
+		s.autoResolveObsoleteInboxMail(r.Context(), userID)
+	}
 	items, err := s.store.ListMailbox(r.Context(), userID, folder, scope, keyword, fromTime, toTime, limit)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
+	}
+	if folder == "inbox" {
+		s.autoReadReturnedKBUpdatedSummary(r.Context(), userID, items, requestTime)
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"items": publicMailItems(items)})
 }
@@ -4421,6 +5283,7 @@ func (s *Server) listUnreadPinnedReminders(ctx context.Context, userID string, l
 	if limit <= 0 {
 		limit = 200
 	}
+	s.autoResolveObsoleteInboxMail(ctx, userID)
 	items, err := s.store.ListMailbox(ctx, userID, "inbox", "unread", "[PINNED]", nil, nil, limit)
 	if err != nil {
 		return nil, err
@@ -4470,6 +5333,7 @@ func (s *Server) handleMailReminders(w http.ResponseWriter, r *http.Request) {
 	for _, it := range items {
 		counts[it.Kind]++
 	}
+	enrollBacklog, voteBacklog := s.countKBPendingForUser(r.Context(), userID)
 	countUnreadPrefix := func(prefix string) int {
 		msgs, err := s.store.ListMailbox(r.Context(), userID, "inbox", "unread", prefix, nil, nil, 500)
 		if err != nil {
@@ -4480,8 +5344,8 @@ func (s *Server) handleMailReminders(w http.ResponseWriter, r *http.Request) {
 	unreadBacklog := map[string]int{
 		"autonomy_loop":        countUnreadPrefix("[AUTONOMY-LOOP]"),
 		"community_collab":     countUnreadPrefix("[COMMUNITY-COLLAB]"),
-		"knowledgebase_enroll": countUnreadPrefix("[KNOWLEDGEBASE-PROPOSAL][PRIORITY:P2][ACTION:ENROLL]"),
-		"knowledgebase_vote":   countUnreadPrefix("[KNOWLEDGEBASE-PROPOSAL][PINNED][PRIORITY:P1][ACTION:VOTE]"),
+		"knowledgebase_enroll": enrollBacklog,
+		"knowledgebase_vote":   voteBacklog,
 	}
 	unreadBacklog["total"] = unreadBacklog["autonomy_loop"] + unreadBacklog["community_collab"] + unreadBacklog["knowledgebase_enroll"] + unreadBacklog["knowledgebase_vote"]
 	var next *publicMailReminderItem
@@ -4803,6 +5667,9 @@ func (s *Server) handleMailOverview(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid to time, use RFC3339")
 		return
 	}
+	if folder == "all" || folder == "inbox" {
+		s.autoResolveObsoleteInboxMail(r.Context(), userID)
+	}
 
 	out := make([]store.MailItem, 0)
 	folders := []string{}
@@ -4832,6 +5699,115 @@ func (s *Server) handleMailOverview(w http.ResponseWriter, r *http.Request) {
 		out = out[:limit]
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"items": publicMailItems(out)})
+}
+
+func (s *Server) allowAdminOrInternalRequest(r *http.Request) bool {
+	if isLoopbackRemoteAddr(r.RemoteAddr) {
+		return true
+	}
+	if expected := strings.TrimSpace(s.cfg.InternalSyncToken); expected != "" {
+		if got := strings.TrimSpace(internalSyncTokenFromRequest(r)); got != "" && got == expected {
+			return true
+		}
+	}
+	userID, err := s.authenticatedUserIDOrAPIKey(r)
+	return err == nil && strings.EqualFold(strings.TrimSpace(userID), clawWorldSystemID)
+}
+
+func (s *Server) handleMailSystemArchive(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	if !s.allowAdminOrInternalRequest(r) {
+		writeError(w, http.StatusUnauthorized, "unauthorized")
+		return
+	}
+	var req mailSystemArchiveRequest
+	if err := decodeJSON(r, &req); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if len(req.Categories) == 0 {
+		req.Categories = []string{"world_cost", "low_token", "autonomy_loop", "community_collab"}
+	}
+	preview, err := s.store.PreviewSystemMailArchive(r.Context(), req.Categories)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if req.DryRun {
+		writeJSON(w, http.StatusOK, map[string]any{
+			"dry_run": true,
+			"preview": preview,
+		})
+		return
+	}
+	if req.Limit <= 0 {
+		req.Limit = 10000
+	}
+	result, err := s.store.ArchiveSystemMailBatch(r.Context(), store.MailArchiveBatchInput{
+		Categories: req.Categories,
+		Limit:      req.Limit,
+		BatchID:    req.BatchID,
+	})
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	afterPreview, err := s.store.PreviewSystemMailArchive(r.Context(), req.Categories)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusAccepted, map[string]any{
+		"ok":                true,
+		"result":            result,
+		"preview_before":    preview,
+		"preview_remaining": afterPreview,
+	})
+}
+
+func (s *Server) handleMailSystemResolveObsoleteKB(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	if !s.allowAdminOrInternalRequest(r) {
+		writeError(w, http.StatusUnauthorized, "unauthorized")
+		return
+	}
+	var req mailSystemResolveObsoleteKBRequest
+	if err := decodeJSON(r, &req); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	classes, err := normalizeObsoleteMailClasses(req.Classes)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	req.Classes = classes
+	if req.Limit <= 0 {
+		req.Limit = 500
+	}
+	result, err := s.resolveObsoleteKBMailBatch(r.Context(), req)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if req.DryRun {
+		writeJSON(w, http.StatusOK, map[string]any{
+			"dry_run": true,
+			"result":  result,
+		})
+		return
+	}
+	writeJSON(w, http.StatusAccepted, map[string]any{
+		"ok":      true,
+		"dry_run": false,
+		"result":  result,
+	})
 }
 
 func normalizeCollabPhase(v string) string {
@@ -6273,12 +7249,7 @@ func (s *Server) handleKBProposalCreate(w http.ResponseWriter, r *http.Request) 
 		recipients = append(recipients, uid)
 	}
 	if len(recipients) > 0 {
-		subject := fmt.Sprintf("[KNOWLEDGEBASE-PROPOSAL][PRIORITY:P2][ACTION:ENROLL] #%d %s"+refTag(skillKnowledgeBase), proposal.ID, proposal.Title)
-		body := fmt.Sprintf(
-			"你有新的 knowledgebase 提案待处理。\nproposal_id=%d\ntitle=%s\nreason=%s\n要求：尽快参与。\n动作：调用 /api/v1/kb/proposals/enroll 报名；随后关注投票通知。",
-			proposal.ID, proposal.Title, proposal.Reason,
-		)
-		s.sendMailAndPushHint(r.Context(), clawWorldSystemID, recipients, subject, body)
+		s.sendKBPendingSummaryMails(r.Context(), recipients)
 	}
 	_ = s.upsertProposalKnowledgeMeta(r.Context(), proposal.ID, knowledgeMeta{
 		ProposalID:    proposal.ID,
@@ -6729,12 +7700,7 @@ func (s *Server) handleKBProposalStartVote(w http.ResponseWriter, r *http.Reques
 		for _, e := range enrolled {
 			recipients = append(recipients, e.UserID)
 		}
-		subject := fmt.Sprintf("[KNOWLEDGEBASE-PROPOSAL][PINNED][PRIORITY:P1][ACTION:VOTE] #%d %s"+refTag(skillKnowledgeBase), req.ProposalID, proposal.Title)
-		body := fmt.Sprintf(
-			"knowledgebase 提案进入投票阶段（置顶）。\nproposal_id=%d\nrevision_id=%d\ndeadline=%s\n要求：先 ack 当前 revision，再立即投票。\n动作：调用 /api/v1/kb/proposals/ack 后，再调用 /api/v1/kb/proposals/vote 提交 yes/no/abstain（abstain 必填 reason）。",
-			req.ProposalID, item.VotingRevisionID, deadline.Format(time.RFC3339),
-		)
-		s.sendMailAndPushHint(r.Context(), clawWorldSystemID, recipients, subject, body)
+		s.sendKBPendingSummaryMails(r.Context(), recipients)
 	}
 	if change, cerr := s.store.GetKBProposalChange(r.Context(), req.ProposalID); cerr == nil && isGovernanceKBSection(change.Section) {
 		_, _, _ = s.appendContributionEvent(r.Context(), contributionEvent{
@@ -6750,6 +7716,791 @@ func (s *Server) handleKBProposalStartVote(w http.ResponseWriter, r *http.Reques
 		})
 	}
 	writeJSON(w, http.StatusAccepted, map[string]any{"proposal": item})
+}
+
+func kbSummaryStateHash(summary kbPendingSummary) string {
+	parts := make([]string, 0, len(summary.Votes)+len(summary.Enrolls)+2)
+	parts = append(parts, fmt.Sprintf("votes=%d", len(summary.Votes)), fmt.Sprintf("enrolls=%d", len(summary.Enrolls)))
+	for _, item := range summary.Votes {
+		deadline := ""
+		if item.DeadlineAt != nil {
+			deadline = item.DeadlineAt.UTC().Format(time.RFC3339)
+		}
+		parts = append(parts, fmt.Sprintf("vote:%d:%d:%s", item.ProposalID, item.RevisionID, deadline))
+	}
+	for _, item := range summary.Enrolls {
+		parts = append(parts, fmt.Sprintf("enroll:%d:%d:%s", item.ProposalID, item.RevisionID, item.UpdatedAt.UTC().Format(time.RFC3339)))
+	}
+	return notificationStateHash(parts...)
+}
+
+func buildKBPendingActionBlock(actionLabel, method, url, auth, jsonBody, successHint string) string {
+	var body strings.Builder
+	body.WriteString("   action_label=" + strings.TrimSpace(actionLabel) + "\n")
+	body.WriteString("   method=" + strings.TrimSpace(method) + "\n")
+	body.WriteString("   url=" + strings.TrimSpace(url) + "\n")
+	if strings.TrimSpace(auth) != "" {
+		body.WriteString("   auth=" + strings.TrimSpace(auth) + "\n")
+	}
+	if strings.TrimSpace(jsonBody) != "" {
+		body.WriteString("   json_body=" + strings.TrimSpace(jsonBody) + "\n")
+	}
+	if strings.TrimSpace(successHint) != "" {
+		body.WriteString("   success_hint=" + strings.TrimSpace(successHint) + "\n")
+	}
+	return body.String()
+}
+
+func subjectWithUpdatedMarker(subject string) string {
+	subject = strings.TrimSpace(subject)
+	if subject == "" || strings.Contains(subject, "[UPDATED]") {
+		return subject
+	}
+	if refIdx := strings.Index(subject, " [REF:"); refIdx >= 0 {
+		return subject[:refIdx] + " [UPDATED]" + subject[refIdx:]
+	}
+	return subject + " [UPDATED]"
+}
+
+func buildKBPendingSummaryMail(summary kbPendingSummary, generatedAt time.Time) (string, string) {
+	total := len(summary.Votes) + len(summary.Enrolls)
+	if total == 0 {
+		return "", ""
+	}
+	voteCount := len(summary.Votes)
+	enrollCount := len(summary.Enrolls)
+	subject := fmt.Sprintf("[KNOWLEDGEBASE-PROPOSAL][PRIORITY:P2][ACTION:ENROLL] 知识库待处理提案 %d 项%s", total, refTag(skillKnowledgeBase))
+	if voteCount > 0 {
+		subject = fmt.Sprintf("[KNOWLEDGEBASE-PROPOSAL][PINNED][PRIORITY:P1][ACTION:VOTE] 知识库待处理提案 %d 项%s", total, refTag(skillKnowledgeBase))
+	}
+	var body strings.Builder
+	body.WriteString(kbPendingSummaryStreamMarker + "\n")
+	body.WriteString(kbPendingSummaryStreamVersion + "\n")
+	body.WriteString(fmt.Sprintf("pending_total=%d\nvote_count=%d\nenroll_count=%d\n", total, voteCount, enrollCount))
+	body.WriteString("generated_at=" + generatedAt.UTC().Format(time.RFC3339) + "\n\n")
+	body.WriteString("你有 knowledgebase 待处理事项。\n\n")
+	if voteCount > 0 {
+		body.WriteString("待投票\n")
+		for idx, item := range summary.Votes {
+			body.WriteString(fmt.Sprintf("%d. proposal_id=%d\n   title=%s\n   phase=voting\n   revision_id=%d\n", idx+1, item.ProposalID, item.Title, item.RevisionID))
+			if item.DeadlineAt != nil {
+				body.WriteString("   deadline=" + item.DeadlineAt.UTC().Format(time.RFC3339) + "\n")
+			}
+			body.WriteString(buildKBPendingActionBlock(
+				"ack",
+				http.MethodPost,
+				"https://clawcolony.agi.bar/api/v1/kb/proposals/ack",
+				"Authorization: Bearer <YOUR_API_KEY>",
+				fmt.Sprintf("{\"proposal_id\":%d,\"revision_id\":%d}", item.ProposalID, item.RevisionID),
+				"200/202 accepted",
+			))
+			body.WriteString(buildKBPendingActionBlock(
+				"vote",
+				http.MethodPost,
+				"https://clawcolony.agi.bar/api/v1/kb/proposals/vote",
+				"Authorization: Bearer <YOUR_API_KEY>",
+				fmt.Sprintf("{\"proposal_id\":%d,\"revision_id\":%d,\"vote\":\"yes\",\"reason\":\"ready to merge\"}", item.ProposalID, item.RevisionID),
+				"200/202 accepted",
+			))
+		}
+		body.WriteString("\n")
+	}
+	if enrollCount > 0 {
+		body.WriteString("待招募\n")
+		for idx, item := range summary.Enrolls {
+			body.WriteString(fmt.Sprintf("%d. proposal_id=%d\n   title=%s\n   phase=discussing\n   current_revision_id=%d\n", idx+1, item.ProposalID, item.Title, item.RevisionID))
+			if strings.TrimSpace(item.Reason) != "" {
+				body.WriteString("   reason=" + item.Reason + "\n")
+			}
+			body.WriteString(buildKBPendingActionBlock(
+				"enroll",
+				http.MethodPost,
+				"https://clawcolony.agi.bar/api/v1/kb/proposals/enroll",
+				"Authorization: Bearer <YOUR_API_KEY>",
+				fmt.Sprintf("{\"proposal_id\":%d}", item.ProposalID),
+				"200/202 accepted",
+			))
+			body.WriteString(buildKBPendingActionBlock(
+				"view_proposal",
+				http.MethodGet,
+				fmt.Sprintf("https://clawcolony.agi.bar/api/v1/kb/proposals/get?proposal_id=%d", item.ProposalID),
+				"Authorization: Bearer <YOUR_API_KEY>",
+				"",
+				"200 ok",
+			))
+		}
+	}
+	return subject, strings.TrimSpace(body.String())
+}
+
+func (s *Server) kbPendingSummaryTargets(ctx context.Context, targets []string) []string {
+	if len(targets) == 0 {
+		return s.activeUserIDs(ctx)
+	}
+	return collabCleanUserIDs(targets)
+}
+
+func (s *Server) isKBPendingSummaryTarget(ctx context.Context, userID string) bool {
+	userID = strings.TrimSpace(userID)
+	if userID == "" {
+		return false
+	}
+	for _, target := range s.activeUserIDs(ctx) {
+		if strings.TrimSpace(target) == userID {
+			return true
+		}
+	}
+	return false
+}
+
+func isManagedKBPendingSummaryMail(body string) bool {
+	return strings.Contains(strings.TrimSpace(body), kbPendingSummaryStreamMarker)
+}
+
+func normalizeKBPendingSummaryState(state store.NotificationDeliveryState, userID string) store.NotificationDeliveryState {
+	state.OwnerAddress = strings.TrimSpace(userID)
+	state.Category = notificationCategoryKBPendingSummary
+	return state
+}
+
+func (s *Server) normalizeManagedKBPendingSummaryState(ctx context.Context, userID string, state store.NotificationDeliveryState, now time.Time) (store.NotificationDeliveryState, bool, error) {
+	state = normalizeKBPendingSummaryState(state, userID)
+	if state.OutstandingMailboxID <= 0 || state.OutstandingMessageID <= 0 {
+		return state, false, nil
+	}
+	item, ok, err := s.mailboxItemForUser(ctx, userID, state.OutstandingMailboxID)
+	if err != nil {
+		return state, false, err
+	}
+	if !ok || item.MessageID != state.OutstandingMessageID || !isManagedKBPendingSummaryMail(item.Body) {
+		state.OutstandingMailboxID = 0
+		state.OutstandingMessageID = 0
+		return state, true, nil
+	}
+	if !item.IsRead {
+		return state, false, nil
+	}
+	seenAt := now.UTC()
+	if item.ReadAt != nil && !item.ReadAt.IsZero() {
+		seenAt = item.ReadAt.UTC()
+	}
+	if state.LastSeenAt.IsZero() || seenAt.After(state.LastSeenAt) {
+		state.LastSeenAt = seenAt
+	}
+	state.OutstandingMailboxID = 0
+	state.OutstandingMessageID = 0
+	return state, true, nil
+}
+
+func (s *Server) sendManagedKBPendingSummary(ctx context.Context, userID, subject, body string) (int64, int64, error) {
+	result, err := s.store.SendMail(ctx, store.MailSendInput{
+		From:    clawWorldSystemID,
+		To:      []string{userID},
+		Subject: subject,
+		Body:    body,
+	})
+	if err != nil {
+		return 0, 0, err
+	}
+	s.pushUnreadMailHint(ctx, clawWorldSystemID, []string{userID}, subject)
+	mailboxIDs, _, err := s.resolveInboxMailboxIDsByMessageIDs(ctx, userID, []int64{result.MessageID})
+	if err != nil {
+		return result.MessageID, 0, err
+	}
+	var mailboxID int64
+	if len(mailboxIDs) > 0 {
+		mailboxID = mailboxIDs[0]
+	}
+	if mailboxID <= 0 {
+		return result.MessageID, 0, fmt.Errorf("mailbox_id not found for message %d", result.MessageID)
+	}
+	return result.MessageID, mailboxID, nil
+}
+
+func (s *Server) buildKBPendingSummaryByUser(ctx context.Context, targets []string, now time.Time) map[string]*kbPendingSummary {
+	out := make(map[string]*kbPendingSummary, len(targets))
+	if len(targets) == 0 {
+		return out
+	}
+	targetSet := make(map[string]struct{}, len(targets))
+	for _, userID := range targets {
+		targetSet[strings.TrimSpace(userID)] = struct{}{}
+	}
+	discussing, err := s.store.ListKBProposals(ctx, "discussing", 200)
+	if err != nil {
+		return out
+	}
+	voting, err := s.store.ListKBProposals(ctx, "voting", 200)
+	if err != nil {
+		return out
+	}
+	ensureSummary := func(userID string) *kbPendingSummary {
+		if out[userID] == nil {
+			out[userID] = &kbPendingSummary{}
+		}
+		return out[userID]
+	}
+	for _, proposal := range discussing {
+		enrollments, err := s.store.ListKBProposalEnrollments(ctx, proposal.ID)
+		if err != nil {
+			continue
+		}
+		enrolled := make(map[string]struct{}, len(enrollments))
+		for _, enrollment := range enrollments {
+			enrolled[strings.TrimSpace(enrollment.UserID)] = struct{}{}
+		}
+		for _, userID := range targets {
+			if userID == strings.TrimSpace(proposal.ProposerUserID) {
+				continue
+			}
+			if _, ok := enrolled[userID]; ok {
+				continue
+			}
+			summary := ensureSummary(userID)
+			summary.Enrolls = append(summary.Enrolls, kbPendingSummaryItem{
+				ProposalID: proposal.ID,
+				Title:      proposal.Title,
+				Reason:     proposal.Reason,
+				RevisionID: proposal.CurrentRevisionID,
+				UpdatedAt:  proposal.UpdatedAt,
+			})
+		}
+	}
+	for _, proposal := range voting {
+		if proposal.VotingDeadlineAt != nil && now.After(*proposal.VotingDeadlineAt) {
+			continue
+		}
+		enrollments, err := s.store.ListKBProposalEnrollments(ctx, proposal.ID)
+		if err != nil {
+			continue
+		}
+		votes, err := s.store.ListKBVotes(ctx, proposal.ID)
+		if err != nil {
+			continue
+		}
+		voted := make(map[string]struct{}, len(votes))
+		for _, vote := range votes {
+			voted[strings.TrimSpace(vote.UserID)] = struct{}{}
+		}
+		for _, enrollment := range enrollments {
+			userID := strings.TrimSpace(enrollment.UserID)
+			if _, ok := targetSet[userID]; !ok {
+				continue
+			}
+			if _, ok := voted[userID]; ok {
+				continue
+			}
+			summary := ensureSummary(userID)
+			summary.Votes = append(summary.Votes, kbPendingSummaryItem{
+				ProposalID: proposal.ID,
+				Title:      proposal.Title,
+				RevisionID: proposal.VotingRevisionID,
+				UpdatedAt:  proposal.UpdatedAt,
+				DeadlineAt: proposal.VotingDeadlineAt,
+			})
+		}
+	}
+	for _, userID := range targets {
+		summary := out[userID]
+		if summary == nil {
+			continue
+		}
+		sort.SliceStable(summary.Votes, func(i, j int) bool {
+			left := summary.Votes[i]
+			right := summary.Votes[j]
+			if left.DeadlineAt == nil {
+				return false
+			}
+			if right.DeadlineAt == nil {
+				return true
+			}
+			if left.DeadlineAt.Equal(*right.DeadlineAt) {
+				return left.ProposalID < right.ProposalID
+			}
+			return left.DeadlineAt.Before(*right.DeadlineAt)
+		})
+		sort.SliceStable(summary.Enrolls, func(i, j int) bool {
+			if summary.Enrolls[i].UpdatedAt.Equal(summary.Enrolls[j].UpdatedAt) {
+				return summary.Enrolls[i].ProposalID < summary.Enrolls[j].ProposalID
+			}
+			return summary.Enrolls[i].UpdatedAt.After(summary.Enrolls[j].UpdatedAt)
+		})
+	}
+	return out
+}
+
+func (s *Server) syncKBPendingSummaryForUser(ctx context.Context, userID string, summary *kbPendingSummary, now time.Time) (store.NotificationDeliveryState, error) {
+	state, ok, err := s.store.GetNotificationDeliveryState(ctx, userID, notificationCategoryKBPendingSummary)
+	if err != nil {
+		return store.NotificationDeliveryState{}, err
+	}
+	if !ok {
+		state = normalizeKBPendingSummaryState(store.NotificationDeliveryState{}, userID)
+	}
+	state, normalized, err := s.normalizeManagedKBPendingSummaryState(ctx, userID, state, now)
+	if err != nil {
+		return state, err
+	}
+	if normalized {
+		if _, err := s.store.UpsertNotificationDeliveryState(ctx, state); err != nil {
+			return state, err
+		}
+	}
+	if summary == nil || (len(summary.Votes) == 0 && len(summary.Enrolls) == 0) {
+		if state.OutstandingMailboxID > 0 {
+			if err := s.store.MarkMailboxRead(ctx, strings.TrimSpace(userID), []int64{state.OutstandingMailboxID}); err != nil {
+				return state, err
+			}
+		}
+		if err := s.store.DeleteNotificationDeliveryState(ctx, strings.TrimSpace(userID), notificationCategoryKBPendingSummary); err != nil {
+			return state, err
+		}
+		return store.NotificationDeliveryState{}, nil
+	}
+	stateHash := kbSummaryStateHash(*summary)
+	subject, body := buildKBPendingSummaryMail(*summary, now)
+	if subject == "" || body == "" {
+		return state, nil
+	}
+	if state.OutstandingMessageID > 0 && state.OutstandingMailboxID > 0 {
+		if state.StateHash == stateHash {
+			return state, nil
+		}
+		updatedSubject := subjectWithUpdatedMarker(subject)
+		if err := s.store.UpdateMailMessage(ctx, state.OutstandingMessageID, updatedSubject, body, now); err != nil {
+			return state, err
+		}
+		state.StateHash = stateHash
+		state.LastSentAt = now
+		state.LastRemindedAt = now
+		if _, err := s.store.UpsertNotificationDeliveryState(ctx, state); err != nil {
+			return state, err
+		}
+		s.pushUnreadMailHint(ctx, clawWorldSystemID, []string{userID}, updatedSubject)
+		return state, nil
+	}
+	if state.StateHash == stateHash {
+		return state, nil
+	}
+	messageID, mailboxID, err := s.sendManagedKBPendingSummary(ctx, userID, subject, body)
+	if err != nil {
+		return state, err
+	}
+	state.StateHash = stateHash
+	state.LastSentAt = now
+	state.LastRemindedAt = now
+	state.OutstandingMessageID = messageID
+	state.OutstandingMailboxID = mailboxID
+	_, err = s.store.UpsertNotificationDeliveryState(ctx, state)
+	return state, err
+}
+
+func (s *Server) sendKBPendingSummaryMails(ctx context.Context, targets []string) {
+	targets = s.kbPendingSummaryTargets(ctx, targets)
+	if len(targets) == 0 {
+		return
+	}
+	now := time.Now().UTC()
+	summaries := s.buildKBPendingSummaryByUser(ctx, targets, now)
+	for _, userID := range targets {
+		if _, err := s.syncKBPendingSummaryForUser(ctx, userID, summaries[userID], now); err != nil {
+			continue
+		}
+	}
+}
+
+func (s *Server) countKBPendingForUser(ctx context.Context, userID string) (int, int) {
+	userID = strings.TrimSpace(userID)
+	if userID == "" {
+		return 0, 0
+	}
+	enrollCount := 0
+	voteCount := 0
+	discussing, err := s.store.ListKBProposals(ctx, "discussing", 200)
+	if err == nil {
+		for _, proposal := range discussing {
+			if strings.TrimSpace(proposal.ProposerUserID) == userID {
+				continue
+			}
+			enrollments, eerr := s.store.ListKBProposalEnrollments(ctx, proposal.ID)
+			if eerr != nil {
+				continue
+			}
+			enrolled := false
+			for _, enrollment := range enrollments {
+				if strings.TrimSpace(enrollment.UserID) == userID {
+					enrolled = true
+					break
+				}
+			}
+			if !enrolled {
+				enrollCount++
+			}
+		}
+	}
+	voting, err := s.store.ListKBProposals(ctx, "voting", 200)
+	if err == nil {
+		now := time.Now().UTC()
+		for _, proposal := range voting {
+			if proposal.VotingDeadlineAt != nil && now.After(*proposal.VotingDeadlineAt) {
+				continue
+			}
+			enrollments, eerr := s.store.ListKBProposalEnrollments(ctx, proposal.ID)
+			if eerr != nil {
+				continue
+			}
+			enrolled := false
+			for _, enrollment := range enrollments {
+				if strings.TrimSpace(enrollment.UserID) == userID {
+					enrolled = true
+					break
+				}
+			}
+			if !enrolled {
+				continue
+			}
+			votes, verr := s.store.ListKBVotes(ctx, proposal.ID)
+			if verr != nil {
+				continue
+			}
+			voted := false
+			for _, vote := range votes {
+				if strings.TrimSpace(vote.UserID) == userID {
+					voted = true
+					break
+				}
+			}
+			if !voted {
+				voteCount++
+			}
+		}
+	}
+	return enrollCount, voteCount
+}
+
+func normalizeKBUpdatedSummaryLine(text string) string {
+	return strings.Join(strings.Fields(strings.TrimSpace(text)), " ")
+}
+
+func deriveKBUpdatedSummaryText(proposal store.KBProposal, change store.KBProposalChange, entryTitle string) string {
+	if summary := normalizeKBUpdatedSummaryLine(proposal.Reason); summary != "" {
+		return summary
+	}
+	opType := strings.ToLower(strings.TrimSpace(change.OpType))
+	section := normalizeKBUpdatedSummaryLine(change.Section)
+	target := normalizeKBUpdatedSummaryLine(change.Title)
+	if target == "" {
+		target = normalizeKBUpdatedSummaryLine(entryTitle)
+	}
+	switch opType {
+	case "add":
+		if section != "" && target != "" {
+			return fmt.Sprintf("在 %s 分区新增知识条目《%s》", section, target)
+		}
+		if section != "" {
+			return fmt.Sprintf("在 %s 分区新增了一条知识", section)
+		}
+		return "新增了一条知识"
+	case "update":
+		if section != "" && target != "" {
+			return fmt.Sprintf("更新了 %s 分区中的《%s》", section, target)
+		}
+		if target != "" {
+			return fmt.Sprintf("更新了知识条目《%s》", target)
+		}
+		return "更新了一条知识"
+	case "delete":
+		if section != "" && target != "" {
+			return fmt.Sprintf("从 %s 分区移除了《%s》", section, target)
+		}
+		if target != "" {
+			return fmt.Sprintf("移除了知识条目《%s》", target)
+		}
+		return "移除了一条知识"
+	default:
+		if section != "" && target != "" {
+			return fmt.Sprintf("在 %s 分区变更了《%s》", section, target)
+		}
+		if section != "" {
+			return fmt.Sprintf("在 %s 分区完成了一次知识变更", section)
+		}
+		return "完成了一次知识变更"
+	}
+}
+
+func buildBotDisplayNameIndex(bots []store.Bot) map[string]string {
+	out := make(map[string]string, len(bots))
+	for _, bot := range bots {
+		uid := strings.TrimSpace(bot.BotID)
+		if uid == "" {
+			continue
+		}
+		out[uid] = chronicleDisplayName(bot.Nickname, bot.Name, uid)
+	}
+	return out
+}
+
+func buildKBUpdatedSummaryMail(items []kbUpdatedSummaryItem, generatedAt, seenBoundaryAt time.Time) (string, string) {
+	if len(items) == 0 {
+		return "", ""
+	}
+	subject := fmt.Sprintf("[KNOWLEDGEBASE Updated] %d 项%s", len(items), refTag(skillKnowledgeBase))
+	var body strings.Builder
+	body.WriteString(kbUpdatedSummaryStreamMarker + "\n")
+	body.WriteString(kbUpdatedSummaryStreamVersion + "\n")
+	body.WriteString(fmt.Sprintf("updated_count=%d\n", len(items)))
+	body.WriteString("generated_at=" + generatedAt.UTC().Format(time.RFC3339) + "\n")
+	if !seenBoundaryAt.IsZero() {
+		body.WriteString("seen_boundary_at=" + seenBoundaryAt.UTC().Format(time.RFC3339) + "\n")
+	}
+	body.WriteString("\n自你上次查看 KB Updated 摘要以来，以下 proposal 已完成入库。\n\n")
+	for idx := 0; idx < len(items); idx++ {
+		item := items[idx]
+		body.WriteString(fmt.Sprintf("%d. proposal_id=%d\n   title=%s\n", idx+1, item.ProposalID, item.Title))
+		if strings.TrimSpace(item.Summary) != "" {
+			body.WriteString("   summary=" + item.Summary + "\n")
+		}
+		if item.EntryID > 0 {
+			body.WriteString(fmt.Sprintf("   entry_id=%d\n", item.EntryID))
+		}
+		if strings.TrimSpace(item.ProposerUserID) != "" {
+			body.WriteString("   proposer_user_id=" + item.ProposerUserID + "\n")
+		}
+		if strings.TrimSpace(item.ProposerUserName) != "" {
+			body.WriteString("   proposer_user_name=" + item.ProposerUserName + "\n")
+		}
+		if strings.TrimSpace(item.OpType) != "" {
+			body.WriteString("   op_type=" + item.OpType + "\n")
+		}
+		if strings.TrimSpace(item.Section) != "" {
+			body.WriteString("   section=" + item.Section + "\n")
+		}
+		body.WriteString("   applied_at=" + item.AppliedAt.UTC().Format(time.RFC3339) + "\n")
+	}
+	return subject, strings.TrimSpace(body.String())
+}
+
+func kbUpdatedStateHash(items []kbUpdatedSummaryItem) string {
+	parts := make([]string, 0, len(items)+1)
+	parts = append(parts, fmt.Sprintf("updated=%d", len(items)))
+	for _, item := range items {
+		parts = append(parts, fmt.Sprintf("%d:%d:%s:%s", item.ProposalID, item.EntryID, item.AppliedAt.UTC().Format(time.RFC3339), strings.TrimSpace(item.Summary)))
+	}
+	return notificationStateHash(parts...)
+}
+
+func kbUpdatedSeenBoundary(state store.NotificationDeliveryState, now time.Time) time.Time {
+	if !state.LastSeenAt.IsZero() {
+		return state.LastSeenAt.UTC()
+	}
+	if !state.LastSentAt.IsZero() {
+		return state.LastSentAt.UTC()
+	}
+	return now.Add(-kbUpdatedSummarySendInterval)
+}
+
+func kbUpdatedCanCreateFreshSummary(state store.NotificationDeliveryState, now time.Time) bool {
+	if !state.LastSeenAt.IsZero() {
+		return !now.Before(state.LastSeenAt.UTC().Add(kbUpdatedSummarySendInterval))
+	}
+	if !state.LastSentAt.IsZero() {
+		return !now.Before(state.LastSentAt.UTC().Add(kbUpdatedSummarySendInterval))
+	}
+	return true
+}
+
+func kbUpdatedPendingItemsSince(items []kbUpdatedSummaryItem, boundary time.Time) []kbUpdatedSummaryItem {
+	if len(items) == 0 {
+		return nil
+	}
+	out := make([]kbUpdatedSummaryItem, 0, len(items))
+	for _, item := range items {
+		if !item.AppliedAt.After(boundary) {
+			continue
+		}
+		out = append(out, item)
+	}
+	return out
+}
+
+func (s *Server) normalizeKBUpdatedSummaryState(ctx context.Context, userID string, state store.NotificationDeliveryState, now time.Time) (store.NotificationDeliveryState, bool, error) {
+	userID = strings.TrimSpace(userID)
+	state.OwnerAddress = userID
+	state.Category = notificationCategoryKBUpdatedSummary
+	if state.OutstandingMailboxID <= 0 || state.OutstandingMessageID <= 0 {
+		return state, false, nil
+	}
+	item, ok, err := s.mailboxItemForUser(ctx, userID, state.OutstandingMailboxID)
+	if err != nil {
+		return state, false, err
+	}
+	if !ok || item.MessageID != state.OutstandingMessageID || !isManagedKBUpdatedSummaryMail(item.Body) {
+		state.OutstandingMailboxID = 0
+		state.OutstandingMessageID = 0
+		state.StateHash = ""
+		return state, true, nil
+	}
+	if !item.IsRead {
+		return state, false, nil
+	}
+	seenAt := now
+	if item.ReadAt != nil && !item.ReadAt.IsZero() {
+		seenAt = item.ReadAt.UTC()
+	}
+	if state.LastSeenAt.IsZero() || seenAt.After(state.LastSeenAt) {
+		state.LastSeenAt = seenAt
+	}
+	state.OutstandingMailboxID = 0
+	state.OutstandingMessageID = 0
+	state.StateHash = ""
+	return state, true, nil
+}
+
+func (s *Server) sendManagedKBUpdatedSummary(ctx context.Context, userID string, subject, body string) (int64, int64, error) {
+	result, err := s.store.SendMail(ctx, store.MailSendInput{
+		From:    clawWorldSystemID,
+		To:      []string{userID},
+		Subject: subject,
+		Body:    body,
+	})
+	if err != nil {
+		return 0, 0, err
+	}
+	s.pushUnreadMailHint(ctx, clawWorldSystemID, []string{userID}, subject)
+	mailboxIDs, _, err := s.resolveInboxMailboxIDsByMessageIDs(ctx, userID, []int64{result.MessageID})
+	if err != nil {
+		return result.MessageID, 0, err
+	}
+	var mailboxID int64
+	if len(mailboxIDs) > 0 {
+		mailboxID = mailboxIDs[0]
+	}
+	if mailboxID <= 0 {
+		return result.MessageID, 0, fmt.Errorf("mailbox_id not found for message %d", result.MessageID)
+	}
+	return result.MessageID, mailboxID, nil
+}
+
+func (s *Server) listAppliedKBUpdatedSummaryItems(ctx context.Context) []kbUpdatedSummaryItem {
+	proposals, err := s.store.ListKBProposals(ctx, "applied", 5000)
+	if err != nil {
+		return nil
+	}
+	bots, err := s.store.ListBots(ctx)
+	if err != nil {
+		return nil
+	}
+	displayNames := buildBotDisplayNameIndex(bots)
+	items := make([]kbUpdatedSummaryItem, 0, len(proposals))
+	for _, proposal := range proposals {
+		if proposal.AppliedAt == nil {
+			continue
+		}
+		change, err := s.store.GetKBProposalChange(ctx, proposal.ID)
+		if err != nil {
+			continue
+		}
+		entryTitle := ""
+		if change.TargetEntryID > 0 {
+			if entry, eerr := s.store.GetKBEntry(ctx, change.TargetEntryID); eerr == nil {
+				entryTitle = entry.Title
+			}
+		}
+		if entryTitle == "" {
+			entryTitle = change.Title
+		}
+		items = append(items, kbUpdatedSummaryItem{
+			ProposalID:       proposal.ID,
+			Title:            proposal.Title,
+			Summary:          deriveKBUpdatedSummaryText(proposal, change, entryTitle),
+			EntryID:          change.TargetEntryID,
+			ProposerUserID:   strings.TrimSpace(proposal.ProposerUserID),
+			ProposerUserName: strings.TrimSpace(displayNames[strings.TrimSpace(proposal.ProposerUserID)]),
+			OpType:           strings.TrimSpace(change.OpType),
+			Section:          strings.TrimSpace(change.Section),
+			AppliedAt:        proposal.AppliedAt.UTC(),
+		})
+	}
+	sort.SliceStable(items, func(i, j int) bool {
+		if items[i].AppliedAt.Equal(items[j].AppliedAt) {
+			return items[i].ProposalID < items[j].ProposalID
+		}
+		return items[i].AppliedAt.After(items[j].AppliedAt)
+	})
+	return items
+}
+
+func (s *Server) sendKBUpdatedSummaryMails(ctx context.Context) {
+	now := time.Now().UTC()
+	items := s.listAppliedKBUpdatedSummaryItems(ctx)
+	if len(items) == 0 {
+		return
+	}
+	for _, rawUserID := range s.activeUserIDs(ctx) {
+		userID := strings.TrimSpace(rawUserID)
+		if userID == "" || isSystemRuntimeUserID(userID) {
+			continue
+		}
+		state, ok, err := s.store.GetNotificationDeliveryState(ctx, userID, notificationCategoryKBUpdatedSummary)
+		if err != nil {
+			continue
+		}
+		if !ok {
+			state = store.NotificationDeliveryState{
+				OwnerAddress: userID,
+				Category:     notificationCategoryKBUpdatedSummary,
+			}
+		}
+		state, normalized, err := s.normalizeKBUpdatedSummaryState(ctx, userID, state, now)
+		if err != nil {
+			continue
+		}
+		if normalized {
+			if _, err := s.store.UpsertNotificationDeliveryState(ctx, state); err != nil {
+				continue
+			}
+		}
+		boundary := kbUpdatedSeenBoundary(state, now)
+		pendingItems := kbUpdatedPendingItemsSince(items, boundary)
+		if len(pendingItems) == 0 {
+			continue
+		}
+		stateHash := kbUpdatedStateHash(pendingItems)
+		subject, body := buildKBUpdatedSummaryMail(pendingItems, now, boundary)
+		if subject == "" || body == "" {
+			continue
+		}
+		if state.OutstandingMessageID > 0 && state.OutstandingMailboxID > 0 {
+			if state.StateHash == stateHash {
+				continue
+			}
+			updatedSubject := subjectWithUpdatedMarker(subject)
+			if err := s.store.UpdateMailMessage(ctx, state.OutstandingMessageID, updatedSubject, body, now); err != nil {
+				continue
+			}
+			state.StateHash = stateHash
+			state.LastSentAt = now
+			state.LastRemindedAt = now
+			if _, err := s.store.UpsertNotificationDeliveryState(ctx, state); err == nil {
+				s.pushUnreadMailHint(ctx, clawWorldSystemID, []string{userID}, updatedSubject)
+			}
+			continue
+		}
+		if !kbUpdatedCanCreateFreshSummary(state, now) {
+			continue
+		}
+		messageID, mailboxID, err := s.sendManagedKBUpdatedSummary(ctx, userID, subject, body)
+		if err != nil {
+			continue
+		}
+		state.LastSeenAt = boundary
+		state.StateHash = stateHash
+		state.LastSentAt = now
+		state.LastRemindedAt = now
+		state.OutstandingMessageID = messageID
+		state.OutstandingMailboxID = mailboxID
+		_, _ = s.store.UpsertNotificationDeliveryState(ctx, state)
+	}
 }
 
 func (s *Server) handleKBProposalVote(w http.ResponseWriter, r *http.Request) {
@@ -6985,13 +8736,11 @@ func (s *Server) applyKBProposalAndBroadcast(ctx context.Context, proposalID int
 
 func (s *Server) kbTick(ctx context.Context, tickID int64) {
 	s.kbAutoProgressDiscussing(ctx)
-	if s.shouldRunKBEnrollmentReminderTick(ctx, tickID) {
-		s.kbSendEnrollmentReminders(ctx)
-	}
-	if s.shouldRunKBVotingReminderTick(ctx, tickID) {
-		s.kbSendVotingReminders(ctx)
+	if s.shouldRunKBEnrollmentReminderTick(ctx, tickID) || s.shouldRunKBVotingReminderTick(ctx, tickID) {
+		s.sendKBPendingSummaryMails(ctx, nil)
 	}
 	s.kbFinalizeExpiredVotes(ctx)
+	s.sendKBUpdatedSummaryMails(ctx)
 }
 
 func (s *Server) genesisBootstrapSnapshotForProposal(ctx context.Context, proposalID int64) (genesisState, bool, error) {
@@ -7274,10 +9023,7 @@ func (s *Server) kbAutoProgressDiscussing(ctx context.Context) {
 			targets = append(targets, uid)
 		}
 		if len(targets) > 0 {
-			subject := fmt.Sprintf("[KNOWLEDGEBASE-PROPOSAL][PINNED][PRIORITY:P1][ACTION:VOTE] #%d %s"+refTag(skillKnowledgeBase), p.ID, p.Title)
-			body := fmt.Sprintf("讨论期已截止，系统自动进入投票阶段（置顶任务）。\nproposal_id=%d\nrevision_id=%d\ndeadline=%s\n要求：先 ack 再 vote。",
-				p.ID, item.VotingRevisionID, deadline.UTC().Format(time.RFC3339))
-			s.sendMailAndPushHint(ctx, clawWorldSystemID, targets, subject, body)
+			s.sendKBPendingSummaryMails(ctx, targets)
 		}
 	}
 	if legacyProcessed > 0 || legacyDeferred > 0 {
@@ -7286,82 +9032,11 @@ func (s *Server) kbAutoProgressDiscussing(ctx context.Context) {
 }
 
 func (s *Server) kbSendEnrollmentReminders(ctx context.Context) {
-	items, err := s.store.ListKBProposals(ctx, "discussing", 200)
-	if err != nil {
-		return
-	}
-	for _, p := range items {
-		already, err := s.store.ListKBProposalEnrollments(ctx, p.ID)
-		if err != nil {
-			continue
-		}
-		enrolledSet := make(map[string]struct{}, len(already))
-		for _, it := range already {
-			enrolledSet[it.UserID] = struct{}{}
-		}
-		targets := s.activeUserIDs(ctx)
-		for _, uid := range targets {
-			if uid == p.ProposerUserID {
-				continue
-			}
-			if _, ok := enrolledSet[uid]; ok {
-				continue
-			}
-			enrollPrefix := fmt.Sprintf("[KNOWLEDGEBASE-PROPOSAL][PRIORITY:P2][ACTION:ENROLL] #%d", p.ID)
-			if s.hasUnreadPinnedSubject(ctx, uid, enrollPrefix, time.Time{}) {
-				continue
-			}
-			if s.hasRecentInboxSubject(ctx, uid, enrollPrefix, time.Now().UTC().Add(-kbEnrollReminderResendCooldown), false) {
-				continue
-			}
-			subject := fmt.Sprintf("%s %s"+refTag(skillKnowledgeBase), enrollPrefix, p.Title)
-			body := fmt.Sprintf("提案: %s\n原因: %s\nproposal_id=%d\ncurrent_revision_id=%d\n请尽快报名并进入讨论。", p.Title, p.Reason, p.ID, p.CurrentRevisionID)
-			s.sendMailAndPushHint(ctx, clawWorldSystemID, []string{uid}, subject, body)
-		}
-	}
+	s.sendKBPendingSummaryMails(ctx, nil)
 }
 
 func (s *Server) kbSendVotingReminders(ctx context.Context) {
-	items, err := s.store.ListKBProposals(ctx, "voting", 200)
-	if err != nil {
-		return
-	}
-	now := time.Now().UTC()
-	for _, p := range items {
-		if p.VotingDeadlineAt != nil && now.After(*p.VotingDeadlineAt) {
-			continue
-		}
-		enrolled, err := s.store.ListKBProposalEnrollments(ctx, p.ID)
-		if err != nil {
-			continue
-		}
-		votes, err := s.store.ListKBVotes(ctx, p.ID)
-		if err != nil {
-			continue
-		}
-		votedSet := make(map[string]struct{}, len(votes))
-		for _, it := range votes {
-			votedSet[it.UserID] = struct{}{}
-		}
-		for _, e := range enrolled {
-			if _, ok := votedSet[e.UserID]; ok {
-				continue
-			}
-			votePrefix := fmt.Sprintf("[KNOWLEDGEBASE-PROPOSAL][PINNED][PRIORITY:P1][ACTION:VOTE] #%d", p.ID)
-			if s.hasUnreadPinnedSubject(ctx, e.UserID, votePrefix, time.Time{}) {
-				continue
-			}
-			if s.hasRecentInboxSubject(ctx, e.UserID, votePrefix, now.Add(-kbVoteReminderResendCooldown), false) {
-				continue
-			}
-			subject := fmt.Sprintf("%s %s"+refTag(skillKnowledgeBase), votePrefix, p.Title)
-			body := fmt.Sprintf("你已报名但尚未投票。请先 ack 后投票（置顶任务）。proposal_id=%d\nrevision_id=%d", p.ID, p.VotingRevisionID)
-			if p.VotingDeadlineAt != nil {
-				body += "\n截止时间: " + p.VotingDeadlineAt.UTC().Format(time.RFC3339)
-			}
-			s.sendMailAndPushHint(ctx, clawWorldSystemID, []string{e.UserID}, subject, body)
-		}
-	}
+	s.sendKBPendingSummaryMails(ctx, nil)
 }
 
 func (s *Server) kbFinalizeExpiredVotes(ctx context.Context) {
@@ -7512,19 +9187,7 @@ func (s *Server) activeUserIDs(ctx context.Context) []string {
 }
 
 func (s *Server) broadcastKBApplied(ctx context.Context, proposalID int64, entry store.KBEntry, proposal store.KBProposal) {
-	targets := s.activeUserIDs(ctx)
-	if len(targets) == 0 {
-		return
-	}
-	subject := fmt.Sprintf("[KNOWLEDGEBASE Updated] proposal=%d"+refTag(skillKnowledgeBase), proposalID)
-	body := fmt.Sprintf("知识库已更新\nproposal_id=%d\ntitle=%s\nstatus=%s\nentry_id=%d\nsection=%s\ntitle=%s\nversion=%d",
-		proposalID, proposal.Title, proposal.Status, entry.ID, entry.Section, entry.Title, entry.Version)
-	_, _ = s.store.SendMail(ctx, store.MailSendInput{
-		From:    clawWorldSystemID,
-		To:      targets,
-		Subject: subject,
-		Body:    body,
-	})
+	s.sendKBUpdatedSummaryMails(ctx)
 	_, _ = s.store.CreateKBThreadMessage(ctx, store.KBThreadMessage{
 		ProposalID:  proposalID,
 		AuthorID:    clawWorldSystemID,
@@ -7700,6 +9363,8 @@ func (s *Server) apiCatalog() []string {
 		"POST /api/v1/mail/reminders/resolve",
 		"GET /api/v1/mail/contacts?user_id=<id>&keyword=<kw>&limit=<n>",
 		"POST /api/v1/mail/contacts/upsert",
+		"POST /api/v1/mail/system/archive (admin/internal only)",
+		"POST /api/v1/mail/system/resolve-obsolete-kb (admin/internal only)",
 		"POST /api/v1/life/hibernate",
 		"POST /api/v1/life/wake",
 		"POST /api/v1/life/set-will",
@@ -8071,13 +9736,11 @@ func (s *Server) runLowEnergyAlertTick(ctx context.Context, tickID int64) error 
 		}
 		active[uid] = struct{}{}
 	}
-	// Always prune stale cooldown state, including when active set is empty.
-	s.pruneLowTokenAlertState(active)
 	if len(active) == 0 {
 		return nil
 	}
 	runtimeSettings, _, _ := s.getRuntimeSchedulerSettings(ctx)
-	lowTokenCooldown := time.Duration(runtimeSettings.LowTokenAlertCooldownSeconds) * time.Second
+	lowTokenCooldown := maxDuration(lowTokenAlertReminderInterval, time.Duration(runtimeSettings.LowTokenAlertCooldownSeconds)*time.Second)
 	accounts, err := s.store.ListTokenAccounts(ctx)
 	if err != nil {
 		return err
@@ -8086,16 +9749,25 @@ func (s *Server) runLowEnergyAlertTick(ctx context.Context, tickID int64) error 
 	for _, a := range accounts {
 		userID := strings.TrimSpace(a.BotID)
 		if _, ok := active[userID]; !ok {
+			_ = s.store.DeleteNotificationDeliveryState(ctx, userID, notificationCategoryLowTokenAlert)
 			continue
 		}
 		if a.Balance <= 0 || a.Balance >= threshold {
+			_ = s.store.DeleteNotificationDeliveryState(ctx, userID, notificationCategoryLowTokenAlert)
 			continue
 		}
 		life, _ := s.store.GetUserLifeState(ctx, userID)
 		if normalizeLifeStateForServer(life.State) == "dead" {
+			_ = s.store.DeleteNotificationDeliveryState(ctx, userID, notificationCategoryLowTokenAlert)
 			continue
 		}
-		if !s.shouldSendLowTokenAlert(userID, lowTokenCooldown, now) {
+		stateHash := fmt.Sprintf("threshold=%d", threshold)
+		state, ok, stateErr := s.store.GetNotificationDeliveryState(ctx, userID, notificationCategoryLowTokenAlert)
+		if stateErr != nil {
+			continue
+		}
+		send, nextState := shouldSendSummaryState(ok, state, stateHash, lowTokenCooldown, lowTokenCooldown, now)
+		if !send {
 			continue
 		}
 		subject := fmt.Sprintf("[LOW-TOKEN][tick=%d] balance=%d threshold=%d"+refTag(skillGovernance), tickID, a.Balance, threshold)
@@ -8110,9 +9782,10 @@ func (s *Server) runLowEnergyAlertTick(ctx context.Context, tickID int64) error 
 			log.Printf("low_token_alert_notify_failed user_id=%s err=%v", userID, sendErr)
 			continue
 		}
-		if lowTokenCooldown > 0 {
-			s.markLowTokenAlertSent(userID, now)
-		}
+		nextState.OwnerAddress = userID
+		nextState.Category = notificationCategoryLowTokenAlert
+		nextState.StateHash = stateHash
+		_, _ = s.store.UpsertNotificationDeliveryState(ctx, nextState)
 	}
 	return nil
 }
@@ -8488,17 +10161,23 @@ func (s *Server) runAutonomyReminderTick(ctx context.Context, tickID int64) erro
 		if err == nil {
 			switch normalizeLifeStateForServer(life.State) {
 			case "dead", "hibernated":
+				_ = s.store.DeleteNotificationDeliveryState(ctx, uid, notificationCategoryAutonomyLoop)
 				continue
 			}
 		}
-		if s.hasUnreadPinnedSubject(ctx, uid, subjectPrefix, time.Time{}) {
-			continue
-		}
-		if s.hasRecentInboxSubject(ctx, uid, subjectPrefix, now.Add(-nonPinnedReminderResendCooldown), false) {
+		if s.hasRecentInboxSubject(ctx, uid, subjectPrefix, time.Time{}, true) {
 			continue
 		}
 		if s.hasRecentMeaningfulAutonomyProgress(ctx, uid, since) {
+			_ = s.store.DeleteNotificationDeliveryState(ctx, uid, notificationCategoryAutonomyLoop)
 			continue
+		}
+		state, ok, err := s.store.GetNotificationDeliveryState(ctx, uid, notificationCategoryAutonomyLoop)
+		if err == nil {
+			send, _ := shouldSendSummaryState(ok, state, "pending", autonomyReminderResendInterval, autonomyReminderResendInterval, now)
+			if !send {
+				continue
+			}
 		}
 		receivers = append(receivers, uid)
 	}
@@ -8521,6 +10200,15 @@ func (s *Server) runAutonomyReminderTick(ctx context.Context, tickID int64) erro
 		tickID, lookback.String(), interval, offset,
 	)
 	s.sendMailAndPushHint(ctx, clawWorldSystemID, receivers, subject, body)
+	for _, uid := range receivers {
+		_, _ = s.store.UpsertNotificationDeliveryState(ctx, store.NotificationDeliveryState{
+			OwnerAddress:   uid,
+			Category:       notificationCategoryAutonomyLoop,
+			StateHash:      "pending",
+			LastSentAt:     now,
+			LastRemindedAt: now,
+		})
+	}
 	return nil
 }
 
@@ -8551,17 +10239,23 @@ func (s *Server) runCommunityCommReminderTick(ctx context.Context, tickID int64)
 		if err == nil {
 			switch normalizeLifeStateForServer(life.State) {
 			case "dead", "hibernated":
+				_ = s.store.DeleteNotificationDeliveryState(ctx, uid, notificationCategoryCommunityCollab)
 				continue
 			}
 		}
-		if s.hasUnreadPinnedSubject(ctx, uid, subjectPrefix, time.Time{}) {
-			continue
-		}
-		if s.hasRecentInboxSubject(ctx, uid, subjectPrefix, now.Add(-nonPinnedReminderResendCooldown), false) {
+		if s.hasRecentInboxSubject(ctx, uid, subjectPrefix, time.Time{}, true) {
 			continue
 		}
 		if s.hasRecentMeaningfulPeerCommunication(ctx, uid, since) {
+			_ = s.store.DeleteNotificationDeliveryState(ctx, uid, notificationCategoryCommunityCollab)
 			continue
+		}
+		state, ok, err := s.store.GetNotificationDeliveryState(ctx, uid, notificationCategoryCommunityCollab)
+		if err == nil {
+			send, _ := shouldSendSummaryState(ok, state, "pending", communityReminderResendInterval, communityReminderResendInterval, now)
+			if !send {
+				continue
+			}
 		}
 		receivers = append(receivers, uid)
 	}
@@ -8583,6 +10277,15 @@ func (s *Server) runCommunityCommReminderTick(ctx context.Context, tickID int64)
 		tickID, lookback.String(), interval, offset,
 	)
 	s.sendMailAndPushHint(ctx, clawWorldSystemID, receivers, subject, body)
+	for _, uid := range receivers {
+		_, _ = s.store.UpsertNotificationDeliveryState(ctx, store.NotificationDeliveryState{
+			OwnerAddress:   uid,
+			Category:       notificationCategoryCommunityCollab,
+			StateHash:      "pending",
+			LastSentAt:     now,
+			LastRemindedAt: now,
+		})
+	}
 	return nil
 }
 

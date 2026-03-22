@@ -27,6 +27,9 @@ type InMemoryStore struct {
 	nextMessageID        int64
 	nextMailboxID        int64
 	mailbox              []MailItem
+	notificationStates   map[string]NotificationDeliveryState
+	archivedMessageIDs   map[int64]struct{}
+	archivedMailboxIDs   map[int64]struct{}
 	contacts             map[string]map[string]MailContact
 	collab               map[string]CollabSession
 	collabParts          []CollabParticipant
@@ -92,6 +95,9 @@ func NewInMemory() *InMemoryStore {
 		socialLinks:          make(map[string]SocialLink),
 		socialRewardGrants:   make(map[string]SocialRewardGrant),
 		accounts:             make(map[string]TokenAccount),
+		notificationStates:   make(map[string]NotificationDeliveryState),
+		archivedMessageIDs:   make(map[int64]struct{}),
+		archivedMailboxIDs:   make(map[int64]struct{}),
 		contacts:             make(map[string]map[string]MailContact),
 		collab:               make(map[string]CollabSession),
 		kbEntries:            make(map[int64]KBEntry),
@@ -782,7 +788,12 @@ func (s *InMemoryStore) ListMailbox(_ context.Context, ownerAddress, folder, sco
 		}
 		out = append(out, it)
 	}
-	sort.Slice(out, func(i, j int) bool { return out[i].SentAt.After(out[j].SentAt) })
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].SentAt.Equal(out[j].SentAt) {
+			return out[i].MailboxID > out[j].MailboxID
+		}
+		return out[i].SentAt.After(out[j].SentAt)
+	})
 	if limit > 0 && len(out) > limit {
 		out = out[:limit]
 	}
@@ -820,6 +831,374 @@ func (s *InMemoryStore) MarkMailboxRead(_ context.Context, ownerAddress string, 
 		s.mailbox[i] = it
 	}
 	return nil
+}
+
+func (s *InMemoryStore) UpdateMailMessage(_ context.Context, messageID int64, subject, body string, sentAt time.Time) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if messageID <= 0 {
+		return fmt.Errorf("message_id is required")
+	}
+	updated := false
+	subject = strings.TrimSpace(subject)
+	body = strings.TrimSpace(body)
+	sentAt = sentAt.UTC()
+	for i, item := range s.mailbox {
+		if item.MessageID != messageID {
+			continue
+		}
+		item.Subject = subject
+		item.Body = body
+		item.SentAt = sentAt
+		s.mailbox[i] = item
+		updated = true
+	}
+	if !updated {
+		return fmt.Errorf("mail message not found: %d", messageID)
+	}
+	return nil
+}
+
+func notificationStateKey(ownerAddress, category string) string {
+	return strings.TrimSpace(ownerAddress) + "\x00" + strings.TrimSpace(category)
+}
+
+func normalizeSystemMailArchiveCategory(category string) string {
+	switch strings.TrimSpace(strings.ToLower(category)) {
+	case "world_cost", "world-cost", "world_cost_alert":
+		return "world_cost"
+	case "low_token", "low-token":
+		return "low_token"
+	case "autonomy_loop", "autonomy-loop":
+		return "autonomy_loop"
+	case "community_collab", "community-collab":
+		return "community_collab"
+	default:
+		return ""
+	}
+}
+
+func systemMailArchiveCategoryFromMail(item MailItem) string {
+	if strings.TrimSpace(item.FromAddress) != "clawcolony-admin" {
+		return ""
+	}
+	subject := strings.ToUpper(strings.TrimSpace(item.Subject))
+	switch {
+	case strings.HasPrefix(subject, "[WORLD-COST-ALERT]"):
+		return "world_cost"
+	case strings.HasPrefix(subject, "[LOW-TOKEN]"):
+		return "low_token"
+	case strings.HasPrefix(subject, "[AUTONOMY-LOOP]"):
+		return "autonomy_loop"
+	case strings.HasPrefix(subject, "[COMMUNITY-COLLAB]"):
+		return "community_collab"
+	default:
+		return ""
+	}
+}
+
+func (s *InMemoryStore) GetNotificationDeliveryState(_ context.Context, ownerAddress, category string) (NotificationDeliveryState, bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	state, ok := s.notificationStates[notificationStateKey(ownerAddress, category)]
+	return state, ok, nil
+}
+
+func (s *InMemoryStore) UpsertNotificationDeliveryState(_ context.Context, state NotificationDeliveryState) (NotificationDeliveryState, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	state.OwnerAddress = strings.TrimSpace(state.OwnerAddress)
+	state.Category = strings.TrimSpace(state.Category)
+	if state.OwnerAddress == "" || state.Category == "" {
+		return NotificationDeliveryState{}, fmt.Errorf("owner_address and category are required")
+	}
+	now := time.Now().UTC()
+	current, ok := s.notificationStates[notificationStateKey(state.OwnerAddress, state.Category)]
+	if ok {
+		if state.LastSentAt.IsZero() {
+			state.LastSentAt = current.LastSentAt
+		}
+		if state.LastRemindedAt.IsZero() {
+			state.LastRemindedAt = current.LastRemindedAt
+		}
+	}
+	state.UpdatedAt = now
+	s.notificationStates[notificationStateKey(state.OwnerAddress, state.Category)] = state
+	return state, nil
+}
+
+func (s *InMemoryStore) DeleteNotificationDeliveryState(_ context.Context, ownerAddress, category string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	delete(s.notificationStates, notificationStateKey(ownerAddress, category))
+	return nil
+}
+
+func (s *InMemoryStore) PreviewSystemMailArchive(_ context.Context, categories []string) (MailArchivePreview, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	allowed := make(map[string]struct{}, len(categories))
+	for _, category := range categories {
+		if normalized := normalizeSystemMailArchiveCategory(category); normalized != "" {
+			allowed[normalized] = struct{}{}
+		}
+	}
+	if len(allowed) == 0 {
+		return MailArchivePreview{}, nil
+	}
+	type ownerCategory struct {
+		owner    string
+		category string
+	}
+	type mailboxRef struct {
+		inboxIndex int
+		outboxIDs  []int64
+		messageID  int64
+	}
+	groups := make(map[ownerCategory][]mailboxRef)
+	for idx, item := range s.mailbox {
+		if item.Folder != "inbox" {
+			continue
+		}
+		category := systemMailArchiveCategoryFromMail(item)
+		if _, ok := allowed[category]; !ok {
+			continue
+		}
+		ref := mailboxRef{inboxIndex: idx, messageID: item.MessageID}
+		for _, outbox := range s.mailbox {
+			if outbox.Folder != "outbox" {
+				continue
+			}
+			if outbox.MessageID != item.MessageID {
+				continue
+			}
+			if strings.TrimSpace(outbox.OwnerAddress) != "clawcolony-admin" {
+				continue
+			}
+			if strings.TrimSpace(outbox.ToAddress) != strings.TrimSpace(item.OwnerAddress) {
+				continue
+			}
+			ref.outboxIDs = append(ref.outboxIDs, outbox.MailboxID)
+		}
+		key := ownerCategory{owner: item.OwnerAddress, category: category}
+		groups[key] = append(groups[key], ref)
+	}
+	statsByCategory := make(map[string]*MailArchiveCategoryStat, len(allowed))
+	var archiveMailboxCount int64
+	messageIDs := make(map[int64]struct{})
+	for key, refs := range groups {
+		sort.SliceStable(refs, func(i, j int) bool {
+			left := s.mailbox[refs[i].inboxIndex]
+			right := s.mailbox[refs[j].inboxIndex]
+			if left.SentAt.Equal(right.SentAt) {
+				return left.MailboxID > right.MailboxID
+			}
+			return left.SentAt.After(right.SentAt)
+		})
+		stat := statsByCategory[key.category]
+		if stat == nil {
+			stat = &MailArchiveCategoryStat{Category: key.category}
+			statsByCategory[key.category] = stat
+		}
+		stat.InboxKeepCount++
+		for _, ref := range refs[1:] {
+			stat.InboxArchiveCnt++
+			stat.OutboxArchiveCt += int64(len(ref.outboxIDs))
+			archiveMailboxCount += 1 + int64(len(ref.outboxIDs))
+			messageIDs[ref.messageID] = struct{}{}
+		}
+	}
+	categoriesOut := make([]MailArchiveCategoryStat, 0, len(statsByCategory))
+	for _, category := range categories {
+		normalized := normalizeSystemMailArchiveCategory(category)
+		if normalized == "" {
+			continue
+		}
+		if stat, ok := statsByCategory[normalized]; ok {
+			categoriesOut = append(categoriesOut, *stat)
+		}
+	}
+	if len(categoriesOut) == 0 {
+		for _, stat := range statsByCategory {
+			categoriesOut = append(categoriesOut, *stat)
+		}
+		sort.Slice(categoriesOut, func(i, j int) bool { return categoriesOut[i].Category < categoriesOut[j].Category })
+	}
+	return MailArchivePreview{
+		Categories:          categoriesOut,
+		ArchiveMailboxCount: archiveMailboxCount,
+		ArchiveMessageCount: int64(len(messageIDs)),
+	}, nil
+}
+
+func (s *InMemoryStore) ArchiveSystemMailBatch(_ context.Context, input MailArchiveBatchInput) (MailArchiveBatchResult, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	limit := input.Limit
+	if limit <= 0 {
+		limit = 10000
+	}
+	allowed := make(map[string]struct{}, len(input.Categories))
+	for _, category := range input.Categories {
+		if normalized := normalizeSystemMailArchiveCategory(category); normalized != "" {
+			allowed[normalized] = struct{}{}
+		}
+	}
+	if len(allowed) == 0 {
+		return MailArchiveBatchResult{BatchID: strings.TrimSpace(input.BatchID)}, nil
+	}
+	type inboxCandidate struct {
+		index    int
+		mailbox  MailItem
+		category string
+	}
+	grouped := make(map[string][]inboxCandidate)
+	for idx, item := range s.mailbox {
+		if item.Folder != "inbox" {
+			continue
+		}
+		category := systemMailArchiveCategoryFromMail(item)
+		if _, ok := allowed[category]; !ok {
+			continue
+		}
+		key := item.OwnerAddress + "\x00" + category
+		grouped[key] = append(grouped[key], inboxCandidate{index: idx, mailbox: item, category: category})
+	}
+	candidates := make([]inboxCandidate, 0)
+	for _, items := range grouped {
+		sort.SliceStable(items, func(i, j int) bool {
+			if items[i].mailbox.SentAt.Equal(items[j].mailbox.SentAt) {
+				return items[i].mailbox.MailboxID > items[j].mailbox.MailboxID
+			}
+			return items[i].mailbox.SentAt.After(items[j].mailbox.SentAt)
+		})
+		if len(items) > 1 {
+			candidates = append(candidates, items[1:]...)
+		}
+	}
+	sort.Slice(candidates, func(i, j int) bool {
+		return candidates[i].mailbox.MailboxID < candidates[j].mailbox.MailboxID
+	})
+	if len(candidates) > limit {
+		candidates = candidates[:limit]
+	}
+	if len(candidates) == 0 {
+		return MailArchiveBatchResult{BatchID: strings.TrimSpace(input.BatchID)}, nil
+	}
+	selectedMailboxIDs := make(map[int64]struct{})
+	selectedMessageIDs := make(map[int64]struct{})
+	statsByCategory := make(map[string]*MailArchiveCategoryStat)
+	lastInboxMailboxID := int64(0)
+	for _, candidate := range candidates {
+		selectedMailboxIDs[candidate.mailbox.MailboxID] = struct{}{}
+		selectedMessageIDs[candidate.mailbox.MessageID] = struct{}{}
+		if candidate.mailbox.MailboxID > lastInboxMailboxID {
+			lastInboxMailboxID = candidate.mailbox.MailboxID
+		}
+		stat := statsByCategory[candidate.category]
+		if stat == nil {
+			stat = &MailArchiveCategoryStat{Category: candidate.category}
+			statsByCategory[candidate.category] = stat
+		}
+		stat.InboxArchiveCnt++
+		for _, item := range s.mailbox {
+			if item.Folder != "outbox" {
+				continue
+			}
+			if item.MessageID != candidate.mailbox.MessageID {
+				continue
+			}
+			if strings.TrimSpace(item.OwnerAddress) != "clawcolony-admin" {
+				continue
+			}
+			if strings.TrimSpace(item.ToAddress) != strings.TrimSpace(candidate.mailbox.OwnerAddress) {
+				continue
+			}
+			selectedMailboxIDs[item.MailboxID] = struct{}{}
+			stat.OutboxArchiveCt++
+		}
+	}
+	remaining := make([]MailItem, 0, len(s.mailbox))
+	archivedMailboxIDs := make([]int64, 0, len(selectedMailboxIDs))
+	for _, item := range s.mailbox {
+		if _, ok := selectedMailboxIDs[item.MailboxID]; ok {
+			s.archivedMailboxIDs[item.MailboxID] = struct{}{}
+			archivedMailboxIDs = append(archivedMailboxIDs, item.MailboxID)
+			continue
+		}
+		remaining = append(remaining, item)
+	}
+	s.mailbox = remaining
+	archivedMessageIDs := make([]int64, 0, len(selectedMessageIDs))
+	for messageID := range selectedMessageIDs {
+		stillLive := false
+		for _, item := range s.mailbox {
+			if item.MessageID == messageID {
+				stillLive = true
+				break
+			}
+		}
+		if stillLive {
+			continue
+		}
+		if _, seen := s.archivedMessageIDs[messageID]; seen {
+			continue
+		}
+		s.archivedMessageIDs[messageID] = struct{}{}
+		archivedMessageIDs = append(archivedMessageIDs, messageID)
+	}
+	sort.Slice(archivedMailboxIDs, func(i, j int) bool { return archivedMailboxIDs[i] < archivedMailboxIDs[j] })
+	sort.Slice(archivedMessageIDs, func(i, j int) bool { return archivedMessageIDs[i] < archivedMessageIDs[j] })
+	stats := make([]MailArchiveCategoryStat, 0, len(statsByCategory))
+	for _, category := range input.Categories {
+		if normalized := normalizeSystemMailArchiveCategory(category); normalized != "" {
+			if stat, ok := statsByCategory[normalized]; ok {
+				stats = append(stats, *stat)
+			}
+		}
+	}
+	hasMore := false
+	for _, item := range s.mailbox {
+		if item.Folder != "inbox" {
+			continue
+		}
+		category := systemMailArchiveCategoryFromMail(item)
+		if _, ok := allowed[category]; !ok {
+			continue
+		}
+		key := item.OwnerAddress + "\x00" + category
+		count := 0
+		for _, other := range s.mailbox {
+			if other.Folder != "inbox" {
+				continue
+			}
+			if other.OwnerAddress != item.OwnerAddress {
+				continue
+			}
+			if systemMailArchiveCategoryFromMail(other) != category {
+				continue
+			}
+			count++
+			if count > 1 {
+				hasMore = true
+				break
+			}
+		}
+		if hasMore {
+			break
+		}
+		_ = key
+	}
+	return MailArchiveBatchResult{
+		BatchID:             strings.TrimSpace(input.BatchID),
+		ArchivedMailboxIDs:  archivedMailboxIDs,
+		ArchivedMessageIDs:  archivedMessageIDs,
+		ArchiveMailboxCount: int64(len(archivedMailboxIDs)),
+		ArchiveMessageCount: int64(len(archivedMessageIDs)),
+		LastInboxMailboxID:  lastInboxMailboxID,
+		HasMore:             hasMore,
+		Categories:          stats,
+	}, nil
 }
 
 func (s *InMemoryStore) UpsertMailContact(_ context.Context, c MailContact) (MailContact, error) {

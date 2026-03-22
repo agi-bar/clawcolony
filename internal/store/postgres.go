@@ -260,6 +260,49 @@ func (s *PostgresStore) migrate(ctx context.Context) error {
 		`CREATE INDEX IF NOT EXISTS idx_mail_mailboxes_owner ON mail_mailboxes(owner_address, folder, is_read, created_at DESC)`,
 		`CREATE INDEX IF NOT EXISTS idx_mail_mailboxes_message ON mail_mailboxes(message_id)`,
 		`CREATE INDEX IF NOT EXISTS idx_mail_messages_subject ON mail_messages USING gin (to_tsvector('simple', subject || ' ' || body))`,
+		`CREATE TABLE IF NOT EXISTS mail_messages_archive (
+			id BIGINT PRIMARY KEY,
+			sender_address TEXT NOT NULL,
+			subject TEXT NOT NULL,
+			body TEXT NOT NULL,
+			reply_to_mailbox_id BIGINT NOT NULL DEFAULT 0,
+			sent_at TIMESTAMPTZ NOT NULL,
+			archived_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+			archive_reason TEXT NOT NULL DEFAULT '',
+			archive_batch_id TEXT NOT NULL DEFAULT ''
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_mail_messages_archive_batch ON mail_messages_archive(archive_batch_id, archived_at DESC)`,
+		`CREATE TABLE IF NOT EXISTS mail_mailboxes_archive (
+			id BIGINT PRIMARY KEY,
+			message_id BIGINT NOT NULL,
+			owner_address TEXT NOT NULL,
+			folder TEXT NOT NULL,
+			to_address TEXT NOT NULL,
+			is_read BOOLEAN NOT NULL DEFAULT false,
+			read_at TIMESTAMPTZ NULL,
+			created_at TIMESTAMPTZ NOT NULL,
+			archived_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+			archive_reason TEXT NOT NULL DEFAULT '',
+			archive_batch_id TEXT NOT NULL DEFAULT ''
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_mail_mailboxes_archive_owner ON mail_mailboxes_archive(owner_address, folder, archived_at DESC)`,
+		`CREATE INDEX IF NOT EXISTS idx_mail_mailboxes_archive_batch ON mail_mailboxes_archive(archive_batch_id, archived_at DESC)`,
+		`CREATE TABLE IF NOT EXISTS notification_delivery_state (
+			owner_address TEXT NOT NULL,
+			category TEXT NOT NULL,
+			state_hash TEXT NOT NULL DEFAULT '',
+			last_sent_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+			last_reminded_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+			last_seen_at TIMESTAMPTZ NULL,
+			outstanding_message_id BIGINT NOT NULL DEFAULT 0,
+			outstanding_mailbox_id BIGINT NOT NULL DEFAULT 0,
+			updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+			PRIMARY KEY(owner_address, category)
+		)`,
+		`ALTER TABLE notification_delivery_state ADD COLUMN IF NOT EXISTS last_seen_at TIMESTAMPTZ NULL`,
+		`ALTER TABLE notification_delivery_state ADD COLUMN IF NOT EXISTS outstanding_message_id BIGINT NOT NULL DEFAULT 0`,
+		`ALTER TABLE notification_delivery_state ADD COLUMN IF NOT EXISTS outstanding_mailbox_id BIGINT NOT NULL DEFAULT 0`,
+		`CREATE INDEX IF NOT EXISTS idx_notification_delivery_state_category ON notification_delivery_state(category, updated_at DESC)`,
 		`CREATE TABLE IF NOT EXISTS mail_contacts (
 			owner_address TEXT NOT NULL,
 			contact_address TEXT NOT NULL,
@@ -1599,8 +1642,8 @@ func (s *PostgresStore) ListMailbox(ctx context.Context, ownerAddress, folder, s
 	if limit <= 0 {
 		limit = 100
 	}
-	if limit > 500 {
-		limit = 500
+	if limit > 5000 {
+		limit = 5000
 	}
 	var fromArg any
 	if fromTime != nil {
@@ -1678,6 +1721,534 @@ func (s *PostgresStore) MarkMailboxRead(ctx context.Context, ownerAddress string
 		args...,
 	)
 	return err
+}
+
+func (s *PostgresStore) UpdateMailMessage(ctx context.Context, messageID int64, subject, body string, sentAt time.Time) error {
+	if messageID <= 0 {
+		return fmt.Errorf("message_id is required")
+	}
+	_, err := s.db.ExecContext(ctx, `
+		UPDATE mail_messages
+		SET subject = $2,
+		    body = $3,
+		    sent_at = $4
+		WHERE id = $1
+	`, messageID, strings.TrimSpace(subject), strings.TrimSpace(body), sentAt.UTC())
+	return err
+}
+
+func normalizedArchiveCategories(categories []string) []string {
+	seen := make(map[string]struct{}, len(categories))
+	out := make([]string, 0, len(categories))
+	for _, category := range categories {
+		normalized := normalizeSystemMailArchiveCategory(category)
+		if normalized == "" {
+			continue
+		}
+		if _, ok := seen[normalized]; ok {
+			continue
+		}
+		seen[normalized] = struct{}{}
+		out = append(out, normalized)
+	}
+	sort.Strings(out)
+	return out
+}
+
+func mailArchiveCategorySQL() string {
+	return `CASE
+		WHEN mm.sender_address = 'clawcolony-admin' AND mm.subject LIKE '[WORLD-COST-ALERT]%' THEN 'world_cost'
+		WHEN mm.sender_address = 'clawcolony-admin' AND mm.subject LIKE '[LOW-TOKEN]%' THEN 'low_token'
+		WHEN mm.sender_address = 'clawcolony-admin' AND mm.subject LIKE '[AUTONOMY-LOOP]%' THEN 'autonomy_loop'
+		WHEN mm.sender_address = 'clawcolony-admin' AND mm.subject LIKE '[COMMUNITY-COLLAB]%' THEN 'community_collab'
+		ELSE ''
+	END`
+}
+
+func placeholderList(start, count int) string {
+	if count <= 0 {
+		return ""
+	}
+	holders := make([]string, 0, count)
+	for i := 0; i < count; i++ {
+		holders = append(holders, fmt.Sprintf("$%d", start+i))
+	}
+	return strings.Join(holders, ", ")
+}
+
+func valuesTable(placeholders string) string {
+	if strings.TrimSpace(placeholders) == "" {
+		return ""
+	}
+	parts := strings.Split(placeholders, ", ")
+	rows := make([]string, 0, len(parts))
+	for _, part := range parts {
+		rows = append(rows, "("+part+")")
+	}
+	return strings.Join(rows, ", ")
+}
+
+func (s *PostgresStore) GetNotificationDeliveryState(ctx context.Context, ownerAddress, category string) (NotificationDeliveryState, bool, error) {
+	ownerAddress = strings.TrimSpace(ownerAddress)
+	category = strings.TrimSpace(category)
+	if ownerAddress == "" || category == "" {
+		return NotificationDeliveryState{}, false, nil
+	}
+	var state NotificationDeliveryState
+	var lastSeenAt sql.NullTime
+	err := s.db.QueryRowContext(ctx, `
+		SELECT owner_address, category, state_hash, last_sent_at, last_reminded_at, last_seen_at,
+		       outstanding_message_id, outstanding_mailbox_id, updated_at
+		FROM notification_delivery_state
+		WHERE owner_address = $1 AND category = $2
+	`, ownerAddress, category).Scan(
+		&state.OwnerAddress,
+		&state.Category,
+		&state.StateHash,
+		&state.LastSentAt,
+		&state.LastRemindedAt,
+		&lastSeenAt,
+		&state.OutstandingMessageID,
+		&state.OutstandingMailboxID,
+		&state.UpdatedAt,
+	)
+	if err == sql.ErrNoRows {
+		return NotificationDeliveryState{}, false, nil
+	}
+	if err != nil {
+		return NotificationDeliveryState{}, false, err
+	}
+	if lastSeenAt.Valid {
+		state.LastSeenAt = lastSeenAt.Time.UTC()
+	}
+	return state, true, nil
+}
+
+func (s *PostgresStore) UpsertNotificationDeliveryState(ctx context.Context, state NotificationDeliveryState) (NotificationDeliveryState, error) {
+	state.OwnerAddress = strings.TrimSpace(state.OwnerAddress)
+	state.Category = strings.TrimSpace(state.Category)
+	if state.OwnerAddress == "" || state.Category == "" {
+		return NotificationDeliveryState{}, fmt.Errorf("owner_address and category are required")
+	}
+	var lastSeenAt sql.NullTime
+	err := s.db.QueryRowContext(ctx, `
+		INSERT INTO notification_delivery_state(
+			owner_address, category, state_hash, last_sent_at, last_reminded_at, last_seen_at,
+			outstanding_message_id, outstanding_mailbox_id, updated_at
+		)
+		VALUES($1, $2, $3, COALESCE($4, NOW()), COALESCE($5, NOW()), $6, $7, $8, NOW())
+		ON CONFLICT (owner_address, category) DO UPDATE SET
+			state_hash = EXCLUDED.state_hash,
+			last_sent_at = EXCLUDED.last_sent_at,
+			last_reminded_at = EXCLUDED.last_reminded_at,
+			last_seen_at = EXCLUDED.last_seen_at,
+			outstanding_message_id = EXCLUDED.outstanding_message_id,
+			outstanding_mailbox_id = EXCLUDED.outstanding_mailbox_id,
+			updated_at = NOW()
+		RETURNING owner_address, category, state_hash, last_sent_at, last_reminded_at, last_seen_at,
+		          outstanding_message_id, outstanding_mailbox_id, updated_at
+	`, state.OwnerAddress, state.Category, state.StateHash, nullIfZeroTime(state.LastSentAt), nullIfZeroTime(state.LastRemindedAt), nullIfZeroTime(state.LastSeenAt), state.OutstandingMessageID, state.OutstandingMailboxID).Scan(
+		&state.OwnerAddress,
+		&state.Category,
+		&state.StateHash,
+		&state.LastSentAt,
+		&state.LastRemindedAt,
+		&lastSeenAt,
+		&state.OutstandingMessageID,
+		&state.OutstandingMailboxID,
+		&state.UpdatedAt,
+	)
+	if err != nil {
+		return NotificationDeliveryState{}, err
+	}
+	if lastSeenAt.Valid {
+		state.LastSeenAt = lastSeenAt.Time.UTC()
+	} else {
+		state.LastSeenAt = time.Time{}
+	}
+	return state, nil
+}
+
+func (s *PostgresStore) DeleteNotificationDeliveryState(ctx context.Context, ownerAddress, category string) error {
+	ownerAddress = strings.TrimSpace(ownerAddress)
+	category = strings.TrimSpace(category)
+	if ownerAddress == "" || category == "" {
+		return nil
+	}
+	_, err := s.db.ExecContext(ctx, `
+		DELETE FROM notification_delivery_state
+		WHERE owner_address = $1 AND category = $2
+	`, ownerAddress, category)
+	return err
+}
+
+func (s *PostgresStore) PreviewSystemMailArchive(ctx context.Context, categories []string) (MailArchivePreview, error) {
+	categories = normalizedArchiveCategories(categories)
+	if len(categories) == 0 {
+		return MailArchivePreview{}, nil
+	}
+	categoryPlaceholders := placeholderList(1, len(categories))
+	valuesExpr := valuesTable(categoryPlaceholders)
+	args := make([]any, 0, len(categories))
+	for _, category := range categories {
+		args = append(args, category)
+	}
+	statsQuery := `
+		WITH category_input(category) AS (VALUES ` + valuesExpr + `),
+		categorized AS (
+			SELECT
+				mb.id,
+				mb.message_id,
+				mb.owner_address,
+				` + mailArchiveCategorySQL() + ` AS category,
+				ROW_NUMBER() OVER (
+					PARTITION BY mb.owner_address, ` + mailArchiveCategorySQL() + `
+					ORDER BY mm.sent_at DESC, mb.id DESC
+				) AS rn
+			FROM mail_mailboxes mb
+			JOIN mail_messages mm ON mm.id = mb.message_id
+			WHERE mb.folder = 'inbox'
+		),
+		inbox_stats AS (
+			SELECT
+				category,
+				COUNT(*) FILTER (WHERE rn = 1) AS keep_count,
+				COUNT(*) FILTER (WHERE rn > 1) AS archive_count
+			FROM categorized
+			WHERE category IN (SELECT category FROM category_input)
+			GROUP BY category
+		),
+		outbox_stats AS (
+			SELECT
+				d.category,
+				COUNT(*) AS archive_count
+			FROM categorized d
+			JOIN mail_mailboxes outbox
+			  ON outbox.message_id = d.message_id
+			 AND outbox.folder = 'outbox'
+			 AND outbox.owner_address = 'clawcolony-admin'
+			 AND outbox.to_address = d.owner_address
+			WHERE d.rn > 1
+			  AND d.category IN (SELECT category FROM category_input)
+			GROUP BY d.category
+		)
+		SELECT
+			ci.category,
+			COALESCE(is1.keep_count, 0),
+			COALESCE(is1.archive_count, 0),
+			COALESCE(os1.archive_count, 0)
+		FROM category_input ci
+		LEFT JOIN inbox_stats is1 ON is1.category = ci.category
+		LEFT JOIN outbox_stats os1 ON os1.category = ci.category
+		ORDER BY ci.category ASC
+	`
+	rows, err := s.db.QueryContext(ctx, statsQuery, args...)
+	if err != nil {
+		return MailArchivePreview{}, err
+	}
+	defer rows.Close()
+	stats := make([]MailArchiveCategoryStat, 0, len(categories))
+	for rows.Next() {
+		var stat MailArchiveCategoryStat
+		if err := rows.Scan(&stat.Category, &stat.InboxKeepCount, &stat.InboxArchiveCnt, &stat.OutboxArchiveCt); err != nil {
+			return MailArchivePreview{}, err
+		}
+		stats = append(stats, stat)
+	}
+	if err := rows.Err(); err != nil {
+		return MailArchivePreview{}, err
+	}
+	countQuery := `
+		WITH category_input(category) AS (VALUES ` + valuesExpr + `),
+		categorized AS (
+			SELECT
+				mb.id,
+				mb.message_id,
+				mb.owner_address,
+				` + mailArchiveCategorySQL() + ` AS category,
+				ROW_NUMBER() OVER (
+					PARTITION BY mb.owner_address, ` + mailArchiveCategorySQL() + `
+					ORDER BY mm.sent_at DESC, mb.id DESC
+				) AS rn
+			FROM mail_mailboxes mb
+			JOIN mail_messages mm ON mm.id = mb.message_id
+			WHERE mb.folder = 'inbox'
+		),
+		duplicate_inbox AS (
+			SELECT id, message_id, owner_address, category
+			FROM categorized
+			WHERE rn > 1
+			  AND category IN (SELECT category FROM category_input)
+		),
+		archive_mailboxes AS (
+			SELECT id AS mailbox_id, message_id
+			FROM duplicate_inbox
+			UNION
+			SELECT outbox.id AS mailbox_id, outbox.message_id
+			FROM duplicate_inbox d
+			JOIN mail_mailboxes outbox
+			  ON outbox.message_id = d.message_id
+			 AND outbox.folder = 'outbox'
+			 AND outbox.owner_address = 'clawcolony-admin'
+			 AND outbox.to_address = d.owner_address
+		)
+		SELECT
+			COALESCE((SELECT COUNT(*) FROM archive_mailboxes), 0),
+			COALESCE((SELECT COUNT(DISTINCT message_id) FROM archive_mailboxes), 0)
+	`
+	var preview MailArchivePreview
+	preview.Categories = stats
+	if err := s.db.QueryRowContext(ctx, countQuery, args...).Scan(&preview.ArchiveMailboxCount, &preview.ArchiveMessageCount); err != nil {
+		return MailArchivePreview{}, err
+	}
+	return preview, nil
+}
+
+func (s *PostgresStore) ArchiveSystemMailBatch(ctx context.Context, input MailArchiveBatchInput) (MailArchiveBatchResult, error) {
+	categories := normalizedArchiveCategories(input.Categories)
+	if len(categories) == 0 {
+		return MailArchiveBatchResult{BatchID: strings.TrimSpace(input.BatchID)}, nil
+	}
+	limit := input.Limit
+	if limit <= 0 {
+		limit = 10000
+	}
+	args := make([]any, 0, len(categories)+1)
+	for _, category := range categories {
+		args = append(args, category)
+	}
+	args = append(args, limit)
+	categoryPlaceholders := placeholderList(1, len(categories))
+	candidateQuery := `
+		WITH categorized AS (
+			SELECT
+				mb.id,
+				mb.message_id,
+				mb.owner_address,
+				` + mailArchiveCategorySQL() + ` AS category,
+				ROW_NUMBER() OVER (
+					PARTITION BY mb.owner_address, ` + mailArchiveCategorySQL() + `
+					ORDER BY mm.sent_at DESC, mb.id DESC
+				) AS rn
+			FROM mail_mailboxes mb
+			JOIN mail_messages mm ON mm.id = mb.message_id
+			WHERE mb.folder = 'inbox'
+		)
+		SELECT id, message_id, owner_address, category
+		FROM categorized
+		WHERE rn > 1
+		  AND category IN (` + categoryPlaceholders + `)
+		ORDER BY id ASC
+		LIMIT $` + fmt.Sprintf("%d", len(args)) + `
+	`
+	type candidateRow struct {
+		MailboxID    int64
+		MessageID    int64
+		OwnerAddress string
+		Category     string
+	}
+	rows, err := s.db.QueryContext(ctx, candidateQuery, args...)
+	if err != nil {
+		return MailArchiveBatchResult{}, err
+	}
+	defer rows.Close()
+	candidates := make([]candidateRow, 0, limit)
+	statsByCategory := make(map[string]*MailArchiveCategoryStat, len(categories))
+	for rows.Next() {
+		var row candidateRow
+		if err := rows.Scan(&row.MailboxID, &row.MessageID, &row.OwnerAddress, &row.Category); err != nil {
+			return MailArchiveBatchResult{}, err
+		}
+		candidates = append(candidates, row)
+		stat := statsByCategory[row.Category]
+		if stat == nil {
+			stat = &MailArchiveCategoryStat{Category: row.Category}
+			statsByCategory[row.Category] = stat
+		}
+		stat.InboxArchiveCnt++
+	}
+	if err := rows.Err(); err != nil {
+		return MailArchiveBatchResult{}, err
+	}
+	if len(candidates) == 0 {
+		return MailArchiveBatchResult{BatchID: strings.TrimSpace(input.BatchID)}, nil
+	}
+	selectedMailboxIDs := make(map[int64]struct{}, len(candidates)*2)
+	impactedMessageIDs := make(map[int64]struct{}, len(candidates))
+	lastInboxMailboxID := int64(0)
+	for _, candidate := range candidates {
+		selectedMailboxIDs[candidate.MailboxID] = struct{}{}
+		impactedMessageIDs[candidate.MessageID] = struct{}{}
+		if candidate.MailboxID > lastInboxMailboxID {
+			lastInboxMailboxID = candidate.MailboxID
+		}
+	}
+	matchArgs := make([]any, 0, len(candidates)*2)
+	cond := make([]string, 0, len(candidates))
+	argi := 1
+	for _, candidate := range candidates {
+		cond = append(cond, fmt.Sprintf("(message_id = $%d AND folder = 'outbox' AND owner_address = 'clawcolony-admin' AND to_address = $%d)", argi, argi+1))
+		matchArgs = append(matchArgs, candidate.MessageID, candidate.OwnerAddress)
+		argi += 2
+	}
+	outboxQuery := `
+		SELECT id, message_id, to_address
+		FROM mail_mailboxes
+		WHERE ` + strings.Join(cond, " OR ")
+	outboxRows, err := s.db.QueryContext(ctx, outboxQuery, matchArgs...)
+	if err != nil {
+		return MailArchiveBatchResult{}, err
+	}
+	for outboxRows.Next() {
+		var mailboxID, messageID int64
+		var toAddress string
+		if err := outboxRows.Scan(&mailboxID, &messageID, &toAddress); err != nil {
+			outboxRows.Close()
+			return MailArchiveBatchResult{}, err
+		}
+		selectedMailboxIDs[mailboxID] = struct{}{}
+		for _, candidate := range candidates {
+			if candidate.MessageID == messageID && strings.TrimSpace(candidate.OwnerAddress) == strings.TrimSpace(toAddress) {
+				if stat := statsByCategory[candidate.Category]; stat != nil {
+					stat.OutboxArchiveCt++
+				}
+				break
+			}
+		}
+	}
+	if err := outboxRows.Err(); err != nil {
+		outboxRows.Close()
+		return MailArchiveBatchResult{}, err
+	}
+	outboxRows.Close()
+	mailboxIDs := make([]int64, 0, len(selectedMailboxIDs))
+	for mailboxID := range selectedMailboxIDs {
+		mailboxIDs = append(mailboxIDs, mailboxID)
+	}
+	sort.Slice(mailboxIDs, func(i, j int) bool { return mailboxIDs[i] < mailboxIDs[j] })
+	messageIDs := make([]int64, 0, len(impactedMessageIDs))
+	for messageID := range impactedMessageIDs {
+		messageIDs = append(messageIDs, messageID)
+	}
+	sort.Slice(messageIDs, func(i, j int) bool { return messageIDs[i] < messageIDs[j] })
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return MailArchiveBatchResult{}, err
+	}
+	defer tx.Rollback()
+	reason := "system_mail_duplicate_trim"
+	batchID := strings.TrimSpace(input.BatchID)
+	if batchID == "" {
+		batchID = fmt.Sprintf("mail-archive-%d", time.Now().UTC().Unix())
+	}
+	messagePlaceholders := placeholderList(4, len(messageIDs))
+	mailboxPlaceholders := placeholderList(4, len(mailboxIDs))
+	if len(messageIDs) > 0 {
+		copyArgs := []any{batchID, reason, time.Now().UTC()}
+		for _, messageID := range messageIDs {
+			copyArgs = append(copyArgs, messageID)
+		}
+		if _, err := tx.ExecContext(ctx, `
+			INSERT INTO mail_messages_archive(id, sender_address, subject, body, reply_to_mailbox_id, sent_at, archived_at, archive_reason, archive_batch_id)
+			SELECT id, sender_address, subject, body, reply_to_mailbox_id, sent_at, $3, $2, $1
+			FROM mail_messages
+			WHERE id IN (`+messagePlaceholders+`)
+			ON CONFLICT (id) DO NOTHING
+		`, copyArgs...); err != nil {
+			return MailArchiveBatchResult{}, err
+		}
+	}
+	mailboxArgs := []any{batchID, reason, time.Now().UTC()}
+	for _, mailboxID := range mailboxIDs {
+		mailboxArgs = append(mailboxArgs, mailboxID)
+	}
+	if _, err := tx.ExecContext(ctx, `
+		INSERT INTO mail_mailboxes_archive(id, message_id, owner_address, folder, to_address, is_read, read_at, created_at, archived_at, archive_reason, archive_batch_id)
+		SELECT id, message_id, owner_address, folder, to_address, is_read, read_at, created_at, $3, $2, $1
+		FROM mail_mailboxes
+		WHERE id IN (`+mailboxPlaceholders+`)
+		ON CONFLICT (id) DO NOTHING
+	`, mailboxArgs...); err != nil {
+		return MailArchiveBatchResult{}, err
+	}
+	deleteArgs := make([]any, 0, len(mailboxIDs))
+	for _, mailboxID := range mailboxIDs {
+		deleteArgs = append(deleteArgs, mailboxID)
+	}
+	if _, err := tx.ExecContext(ctx, `
+		DELETE FROM mail_mailboxes
+		WHERE id IN (`+placeholderList(1, len(deleteArgs))+`)
+	`, deleteArgs...); err != nil {
+		return MailArchiveBatchResult{}, err
+	}
+	deletableMessageIDs := make([]int64, 0, len(messageIDs))
+	if len(messageIDs) > 0 {
+		checkArgs := make([]any, 0, len(messageIDs))
+		for _, messageID := range messageIDs {
+			checkArgs = append(checkArgs, messageID)
+		}
+		checkRows, err := tx.QueryContext(ctx, `
+			SELECT id
+			FROM mail_messages
+			WHERE id IN (`+placeholderList(1, len(checkArgs))+`)
+			  AND NOT EXISTS (
+				SELECT 1
+				FROM mail_mailboxes
+				WHERE mail_mailboxes.message_id = mail_messages.id
+			  )
+		`, checkArgs...)
+		if err != nil {
+			return MailArchiveBatchResult{}, err
+		}
+		for checkRows.Next() {
+			var messageID int64
+			if err := checkRows.Scan(&messageID); err != nil {
+				checkRows.Close()
+				return MailArchiveBatchResult{}, err
+			}
+			deletableMessageIDs = append(deletableMessageIDs, messageID)
+		}
+		if err := checkRows.Err(); err != nil {
+			checkRows.Close()
+			return MailArchiveBatchResult{}, err
+		}
+		checkRows.Close()
+	}
+	if len(deletableMessageIDs) > 0 {
+		deleteMessageArgs := make([]any, 0, len(deletableMessageIDs))
+		for _, messageID := range deletableMessageIDs {
+			deleteMessageArgs = append(deleteMessageArgs, messageID)
+		}
+		if _, err := tx.ExecContext(ctx, `
+			DELETE FROM mail_messages
+			WHERE id IN (`+placeholderList(1, len(deleteMessageArgs))+`)
+		`, deleteMessageArgs...); err != nil {
+			return MailArchiveBatchResult{}, err
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return MailArchiveBatchResult{}, err
+	}
+	stats := make([]MailArchiveCategoryStat, 0, len(categories))
+	for _, category := range categories {
+		if stat, ok := statsByCategory[category]; ok {
+			stats = append(stats, *stat)
+		}
+	}
+	preview, err := s.PreviewSystemMailArchive(ctx, categories)
+	if err != nil {
+		return MailArchiveBatchResult{}, err
+	}
+	return MailArchiveBatchResult{
+		BatchID:             batchID,
+		ArchivedMailboxIDs:  mailboxIDs,
+		ArchivedMessageIDs:  deletableMessageIDs,
+		ArchiveMailboxCount: int64(len(mailboxIDs)),
+		ArchiveMessageCount: int64(len(deletableMessageIDs)),
+		LastInboxMailboxID:  lastInboxMailboxID,
+		HasMore:             preview.ArchiveMailboxCount > 0,
+		Categories:          stats,
+	}, nil
 }
 
 func (s *PostgresStore) UpsertMailContact(ctx context.Context, c MailContact) (MailContact, error) {

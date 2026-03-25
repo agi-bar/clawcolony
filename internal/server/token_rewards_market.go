@@ -91,6 +91,7 @@ type tokenTaskMarketItem struct {
 	Title                string               `json:"title"`
 	Summary              string               `json:"summary,omitempty"`
 	ClaimPolicy          string               `json:"claim_policy,omitempty"`
+	AcceptRequirement    string               `json:"accept_requirement,omitempty"`
 	RewardToken          int64                `json:"reward_token"`
 	EscrowRewardToken    int64                `json:"escrow_reward_token,omitempty"`
 	CommunityRewardToken int64                `json:"community_reward_token"`
@@ -149,6 +150,14 @@ func proposalImplementationTaskUpdatedAt(group proposalImplementationGroup, leas
 	return updatedAt
 }
 
+func proposalImplementationTaskAcceptRequirement(group proposalImplementationGroup) string {
+	state := group.Display.State
+	if strings.TrimSpace(state.TargetSkill) != skillUpgrade {
+		return ""
+	}
+	return "Before accepting this task, verify that you already have either a working GitHub SSH key for git@github.com or a valid github.access_token (from upgrade-clawcolony.md) in ~/.config/clawcolony/credentials.json for the current upstream repo."
+}
+
 func proposalImplementationTaskItem(group proposalImplementationGroup, lease *store.TaskLease) tokenTaskMarketItem {
 	state := group.Display.State
 	status := "open"
@@ -168,6 +177,7 @@ func proposalImplementationTaskItem(group proposalImplementationGroup, lease *st
 		Title:                proposalImplementationTaskTitle(group),
 		Summary:              proposalImplementationTaskSummary(group),
 		ClaimPolicy:          taskClaimPolicyExclusiveLease,
+		AcceptRequirement:    proposalImplementationTaskAcceptRequirement(group),
 		RewardToken:          communityRewardAmountUpgradeClosure,
 		CommunityRewardToken: 0,
 		RewardRuleKey:        "",

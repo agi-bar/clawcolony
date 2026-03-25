@@ -305,7 +305,6 @@ func TestHeartbeatSkillDefinesFullSweepProtocol(t *testing.T) {
 		"## Survival Check",
 		"return to the root [skill.md]",
 		"Keep prioritizing high-leverage community-building work.",
-		"/api/v1/token/task-market",
 		"/api/v1/token/transfer",
 	} {
 		if !strings.Contains(body, marker) {
@@ -328,10 +327,10 @@ func TestHeartbeatSkillDefinesFullSweepProtocol(t *testing.T) {
 func TestHostedSkillUsesConfiguredSkillAndPublicHosts(t *testing.T) {
 	cfg := config.FromEnv()
 	cfg.ListenAddr = ":0"
-	cfg.ClawWorldNamespace = "agents-pr-test-field"
+	cfg.ClawWorldNamespace = "runtime-smoke"
 	cfg.InternalSyncToken = "test-identity-signing-secret"
-	cfg.PublicBaseURL = "http://agents-pr-test-field.test"
-	cfg.SkillBaseURL = "http://agents-pr-test-field.test"
+	cfg.PublicBaseURL = "http://runtime.test"
+	cfg.SkillBaseURL = "http://runtime.test"
 	cfg.GitHubAppRepositoryOwner = "clawcolony"
 	cfg.GitHubAppRepositoryName = "clawcolony"
 	cfg.GitHubAppRepositoryID = "1174004296"
@@ -347,10 +346,10 @@ func TestHostedSkillUsesConfiguredSkillAndPublicHosts(t *testing.T) {
 		if strings.Contains(body, "https://clawcolony.agi.bar") {
 			t.Fatalf("%s should not retain canonical production host: %s", path, body)
 		}
-		if !strings.Contains(body, "http://agents-pr-test-field.test") {
+		if !strings.Contains(body, "http://runtime.test") {
 			t.Fatalf("%s missing configured test host: %s", path, body)
 		}
-		if !strings.Contains(body, "http://agents-pr-test-field.test/api/v1") {
+		if !strings.Contains(body, "http://runtime.test/api/v1") {
 			t.Fatalf("%s missing configured public api base: %s", path, body)
 		}
 		if path != "/skill.json" {

@@ -256,6 +256,130 @@ func TestKBPendingSummaryDoesNotTruncateItemsAboveTwenty(t *testing.T) {
 	}
 }
 
+func TestTaskMarketOpenReminderSendsHourlyMailForOpenProposalTasks(t *testing.T) {
+	srv := newTestServer()
+	ctx := context.Background()
+	proposer := seedActiveUser(t, srv)
+	recipientA := seedActiveUser(t, srv)
+	recipientB := seedActiveUser(t, srv)
+	oldClosedAt := time.Now().UTC().Add(-30 * time.Hour)
+	oldAppliedAt := oldClosedAt.Add(20 * time.Minute)
+
+	createGovernanceProposalWithDecisionTimesForTest(t, srv, proposer, "Hourly task market reminder", oldClosedAt, &oldAppliedAt)
+
+	if err := srv.runTaskMarketOpenReminderTick(ctx, 42); err != nil {
+		t.Fatalf("run task market reminder: %v", err)
+	}
+
+	for _, uid := range []string{proposer, recipientA, recipientB} {
+		inbox, err := srv.store.ListMailbox(ctx, uid, "inbox", "", "[TASK-MARKET][PRIORITY:P1]", nil, nil, 10)
+		if err != nil {
+			t.Fatalf("list inbox for %s: %v", uid, err)
+		}
+		if len(inbox) != 1 {
+			t.Fatalf("expected one task-market reminder for %s, got=%d", uid, len(inbox))
+		}
+		if !strings.Contains(inbox[0].Subject, "open_tasks=1 reward_token_max=20000") {
+			t.Fatalf("expected reminder subject for %s to include open task summary, subject=%s", uid, inbox[0].Subject)
+		}
+		body := inbox[0].Body
+		for _, want := range []string{
+			"There are open proposal follow-through tasks in task market with high token rewards.",
+			"List available tasks",
+			"/api/v1/token/task-market?limit=20",
+			"Accept a task if you satisfy \"accept_requirement\":",
+			"/api/v1/token/task-market/accept",
+			"\"task_id\": \"proposal-implementation:...\"",
+		} {
+			if !strings.Contains(body, want) {
+				t.Fatalf("expected reminder body for %s to contain %q, body=%s", uid, want, body)
+			}
+		}
+		state, ok, err := srv.store.GetNotificationDeliveryState(ctx, uid, notificationCategoryTaskMarketOpen)
+		if err != nil {
+			t.Fatalf("get notification state for %s: %v", uid, err)
+		}
+		if !ok {
+			t.Fatalf("expected notification state for %s", uid)
+		}
+		if state.StateHash == "" {
+			t.Fatalf("expected notification state hash for %s", uid)
+		}
+	}
+}
+
+func TestTaskMarketOpenReminderRespectsHourlyCooldownAndResetsWhenTasksClear(t *testing.T) {
+	srv := newTestServer()
+	ctx := context.Background()
+	proposer := seedActiveUser(t, srv)
+	recipient := seedActiveUser(t, srv)
+	oldClosedAt := time.Now().UTC().Add(-30 * time.Hour)
+	oldAppliedAt := oldClosedAt.Add(20 * time.Minute)
+	proposalID := createGovernanceProposalWithDecisionTimesForTest(t, srv, proposer, "Reminder cooldown topic", oldClosedAt, &oldAppliedAt)
+
+	if err := srv.runTaskMarketOpenReminderTick(ctx, 10); err != nil {
+		t.Fatalf("first reminder tick: %v", err)
+	}
+	if err := srv.runTaskMarketOpenReminderTick(ctx, 11); err != nil {
+		t.Fatalf("second reminder tick: %v", err)
+	}
+	inbox, err := srv.store.ListMailbox(ctx, recipient, "inbox", "", "[TASK-MARKET][PRIORITY:P1]", nil, nil, 10)
+	if err != nil {
+		t.Fatalf("list inbox after cooldown: %v", err)
+	}
+	if len(inbox) != 1 {
+		t.Fatalf("expected cooldown to keep one reminder mail, got=%d", len(inbox))
+	}
+
+	state, ok, err := srv.store.GetNotificationDeliveryState(ctx, recipient, notificationCategoryTaskMarketOpen)
+	if err != nil {
+		t.Fatalf("get notification state: %v", err)
+	}
+	if !ok {
+		t.Fatalf("expected notification state before reset")
+	}
+	state.LastSentAt = time.Now().UTC().Add(-2 * time.Hour)
+	state.LastRemindedAt = state.LastSentAt
+	if _, err := srv.store.UpsertNotificationDeliveryState(ctx, state); err != nil {
+		t.Fatalf("backdate notification state: %v", err)
+	}
+
+	if _, err := srv.store.CreateCollabSession(ctx, store.CollabSession{
+		CollabID:           "collab-reminder-reset",
+		Title:              "Reminder reset collab",
+		Goal:               "consume proposal task",
+		Kind:               "upgrade_pr",
+		Phase:              "reviewing",
+		ProposerUserID:     proposer,
+		AuthorUserID:       proposer,
+		MinMembers:         1,
+		MaxMembers:         1,
+		RequiredReviewers:  2,
+		PRRepo:             "agi-bar/clawcolony",
+		PRBranch:           "reminder-reset",
+		PRURL:              "https://github.com/agi-bar/clawcolony/pull/99",
+		PRNumber:           99,
+		PRBaseSHA:          "base",
+		PRHeadSHA:          "head",
+		PRAuthorLogin:      "runtime-bot",
+		GitHubPRState:      "open",
+		SourceRef:          fmt.Sprintf("kb_proposal:%d", proposalID),
+		ImplementationMode: "code_change",
+		ReviewDeadlineAt:   ptrTime(time.Now().UTC().Add(72 * time.Hour)),
+	}); err != nil {
+		t.Fatalf("create collab to clear task: %v", err)
+	}
+
+	if err := srv.runTaskMarketOpenReminderTick(ctx, 12); err != nil {
+		t.Fatalf("clear reminder tick: %v", err)
+	}
+	if _, ok, err := srv.store.GetNotificationDeliveryState(ctx, recipient, notificationCategoryTaskMarketOpen); err != nil {
+		t.Fatalf("get notification state after clear: %v", err)
+	} else if ok {
+		t.Fatalf("expected notification state to be deleted when tasks clear")
+	}
+}
+
 func TestKBUpdatedSummaryTargetsAllActiveUsersAndCarriesFields(t *testing.T) {
 	srv := newTestServer()
 	ctx := context.Background()

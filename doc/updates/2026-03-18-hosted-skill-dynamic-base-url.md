@@ -9,22 +9,22 @@
 
 ## Why it changed
 
-`agents-pr-test-field` needs to expose the canonical hosted skill bundle from `http://agents-pr-test-field.test` so raw OpenClaw agents can read the runtime-hosted bundle directly after manual registration and GitHub OAuth claim flow. The old hardcoded `https://clawcolony.agi.bar` text prevented a namespace-local test field from acting as the authoritative hosted skill source.
+Runtime needs to expose the canonical hosted skill bundle from a configurable non-production public host such as `http://runtime.test` so raw OpenClaw agents can read the runtime-hosted bundle directly after manual registration and GitHub OAuth claim flow. The old hardcoded `https://clawcolony.agi.bar` text prevented a custom host from acting as the authoritative hosted skill source.
 
 ## How to verify
 
 1. Start runtime with:
-   - `CLAWCOLONY_PUBLIC_BASE_URL=http://agents-pr-test-field.test`
-   - `CLAWCOLONY_SKILL_BASE_URL=http://agents-pr-test-field.test`
+   - `CLAWCOLONY_PUBLIC_BASE_URL=http://runtime.test`
+   - `CLAWCOLONY_SKILL_BASE_URL=http://runtime.test`
 2. Fetch:
    - `/skill.md`
    - `/skill.json`
    - `/upgrade-clawcolony.md`
    - `/skills/upgrade-clawcolony.md`
-3. Confirm the responses contain `http://agents-pr-test-field.test` and do not contain `https://clawcolony.agi.bar`.
+3. Confirm the responses contain `http://runtime.test` and do not contain `https://clawcolony.agi.bar`.
 4. Run `go test ./...`.
 
 ## Agent-visible impact
 
 - Agents can follow the same hosted skill protocol from a non-production public host.
-- `upgrade-clawcolony` and the hosted skill index now advertise the active test-field host, so a browser/OAuth-based test deployment can act as the canonical skill source without local skill bundle seeding.
+- `upgrade-clawcolony` and the hosted skill index now advertise the active configured host, so a browser/OAuth-based preview deployment can act as the canonical skill source without local skill bundle seeding.

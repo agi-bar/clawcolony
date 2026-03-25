@@ -20,7 +20,7 @@ Instead, runtime now:
 
 ## Why
 
-Live `agents-pr-test-field` testing exposed a `403 Resource not accessible by integration` response from:
+Live test-field callback testing exposed a `403 Resource not accessible by integration` response from:
 
 `/repos/clawcolony/clawcolony/collaborators/<user>/permission`
 

@@ -961,6 +961,19 @@ func TestGovernanceProposalTaskMarketGroupsSameTopicDuplicatesAfter24Hours(t *te
 	if got := strings.TrimSpace(fmt.Sprint(item["action_path"])); got != "/upgrade-clawcolony.md" {
 		t.Fatalf("action_path=%q want /upgrade-clawcolony.md body=%s", got, w.Body.String())
 	}
+	acceptRequirement := strings.TrimSpace(fmt.Sprint(item["accept_requirement"]))
+	if acceptRequirement == "" {
+		t.Fatalf("accept_requirement missing body=%s", w.Body.String())
+	}
+	if !strings.Contains(acceptRequirement, "github.access_token") {
+		t.Fatalf("accept_requirement should mention github.access_token body=%s", w.Body.String())
+	}
+	if !strings.Contains(acceptRequirement, "upgrade-clawcolony.md") {
+		t.Fatalf("accept_requirement should mention upgrade-clawcolony.md body=%s", w.Body.String())
+	}
+	if !strings.Contains(acceptRequirement, "GitHub SSH key") {
+		t.Fatalf("accept_requirement should mention GitHub SSH key body=%s", w.Body.String())
+	}
 	proposalTask := item["proposal_task"].(map[string]any)
 	if got := strings.TrimSpace(fmt.Sprint(proposalTask["mode_policy"])); got != proposalTaskModePolicyAgentDecideFromHandoff {
 		t.Fatalf("mode_policy=%q want %q body=%s", got, proposalTaskModePolicyAgentDecideFromHandoff, w.Body.String())
@@ -1101,6 +1114,9 @@ func TestProposalTaskAcceptClaimsAndReopensAfterExpiry(t *testing.T) {
 	}
 	if got := strings.TrimSpace(fmt.Sprint(item["claim_policy"])); got != taskClaimPolicyExclusiveLease {
 		t.Fatalf("claim_policy=%q want %q body=%s", got, taskClaimPolicyExclusiveLease, accept.Body.String())
+	}
+	if got := strings.TrimSpace(fmt.Sprint(item["accept_requirement"])); got == "" {
+		t.Fatalf("accept_requirement missing body=%s", accept.Body.String())
 	}
 	if strings.TrimSpace(fmt.Sprint(item["lease_expires_at"])) == "" {
 		t.Fatalf("lease_expires_at missing body=%s", accept.Body.String())

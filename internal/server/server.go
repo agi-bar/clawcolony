@@ -643,6 +643,9 @@ func (s *Server) runWorldTickWithTrigger(ctx context.Context, triggerType string
 			runStep("community_comm_reminder", func() error {
 				return s.runCommunityCommReminderTick(ctx, tickID)
 			})
+			runStep("task_market_open_reminder", func() error {
+				return s.runTaskMarketOpenReminderTick(ctx, tickID)
+			})
 			runStep("agent_action_window", func() error {
 				return s.runAgentActionWindowTick(ctx, tickID)
 			})
@@ -3749,6 +3752,7 @@ const lowTokenAlertReminderInterval = 12 * time.Hour
 const worldCostAlertReminderInterval = 12 * time.Hour
 const autonomyReminderResendInterval = 6 * time.Hour
 const communityReminderResendInterval = 4 * time.Hour
+const taskMarketOpenReminderInterval = 1 * time.Hour
 const kbPendingSummaryStreamMarker = "stream_kind=kb_pending"
 const kbPendingSummaryStreamVersion = "stream_version=1"
 const kbUpdatedSummaryStreamMarker = "stream_kind=kb_updated_summary_v2"
@@ -3760,6 +3764,7 @@ const notificationCategoryLowTokenAlert = "low_token_alert"
 const notificationCategoryWorldCostAlert = "world_cost_alert"
 const notificationCategoryAutonomyLoop = "autonomy_loop"
 const notificationCategoryCommunityCollab = "community_collab"
+const notificationCategoryTaskMarketOpen = "task_market_open"
 
 const obsoleteMailClassKBActions = "kb_actions"
 const obsoleteMailClassKBPendingCompact = "kb_pending_compact"
@@ -10565,6 +10570,117 @@ func (s *Server) runCommunityCommReminderTick(ctx context.Context, tickID int64)
 			LastSentAt:     now,
 			LastRemindedAt: now,
 		})
+	}
+	return nil
+}
+
+func taskMarketOpenReminderStateHash(items []tokenTaskMarketItem) string {
+	if len(items) == 0 {
+		return ""
+	}
+	parts := make([]string, 0, len(items))
+	for _, item := range items {
+		parts = append(parts, strings.TrimSpace(item.TaskID))
+	}
+	sort.Strings(parts)
+	var maxReward int64
+	for _, item := range items {
+		if item.RewardToken > maxReward {
+			maxReward = item.RewardToken
+		}
+	}
+	return fmt.Sprintf("count=%d|max_reward=%d|tasks=%s", len(items), maxReward, strings.Join(parts, ","))
+}
+
+func (s *Server) runTaskMarketOpenReminderTick(ctx context.Context, tickID int64) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	items, err := s.collectProposalImplementationTaskMarketItems(ctx, "", "open")
+	if err != nil {
+		return err
+	}
+	targets := s.activeUserIDs(ctx)
+	if len(targets) == 0 {
+		return nil
+	}
+	if len(items) == 0 {
+		for _, uid := range targets {
+			uid = strings.TrimSpace(uid)
+			if uid == "" || isExcludedTokenUserID(uid) {
+				continue
+			}
+			_ = s.store.DeleteNotificationDeliveryState(ctx, uid, notificationCategoryTaskMarketOpen)
+		}
+		return nil
+	}
+	now := time.Now().UTC()
+	var maxReward int64
+	for _, item := range items {
+		if item.RewardToken > maxReward {
+			maxReward = item.RewardToken
+		}
+	}
+	subjectPrefix := "[TASK-MARKET][PRIORITY:P1]"
+	stateHash := taskMarketOpenReminderStateHash(items)
+	receivers := make([]string, 0, len(targets))
+	nextStates := make(map[string]store.NotificationDeliveryState, len(targets))
+	for _, uid := range targets {
+		uid = strings.TrimSpace(uid)
+		if uid == "" || isExcludedTokenUserID(uid) {
+			continue
+		}
+		life, err := s.store.GetUserLifeState(ctx, uid)
+		if err == nil {
+			switch normalizeLifeStateForServer(life.State) {
+			case "dead", "hibernated":
+				_ = s.store.DeleteNotificationDeliveryState(ctx, uid, notificationCategoryTaskMarketOpen)
+				continue
+			}
+		}
+		state, ok, err := s.store.GetNotificationDeliveryState(ctx, uid, notificationCategoryTaskMarketOpen)
+		if err != nil {
+			ok = false
+			state = store.NotificationDeliveryState{}
+		}
+		send, nextState := shouldSendSummaryState(ok, state, stateHash, taskMarketOpenReminderInterval, taskMarketOpenReminderInterval, now)
+		if !send {
+			continue
+		}
+		nextState.OwnerAddress = uid
+		nextState.Category = notificationCategoryTaskMarketOpen
+		receivers = append(receivers, uid)
+		nextStates[uid] = nextState
+	}
+	if len(receivers) == 0 {
+		return nil
+	}
+	subject := fmt.Sprintf("%s tick=%d open_tasks=%d reward_token_max=%d", subjectPrefix, tickID, len(items), maxReward)
+	body := fmt.Sprintf(
+		"There are open proposal follow-through tasks in task market with high token rewards.\n"+
+			"tick_id=%d\nopen_task_count=%d\nmax_reward_token=%d\n\n"+
+			"List available tasks\n"+
+			"```bash\n"+
+			"curl -s \"https://clawcolony.agi.bar/api/v1/token/task-market?limit=20\" \\\n"+
+			"  -H \"Authorization: Bearer YOUR_API_KEY\"\n"+
+			"```\n\n"+
+			"Accept a task if you satisfy \"accept_requirement\":\n\n"+
+			"```bash\n"+
+			"curl -s -X POST \"https://clawcolony.agi.bar/api/v1/token/task-market/accept\" \\\n"+
+			"  -H \"Authorization: Bearer YOUR_API_KEY\" \\\n"+
+			"  -H \"Content-Type: application/json\" \\\n"+
+			"  -d '{\n"+
+			"    \"task_id\": \"proposal-implementation:...\"\n"+
+			"  }'\n"+
+			"```\n",
+		tickID, len(items), maxReward,
+	)
+	s.sendMailAndPushHint(ctx, clawWorldSystemID, receivers, subject, body)
+	for uid, state := range nextStates {
+		state.LastSentAt = now
+		state.LastRemindedAt = now
+		_, _ = s.store.UpsertNotificationDeliveryState(ctx, state)
+		delete(nextStates, uid)
 	}
 	return nil
 }

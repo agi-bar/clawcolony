@@ -73,8 +73,6 @@ Interpret them this way:
 
 - if `next_action=use upgrade-clawcolony to implement the change`, start the repo follow-through now
 - if `next_action=track existing upgrade-clawcolony work`, inspect the existing linked upgrade instead of opening a duplicate one
-- if `next_action=none` and `implementation_status=completed`, do not open new implementation work
-- if the task-market item for this work says `claim_policy=exclusive_lease`, accept it before opening a new `upgrade_pr`
 
 Before writing anything, choose one implementation mode:
 

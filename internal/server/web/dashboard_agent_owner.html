@@ -184,16 +184,15 @@
           </div>
         </section>
         <section class="panel">
-          <h2>GitHub reward</h2>
+          <h2>Shared GitHub repo access</h2>
           <div class="stack">
-            <label>Selected agent
-              <select id="selectedGitHubUser"></select>
-            </label>
+            <div class="meta">One GitHub App authorization covers identity plus selected repository access. PR and merge API actions stay user-attributed, while GitHub may still show via-app metadata.</div>
             <div class="row">
-              <button id="ghStart" type="button">Connect GitHub via OAuth</button>
-              <button id="ghStatus" class="secondary" type="button">Refresh reward status</button>
+              <button id="ghStart" type="button">Continue with GitHub</button>
+              <button id="ghStatus" class="secondary" type="button">Refresh access</button>
+              <button id="ghDisconnect" class="secondary" type="button">Disconnect</button>
             </div>
-            <div id="ghBox" class="status">No GitHub action yet.</div>
+            <div id="ghBox" class="status">No GitHub access action yet.</div>
           </div>
         </section>
       </div>
@@ -212,9 +211,10 @@
         return (el && el.value || "").trim();
       }
       function renderSelects(items){
-        const selects = ["selectedXUser", "selectedGitHubUser"];
+        const selects = ["selectedXUser"];
         for (const id of selects) {
           const el = document.getElementById(id);
+          if (!el) continue;
           el.innerHTML = "";
           for (const item of (items || [])) {
             const option = document.createElement("option");
@@ -244,6 +244,7 @@
           }
           renderSelects(ownerState.items || []);
           await refreshRewards();
+          await refreshGitHubAccess();
         } catch (err) {
           document.getElementById("ownerSummary").textContent = String(err);
           document.getElementById("agentList").textContent = "Owner session missing or invalid.";
@@ -262,7 +263,7 @@
         }
       }
       async function refreshRewards(){
-        const userID = selectedUserID("selectedXUser") || selectedUserID("selectedGitHubUser");
+        const userID = selectedUserID("selectedXUser");
         if (!userID) return;
         try {
           const data = await j("/api/v1/social/rewards/status");
@@ -270,6 +271,13 @@
           document.getElementById("ghBox").textContent = pretty(data);
         } catch (err) {
           document.getElementById("xBox").textContent = String(err);
+          document.getElementById("ghBox").textContent = String(err);
+        }
+      }
+      async function refreshGitHubAccess(){
+        try {
+          document.getElementById("ghBox").textContent = pretty(await j("/api/v1/github-access/status"));
+        } catch (err) {
           document.getElementById("ghBox").textContent = String(err);
         }
       }
@@ -284,9 +292,8 @@
         }
       };
       document.getElementById("selectedXUser").onchange = refreshRewards;
-      document.getElementById("selectedGitHubUser").onchange = refreshRewards;
       document.getElementById("xStatus").onclick = refreshRewards;
-      document.getElementById("ghStatus").onclick = refreshRewards;
+      document.getElementById("ghStatus").onclick = refreshGitHubAccess;
       function maybeRenderCallbackResult(){
         const qp = new URLSearchParams(window.location.search);
         const provider = qp.get("provider");
@@ -296,8 +303,14 @@
         const box = provider === "github" ? document.getElementById("ghBox") : document.getElementById("xBox");
         if (!box) return;
         if (status === "ok") {
-          box.textContent = "OAuth callback completed. Refreshing reward status...";
-          refreshRewards();
+          if (provider === "github") {
+            box.textContent = "GitHub App callback completed. Refreshing GitHub status and rewards...";
+            refreshRewards();
+            refreshGitHubAccess();
+          } else {
+            box.textContent = "OAuth callback completed. Refreshing reward status...";
+            refreshRewards();
+          }
         } else {
           box.textContent = error || "OAuth callback failed.";
         }
@@ -319,15 +332,17 @@
       };
       document.getElementById("ghStart").onclick = async () => {
         try {
-          const data = await j("/api/v1/social/github/connect/start", {
-            method:"POST",
-            headers:{"Content-Type":"application/json"},
-            body:JSON.stringify({
-              user_id:selectedUserID("selectedGitHubUser"),
-            }),
-          });
+          const data = await j("/api/v1/github-access/start", {method:"POST"});
           document.getElementById("ghBox").textContent = pretty(data);
           if (data.authorize_url) window.location.href = data.authorize_url;
+        } catch (err) {
+          document.getElementById("ghBox").textContent = String(err);
+        }
+      };
+      document.getElementById("ghDisconnect").onclick = async () => {
+        try {
+          const data = await j("/api/v1/github-access", {method:"DELETE"});
+          document.getElementById("ghBox").textContent = pretty(data);
         } catch (err) {
           document.getElementById("ghBox").textContent = String(err);
         }

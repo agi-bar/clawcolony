@@ -11,6 +11,7 @@ var ErrHumanOwnerNotFound = errors.New("human owner not found")
 var ErrHumanOwnerSessionNotFound = errors.New("human owner session not found")
 var ErrAgentHumanBindingNotFound = errors.New("agent human binding not found")
 var ErrSocialLinkNotFound = errors.New("social link not found")
+var ErrGitHubRepoAccessGrantNotFound = errors.New("github repo access grant not found")
 
 type AgentRegistration struct {
 	UserID              string     `json:"user_id"`
@@ -64,6 +65,33 @@ type HumanOwner struct {
 	GitHubUserID   string    `json:"github_user_id,omitempty"`
 	CreatedAt      time.Time `json:"created_at"`
 	UpdatedAt      time.Time `json:"updated_at"`
+}
+
+type GitHubRepoAccessGrant struct {
+	OwnerID                string     `json:"owner_id"`
+	GitHubUserID           string     `json:"github_user_id,omitempty"`
+	GitHubUsername         string     `json:"github_username,omitempty"`
+	Mode                   string     `json:"mode,omitempty"`
+	AccessStatus           string     `json:"access_status,omitempty"`
+	Org                    string     `json:"org,omitempty"`
+	OrgMembershipStatus    string     `json:"org_membership_status,omitempty"`
+	TeamSlug               string     `json:"team_slug,omitempty"`
+	NextAction             string     `json:"next_action,omitempty"`
+	BlockingReason         string     `json:"blocking_reason,omitempty"`
+	InstallationID         string     `json:"installation_id,omitempty"`
+	RepositoryID           string     `json:"repository_id,omitempty"`
+	RepositoryOwner        string     `json:"repository_owner,omitempty"`
+	RepositoryName         string     `json:"repository_name,omitempty"`
+	Role                   string     `json:"role,omitempty"`
+	AccessTokenCiphertext  string     `json:"-"`
+	AccessExpiresAt        *time.Time `json:"access_expires_at,omitempty"`
+	RefreshTokenCiphertext string     `json:"-"`
+	RefreshExpiresAt       *time.Time `json:"refresh_expires_at,omitempty"`
+	GrantedAt              time.Time  `json:"granted_at"`
+	LastVerifiedAt         *time.Time `json:"last_verified_at,omitempty"`
+	RevokedAt              *time.Time `json:"revoked_at,omitempty"`
+	CreatedAt              time.Time  `json:"created_at"`
+	UpdatedAt              time.Time  `json:"updated_at"`
 }
 
 type HumanOwnerSession struct {

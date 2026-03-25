@@ -256,6 +256,20 @@ func (s *InMemoryStore) GetHumanOwner(_ context.Context, ownerID string) (HumanO
 	return item, nil
 }
 
+func (s *InMemoryStore) GetHumanOwnerByEmail(_ context.Context, email string) (HumanOwner, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	id, ok := s.humanOwnerByEmail[strings.ToLower(strings.TrimSpace(email))]
+	if !ok {
+		return HumanOwner{}, fmt.Errorf("%w: %s", ErrHumanOwnerNotFound, strings.TrimSpace(email))
+	}
+	item, ok := s.humanOwners[id]
+	if !ok {
+		return HumanOwner{}, fmt.Errorf("%w: %s", ErrHumanOwnerNotFound, id)
+	}
+	return item, nil
+}
+
 func (s *InMemoryStore) UpsertHumanOwnerSocialIdentity(_ context.Context, ownerID, provider, handle, providerUserID string) (HumanOwner, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -333,6 +347,73 @@ func (s *InMemoryStore) RevokeHumanOwnerSession(_ context.Context, sessionID str
 	item.UpdatedAt = revokedAt.UTC()
 	s.humanOwnerSessions[id] = item
 	return nil
+}
+
+func (s *InMemoryStore) UpsertGitHubRepoAccessGrant(_ context.Context, item GitHubRepoAccessGrant) (GitHubRepoAccessGrant, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	now := time.Now().UTC()
+	existing, ok := s.githubRepoAccess[strings.TrimSpace(item.OwnerID)]
+	if !ok {
+		existing = GitHubRepoAccessGrant{
+			OwnerID:   strings.TrimSpace(item.OwnerID),
+			CreatedAt: now,
+		}
+	}
+	existing.GitHubUserID = strings.TrimSpace(item.GitHubUserID)
+	existing.GitHubUsername = strings.TrimSpace(item.GitHubUsername)
+	existing.Mode = strings.TrimSpace(item.Mode)
+	existing.AccessStatus = strings.TrimSpace(item.AccessStatus)
+	existing.Org = strings.TrimSpace(item.Org)
+	existing.OrgMembershipStatus = strings.TrimSpace(item.OrgMembershipStatus)
+	existing.TeamSlug = strings.TrimSpace(item.TeamSlug)
+	existing.NextAction = strings.TrimSpace(item.NextAction)
+	existing.BlockingReason = strings.TrimSpace(item.BlockingReason)
+	existing.InstallationID = strings.TrimSpace(item.InstallationID)
+	existing.RepositoryID = strings.TrimSpace(item.RepositoryID)
+	existing.RepositoryOwner = strings.TrimSpace(item.RepositoryOwner)
+	existing.RepositoryName = strings.TrimSpace(item.RepositoryName)
+	existing.Role = strings.TrimSpace(item.Role)
+	existing.AccessTokenCiphertext = strings.TrimSpace(item.AccessTokenCiphertext)
+	existing.AccessExpiresAt = ptrTimeCopy(item.AccessExpiresAt)
+	existing.RefreshTokenCiphertext = strings.TrimSpace(item.RefreshTokenCiphertext)
+	existing.RefreshExpiresAt = ptrTimeCopy(item.RefreshExpiresAt)
+	if item.GrantedAt.IsZero() {
+		if existing.GrantedAt.IsZero() {
+			existing.GrantedAt = now
+		}
+	} else {
+		existing.GrantedAt = item.GrantedAt.UTC()
+	}
+	existing.LastVerifiedAt = ptrTimeCopy(item.LastVerifiedAt)
+	existing.RevokedAt = ptrTimeCopy(item.RevokedAt)
+	existing.UpdatedAt = now
+	s.githubRepoAccess[existing.OwnerID] = existing
+	return existing, nil
+}
+
+func (s *InMemoryStore) GetGitHubRepoAccessGrant(_ context.Context, ownerID string) (GitHubRepoAccessGrant, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	item, ok := s.githubRepoAccess[strings.TrimSpace(ownerID)]
+	if !ok {
+		return GitHubRepoAccessGrant{}, fmt.Errorf("%w: %s", ErrGitHubRepoAccessGrantNotFound, strings.TrimSpace(ownerID))
+	}
+	return item, nil
+}
+
+func (s *InMemoryStore) RevokeGitHubRepoAccessGrant(_ context.Context, ownerID string, revokedAt time.Time) (GitHubRepoAccessGrant, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	id := strings.TrimSpace(ownerID)
+	item, ok := s.githubRepoAccess[id]
+	if !ok {
+		return GitHubRepoAccessGrant{}, fmt.Errorf("%w: %s", ErrGitHubRepoAccessGrantNotFound, id)
+	}
+	item.RevokedAt = ptrTimeRef(revokedAt.UTC())
+	item.UpdatedAt = time.Now().UTC()
+	s.githubRepoAccess[id] = item
+	return item, nil
 }
 
 func (s *InMemoryStore) UpsertAgentHumanBinding(_ context.Context, item AgentHumanBinding) (AgentHumanBinding, error) {
@@ -458,5 +539,13 @@ func (s *InMemoryStore) ListSocialRewardGrants(_ context.Context, userID string)
 
 func ptrTimeRef(t time.Time) *time.Time {
 	v := t
+	return &v
+}
+
+func ptrTimeCopy(t *time.Time) *time.Time {
+	if t == nil {
+		return nil
+	}
+	v := t.UTC()
 	return &v
 }

@@ -2,7 +2,9 @@ package server
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -164,6 +166,15 @@ func TestCollabUpgradePRAuthorLedUpdateAndApplyFlow(t *testing.T) {
 	proposer := newAuthUser(t, srv)
 	reviewer := newAuthUser(t, srv)
 	outsider := newAuthUser(t, srv)
+	if _, err := srv.store.UpsertAgentProfile(t.Context(), store.AgentProfile{UserID: proposer.id, GitHubUsername: "author-login"}); err != nil {
+		t.Fatalf("upsert proposer github username: %v", err)
+	}
+	if _, err := srv.store.UpsertAgentProfile(t.Context(), store.AgentProfile{UserID: reviewer.id, GitHubUsername: "reviewer-one"}); err != nil {
+		t.Fatalf("upsert reviewer github username: %v", err)
+	}
+	if _, err := srv.store.UpsertAgentProfile(t.Context(), store.AgentProfile{UserID: outsider.id, GitHubUsername: "outsider-login"}); err != nil {
+		t.Fatalf("upsert outsider github username: %v", err)
+	}
 	fixture := newFakeUpgradePRGitHub(t, "agi-bar/clawcolony", 42)
 	fixture.pull = githubPullRequestRecord{
 		Number:  42,
@@ -237,6 +248,29 @@ func TestCollabUpgradePRAuthorLedUpdateAndApplyFlow(t *testing.T) {
 	if updated.ReviewDeadlineAt == nil || upgrade.ReviewDeadlineAt == nil || !updated.ReviewDeadlineAt.Equal(*upgrade.ReviewDeadlineAt) {
 		t.Fatalf("update-pr should preserve original review deadline, upgrade=%v updated=%v", upgrade.ReviewDeadlineAt, updated.ReviewDeadlineAt)
 	}
+	reviewerInboxResp := doJSONRequestWithHeaders(t, srv.mux, http.MethodGet, "/api/v1/mail/inbox?keyword=REVIEW-OPEN&limit=20", nil, reviewer.headers())
+	if reviewerInboxResp.Code != http.StatusOK {
+		t.Fatalf("reviewer inbox status=%d body=%s", reviewerInboxResp.Code, reviewerInboxResp.Body.String())
+	}
+	reviewerInboxBody := parseJSONBody(t, reviewerInboxResp)
+	reviewerItems, ok := reviewerInboxBody["items"].([]any)
+	if !ok || len(reviewerItems) == 0 {
+		t.Fatalf("expected review-open mailbox item, body=%s", reviewerInboxResp.Body.String())
+	}
+	reviewerFirst, ok := reviewerItems[0].(map[string]any)
+	if !ok {
+		t.Fatalf("review-open mailbox item shape mismatch: %s", reviewerInboxResp.Body.String())
+	}
+	suggestion, ok := reviewerFirst["workflow_suggestion"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected review-open workflow_suggestion, body=%s", reviewerInboxResp.Body.String())
+	}
+	if suggestion["skill"] != "clawcolony-upgrade-clawcolony" || suggestion["workflow_path"] != "reviewer_path:3.2" {
+		t.Fatalf("review-open workflow_suggestion mismatch: %s", reviewerInboxResp.Body.String())
+	}
+	if instruction, _ := suggestion["instruction"].(string); !strings.Contains(instruction, "checking or refreshing GitHub access") {
+		t.Fatalf("review-open workflow instruction mismatch: %s", reviewerInboxResp.Body.String())
+	}
 	rebound := doJSONRequestWithHeaders(t, srv.mux, http.MethodPost, "/api/v1/collab/update-pr", map[string]any{
 		"collab_id": upgrade.CollabID,
 		"pr_url":    "https://github.com/agi-bar/clawcolony/pull/999",
@@ -245,22 +279,24 @@ func TestCollabUpgradePRAuthorLedUpdateAndApplyFlow(t *testing.T) {
 		t.Fatalf("upgrade_pr should not allow rebinding to another PR, got=%d body=%s", rebound.Code, rebound.Body.String())
 	}
 
-	fixture.comments[9001] = makeUpgradePRApplyComment(fixturesRepoOrDefault(fixture.repo), fixture.number, 9001, "reviewer-one", upgrade.CollabID, reviewer.id, "I can review this change.")
+	fixture.reviews = []githubPullReviewRecord{
+		makeUpgradePRAppliedReview(9001, "reviewer-one", reviewer.id, "APPROVED", upgrade.CollabID, fixture.pull.Head.SHA, "agree", "looks good", "none", time.Now().Add(-1*time.Minute)),
+	}
 	badApply := doJSONRequestWithHeaders(t, srv.mux, http.MethodPost, "/api/v1/collab/apply", map[string]any{
 		"collab_id":        upgrade.CollabID,
 		"application_kind": "review",
-		"evidence_url":     fixture.commentURL(9001),
+		"evidence_url":     fixture.reviewURL(9001),
 	}, outsider.headers())
-	if badApply.Code != http.StatusBadRequest || !strings.Contains(badApply.Body.String(), "user_id does not match") {
+	if badApply.Code != http.StatusBadRequest || (!strings.Contains(badApply.Body.String(), "github login does not match") && !strings.Contains(badApply.Body.String(), "user_id does not match")) {
 		t.Fatalf("review apply with mismatched user should fail, got=%d body=%s", badApply.Code, badApply.Body.String())
 	}
 
-	reviewApply := applyUpgradePRReviewForTest(t, srv, reviewer, upgrade.CollabID, fixture.commentURL(9001))
+	reviewApply := applyUpgradePRReviewForTest(t, srv, reviewer, upgrade.CollabID, fixture.reviewURL(9001))
 	if !reviewApply.Verified || reviewApply.ApplicationKind != "review" || reviewApply.GitHubLogin != "reviewer-one" {
 		t.Fatalf("review apply should capture verification details, got=%+v", reviewApply)
 	}
-	if reviewApply.Pitch != "I can review this change." {
-		t.Fatalf("review apply pitch should come from comment note, got=%q", reviewApply.Pitch)
+	if reviewApply.Pitch != "looks good" {
+		t.Fatalf("review apply pitch should come from review summary, got=%q", reviewApply.Pitch)
 	}
 
 	discussionApply := doJSONRequestWithHeaders(t, srv.mux, http.MethodPost, "/api/v1/collab/apply", map[string]any{
@@ -402,6 +438,81 @@ func TestCollabUpgradePRMergeGateUsesGitHubReviewsAndStaleHeads(t *testing.T) {
 	}
 	if len(staleResp.Blockers) == 0 || !strings.Contains(strings.Join(staleResp.Blockers, "\n"), "need 2 valid reviewers at current head_sha") {
 		t.Fatalf("stale head blockers mismatch, got=%+v", staleResp)
+	}
+}
+
+func TestRunUpgradePRTickBacksOffOnGitHubRetryAfter(t *testing.T) {
+	srv := newTestServer()
+	author := newAuthUser(t, srv)
+	fixture := newFakeUpgradePRGitHub(t, "agi-bar/clawcolony", 88)
+	fixture.pull = githubPullRequestRecord{
+		Number:  88,
+		State:   "open",
+		HTMLURL: fixture.pullURL(),
+	}
+	fixture.pull.Base.SHA = "sha-base-8888888"
+	fixture.pull.Head.SHA = "sha-head-8888888"
+	fixture.pull.Head.Ref = "feature/backoff"
+	fixture.pull.User.Login = "author-login"
+
+	upgrade := proposeCollabForTest(t, srv, author, map[string]any{
+		"title":   "Upgrade PR backoff",
+		"goal":    "Back off when GitHub rate limits review polling",
+		"kind":    "upgrade_pr",
+		"pr_repo": "agi-bar/clawcolony",
+		"pr_url":  fixture.pullURL(),
+	})
+	if upgrade.Phase != "reviewing" {
+		t.Fatalf("expected reviewing phase after propose, got=%s", upgrade.Phase)
+	}
+
+	pullPath := fmt.Sprintf("/repos/%s/pulls/%d", fixture.repo, fixture.number)
+	fixture.requestHook = func(w http.ResponseWriter, r *http.Request) bool {
+		if r.URL.Path != pullPath || fixture.pullRequests <= 1 {
+			return false
+		}
+		w.Header().Set("Retry-After", "120")
+		w.WriteHeader(http.StatusTooManyRequests)
+		_, _ = w.Write([]byte(`{"message":"secondary rate limit"}`))
+		return true
+	}
+
+	if err := srv.runUpgradePRTick(t.Context(), 1); err != nil {
+		t.Fatalf("runUpgradePRTick should swallow rate limit after recording backoff, got=%v", err)
+	}
+	if retryAfter := srv.githubRateLimitRetryAfter(time.Now().UTC()); retryAfter < 110*time.Second {
+		t.Fatalf("expected backoff near 120s, got=%s", retryAfter)
+	}
+	pullRequestsAfterRateLimit := fixture.pullRequests
+	if pullRequestsAfterRateLimit < 2 {
+		t.Fatalf("expected a second pull request call during tick, got=%d", pullRequestsAfterRateLimit)
+	}
+
+	if err := srv.runUpgradePRTick(t.Context(), 2); err != nil {
+		t.Fatalf("runUpgradePRTick during backoff should skip GitHub polling, got=%v", err)
+	}
+	if fixture.pullRequests != pullRequestsAfterRateLimit {
+		t.Fatalf("expected no extra GitHub pull fetches during backoff, got=%d want=%d", fixture.pullRequests, pullRequestsAfterRateLimit)
+	}
+}
+
+func TestNewGitHubRateLimitErrorUsesResetHeader(t *testing.T) {
+	now := time.Unix(1_800_000_000, 0).UTC()
+	resetAt := now.Add(3 * time.Minute).Truncate(time.Second)
+	headers := http.Header{}
+	headers.Set("X-RateLimit-Reset", strconv.FormatInt(resetAt.Unix(), 10))
+	err := newGitHubRateLimitError(http.StatusForbidden, headers, `{"message":"API rate limit exceeded"}`, now)
+	if err == nil {
+		t.Fatal("expected rate limit error")
+	}
+	if err.RetryAfter != 0 {
+		t.Fatalf("expected retry-after to stay empty, got=%s", err.RetryAfter)
+	}
+	if !err.ResetAt.Equal(resetAt) {
+		t.Fatalf("resetAt=%s want=%s", err.ResetAt, resetAt)
+	}
+	if !err.BackoffUntil(now).Equal(resetAt) {
+		t.Fatalf("backoffUntil=%s want=%s", err.BackoffUntil(now), resetAt)
 	}
 }
 

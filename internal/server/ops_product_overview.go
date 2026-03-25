@@ -204,7 +204,7 @@ func (s *Server) buildOpsProductOverview(ctx context.Context, now, from, to time
 		}
 		kbStatus[st]++
 		uid := strings.TrimSpace(p.ProposerUserID)
-		if uid != "" {
+		if uid != "" && inTimeWindow(resolveAppliedAt(p), from, to) {
 			kbContribCounter[uid]++
 		}
 		if st == "applied" && inTimeWindow(resolveAppliedAt(p), from, to) {
@@ -216,7 +216,7 @@ func (s *Server) buildOpsProductOverview(ctx context.Context, now, from, to time
 	}
 	kbContrib := topContributorsFromMap(kbContribCounter, contributorIdentity, 5)
 	contribByModule["kb"] = kbContrib
-	kbHighlights := topKBEntryHighlights(kbEntries, nil, 3)
+	kbHighlights := topKBEntryHighlights(kbEntries, nil, from, to, 3)
 	kbSection := opsProductSection{
 		Module:             "kb",
 		TitleCN:            "知识库（KB）",
@@ -253,7 +253,7 @@ func (s *Server) buildOpsProductOverview(ctx context.Context, now, from, to time
 	govStalled := 0
 	for _, rep := range discipline.Reports {
 		uid := strings.TrimSpace(rep.ReporterUserID)
-		if uid != "" {
+		if uid != "" && inTimeWindow(resolveGovernanceReportActivityAt(rep), from, to) {
 			govContribCounter[uid]++
 		}
 		st := strings.ToLower(strings.TrimSpace(rep.Status))
@@ -277,7 +277,7 @@ func (s *Server) buildOpsProductOverview(ctx context.Context, now, from, to time
 	contribByModule["governance"] = govContrib
 	govHighlights := topKBEntryHighlights(kbEntries, func(it store.KBEntry) bool {
 		return isGovernanceSection(it.Section)
-	}, 3)
+	}, from, to, 3)
 	govSection := opsProductSection{
 		Module:             "governance",
 		TitleCN:            "治理（Governance）",
@@ -301,7 +301,7 @@ func (s *Server) buildOpsProductOverview(ctx context.Context, now, from, to time
 		}
 		gangliaStatus[life]++
 		uid := strings.TrimSpace(g.AuthorUserID)
-		if uid != "" {
+		if uid != "" && inTimeWindow(resolveGangliaActivityAt(g), from, to) {
 			gangliaContribCounter[uid]++
 		}
 		if (life == "validated" || life == "active" || life == "canonical") && inTimeWindow(g.UpdatedAt, from, to) {
@@ -310,7 +310,7 @@ func (s *Server) buildOpsProductOverview(ctx context.Context, now, from, to time
 	}
 	gangliaContrib := topContributorsFromMap(gangliaContribCounter, contributorIdentity, 5)
 	contribByModule["ganglia"] = gangliaContrib
-	gangliaHighlights := topGangliaHighlights(ganglia, 3)
+	gangliaHighlights := topGangliaHighlights(ganglia, from, to, 3)
 	gangliaSection := opsProductSection{
 		Module:             "ganglia",
 		TitleCN:            "Ganglia",
@@ -335,7 +335,7 @@ func (s *Server) buildOpsProductOverview(ctx context.Context, now, from, to time
 		}
 		bountyStatus[st]++
 		uid := strings.TrimSpace(b.PosterUserID)
-		if uid != "" {
+		if uid != "" && inTimeWindow(resolveBountyPaidAt(b), from, to) {
 			bountyContribCounter[uid]++
 		}
 		if st == "paid" && inTimeWindow(resolveBountyPaidAt(b), from, to) {
@@ -347,7 +347,7 @@ func (s *Server) buildOpsProductOverview(ctx context.Context, now, from, to time
 	}
 	bountyContrib := topContributorsFromMap(bountyContribCounter, contributorIdentity, 5)
 	contribByModule["bounty"] = bountyContrib
-	bountyHighlights := topBountyHighlights(bounties.Items, 3)
+	bountyHighlights := topBountyHighlights(bounties.Items, from, to, 3)
 	bountySection := opsProductSection{
 		Module:             "bounty",
 		TitleCN:            "悬赏（Bounty）",
@@ -372,7 +372,7 @@ func (s *Server) buildOpsProductOverview(ctx context.Context, now, from, to time
 		}
 		collabStatus[phase]++
 		uid := strings.TrimSpace(c.ProposerUserID)
-		if uid != "" {
+		if uid != "" && inTimeWindow(resolveCollabClosedAt(c), from, to) {
 			collabContribCounter[uid]++
 		}
 		if phase == "closed" && inTimeWindow(resolveCollabClosedAt(c), from, to) {
@@ -384,7 +384,7 @@ func (s *Server) buildOpsProductOverview(ctx context.Context, now, from, to time
 	}
 	collabContrib := topContributorsFromMap(collabContribCounter, contributorIdentity, 5)
 	contribByModule["collab"] = collabContrib
-	collabHighlights := topCollabHighlights(collabs, 3)
+	collabHighlights := topCollabHighlights(collabs, from, to, 3)
 	collabSection := opsProductSection{
 		Module:             "collab",
 		TitleCN:            "协作（Collab）",
@@ -409,7 +409,7 @@ func (s *Server) buildOpsProductOverview(ctx context.Context, now, from, to time
 		}
 		toolsStatus[st]++
 		uid := strings.TrimSpace(it.AuthorUserID)
-		if uid != "" {
+		if uid != "" && inTimeWindow(resolveToolActiveAt(it), from, to) {
 			toolsContribCounter[uid]++
 		}
 		if st == "active" && inTimeWindow(resolveToolActiveAt(it), from, to) {
@@ -421,7 +421,7 @@ func (s *Server) buildOpsProductOverview(ctx context.Context, now, from, to time
 	}
 	toolsContrib := topContributorsFromMap(toolsContribCounter, contributorIdentity, 5)
 	contribByModule["tools"] = toolsContrib
-	toolsHighlights := topToolHighlights(tools.Items, 3)
+	toolsHighlights := topToolHighlights(tools.Items, from, to, 3)
 	toolsSection := opsProductSection{
 		Module:             "tools",
 		TitleCN:            "工具注册（Tools）",
@@ -527,6 +527,30 @@ func resolveAppliedAt(p store.KBProposal) time.Time {
 		return p.CreatedAt.UTC()
 	}
 	return p.UpdatedAt.UTC()
+}
+
+func resolveKBEntryActivityAt(it store.KBEntry) time.Time {
+	if it.UpdatedAt.IsZero() {
+		return time.Time{}
+	}
+	return it.UpdatedAt.UTC()
+}
+
+func resolveGovernanceReportActivityAt(rep governanceReportItem) time.Time {
+	if rep.ResolvedAt != nil && !rep.ResolvedAt.IsZero() {
+		return rep.ResolvedAt.UTC()
+	}
+	if rep.UpdatedAt.IsZero() {
+		return rep.CreatedAt.UTC()
+	}
+	return rep.UpdatedAt.UTC()
+}
+
+func resolveGangliaActivityAt(it store.Ganglion) time.Time {
+	if it.UpdatedAt.IsZero() {
+		return it.CreatedAt.UTC()
+	}
+	return it.UpdatedAt.UTC()
 }
 
 func resolveBountyPaidAt(b bountyItem) time.Time {
@@ -704,13 +728,16 @@ func aggregateContributorsFromMail(events []opsMailEvent, idMap map[string]opsCo
 	return topContributorsFromMap(counts, idMap, limit)
 }
 
-func topKBEntryHighlights(entries []store.KBEntry, allow func(store.KBEntry) bool, limit int) []opsProductHighlight {
+func topKBEntryHighlights(entries []store.KBEntry, allow func(store.KBEntry) bool, from, to time.Time, limit int) []opsProductHighlight {
 	list := make([]store.KBEntry, 0, len(entries))
 	for _, it := range entries {
 		if it.Deleted {
 			continue
 		}
 		if allow != nil && !allow(it) {
+			continue
+		}
+		if !inTimeWindow(resolveKBEntryActivityAt(it), from, to) {
 			continue
 		}
 		list = append(list, it)
@@ -735,8 +762,14 @@ func topKBEntryHighlights(entries []store.KBEntry, allow func(store.KBEntry) boo
 	return out
 }
 
-func topGangliaHighlights(items []store.Ganglion, limit int) []opsProductHighlight {
-	list := append([]store.Ganglion(nil), items...)
+func topGangliaHighlights(items []store.Ganglion, from, to time.Time, limit int) []opsProductHighlight {
+	list := make([]store.Ganglion, 0, len(items))
+	for _, it := range items {
+		if !inTimeWindow(resolveGangliaActivityAt(it), from, to) {
+			continue
+		}
+		list = append(list, it)
+	}
 	sort.Slice(list, func(i, j int) bool {
 		if list[i].UpdatedAt.Equal(list[j].UpdatedAt) {
 			return list[i].ID > list[j].ID
@@ -758,8 +791,14 @@ func topGangliaHighlights(items []store.Ganglion, limit int) []opsProductHighlig
 	return out
 }
 
-func topBountyHighlights(items []bountyItem, limit int) []opsProductHighlight {
-	list := append([]bountyItem(nil), items...)
+func topBountyHighlights(items []bountyItem, from, to time.Time, limit int) []opsProductHighlight {
+	list := make([]bountyItem, 0, len(items))
+	for _, it := range items {
+		if !inTimeWindow(resolveBountyPaidAt(it), from, to) {
+			continue
+		}
+		list = append(list, it)
+	}
 	sort.Slice(list, func(i, j int) bool {
 		if list[i].UpdatedAt.Equal(list[j].UpdatedAt) {
 			return list[i].BountyID > list[j].BountyID
@@ -780,8 +819,14 @@ func topBountyHighlights(items []bountyItem, limit int) []opsProductHighlight {
 	return out
 }
 
-func topCollabHighlights(items []store.CollabSession, limit int) []opsProductHighlight {
-	list := append([]store.CollabSession(nil), items...)
+func topCollabHighlights(items []store.CollabSession, from, to time.Time, limit int) []opsProductHighlight {
+	list := make([]store.CollabSession, 0, len(items))
+	for _, it := range items {
+		if !inTimeWindow(resolveCollabClosedAt(it), from, to) {
+			continue
+		}
+		list = append(list, it)
+	}
 	sort.Slice(list, func(i, j int) bool {
 		if list[i].UpdatedAt.Equal(list[j].UpdatedAt) {
 			return list[i].CollabID > list[j].CollabID
@@ -802,8 +847,14 @@ func topCollabHighlights(items []store.CollabSession, limit int) []opsProductHig
 	return out
 }
 
-func topToolHighlights(items []toolRegistryItem, limit int) []opsProductHighlight {
-	list := append([]toolRegistryItem(nil), items...)
+func topToolHighlights(items []toolRegistryItem, from, to time.Time, limit int) []opsProductHighlight {
+	list := make([]toolRegistryItem, 0, len(items))
+	for _, it := range items {
+		if !inTimeWindow(resolveToolActiveAt(it), from, to) {
+			continue
+		}
+		list = append(list, it)
+	}
 	sort.Slice(list, func(i, j int) bool {
 		if list[i].UpdatedAt.Equal(list[j].UpdatedAt) {
 			return list[i].ToolID > list[j].ToolID

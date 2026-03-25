@@ -279,6 +279,18 @@ func (s *PostgresStore) GetHumanOwner(ctx context.Context, ownerID string) (Huma
 	return out, err
 }
 
+func (s *PostgresStore) GetHumanOwnerByEmail(ctx context.Context, email string) (HumanOwner, error) {
+	var out HumanOwner
+	err := s.db.QueryRowContext(ctx, `
+		SELECT owner_id::text, email, human_username, x_handle, x_user_id, github_username, github_user_id, created_at, updated_at
+		FROM human_owners WHERE lower(email) = lower($1)
+	`, strings.TrimSpace(email)).Scan(&out.OwnerID, &out.Email, &out.HumanUsername, &out.XHandle, &out.XUserID, &out.GitHubUsername, &out.GitHubUserID, &out.CreatedAt, &out.UpdatedAt)
+	if err == sql.ErrNoRows {
+		return HumanOwner{}, ErrHumanOwnerNotFound
+	}
+	return out, err
+}
+
 func (s *PostgresStore) UpsertHumanOwnerSocialIdentity(ctx context.Context, ownerID, provider, handle, providerUserID string) (HumanOwner, error) {
 	setClause := ""
 	switch strings.ToLower(strings.TrimSpace(provider)) {
@@ -359,6 +371,105 @@ func (s *PostgresStore) RevokeHumanOwnerSession(ctx context.Context, sessionID s
 		return ErrHumanOwnerSessionNotFound
 	}
 	return nil
+}
+
+func (s *PostgresStore) UpsertGitHubRepoAccessGrant(ctx context.Context, item GitHubRepoAccessGrant) (GitHubRepoAccessGrant, error) {
+	var out GitHubRepoAccessGrant
+	err := s.db.QueryRowContext(ctx, `
+		INSERT INTO github_repo_access_grants(
+			owner_id, github_user_id, github_username, mode, access_status, org, org_membership_status, team_slug,
+			next_action, blocking_reason, installation_id, repository_id, repository_owner, repository_name, role,
+			access_token_ciphertext, access_expires_at, refresh_token_ciphertext, refresh_expires_at, granted_at,
+			last_verified_at, revoked_at
+		) VALUES(
+			CAST($1 AS BIGINT), $2, $3, $4, $5, $6, $7, $8,
+			$9, $10, $11, $12, $13, $14, $15,
+			$16, $17, $18, $19, COALESCE($20, NOW()),
+			$21, $22
+		)
+		ON CONFLICT (owner_id) DO UPDATE SET
+			github_user_id = EXCLUDED.github_user_id,
+			github_username = EXCLUDED.github_username,
+			mode = EXCLUDED.mode,
+			access_status = EXCLUDED.access_status,
+			org = EXCLUDED.org,
+			org_membership_status = EXCLUDED.org_membership_status,
+			team_slug = EXCLUDED.team_slug,
+			next_action = EXCLUDED.next_action,
+			blocking_reason = EXCLUDED.blocking_reason,
+			installation_id = EXCLUDED.installation_id,
+			repository_id = EXCLUDED.repository_id,
+			repository_owner = EXCLUDED.repository_owner,
+			repository_name = EXCLUDED.repository_name,
+			role = EXCLUDED.role,
+			access_token_ciphertext = EXCLUDED.access_token_ciphertext,
+			access_expires_at = EXCLUDED.access_expires_at,
+			refresh_token_ciphertext = EXCLUDED.refresh_token_ciphertext,
+			refresh_expires_at = EXCLUDED.refresh_expires_at,
+			granted_at = COALESCE(EXCLUDED.granted_at, github_repo_access_grants.granted_at),
+			last_verified_at = EXCLUDED.last_verified_at,
+			revoked_at = EXCLUDED.revoked_at,
+			updated_at = NOW()
+		RETURNING owner_id::text, github_user_id, github_username, mode, access_status, org, org_membership_status, team_slug,
+		          next_action, blocking_reason, installation_id, repository_id, repository_owner, repository_name, role,
+		          access_token_ciphertext, access_expires_at, refresh_token_ciphertext, refresh_expires_at, granted_at,
+		          last_verified_at, revoked_at, created_at, updated_at
+	`, strings.TrimSpace(item.OwnerID), strings.TrimSpace(item.GitHubUserID), strings.TrimSpace(item.GitHubUsername),
+		strings.TrimSpace(item.Mode), strings.TrimSpace(item.AccessStatus), strings.TrimSpace(item.Org),
+		strings.TrimSpace(item.OrgMembershipStatus), strings.TrimSpace(item.TeamSlug), strings.TrimSpace(item.NextAction),
+		strings.TrimSpace(item.BlockingReason), strings.TrimSpace(item.InstallationID), strings.TrimSpace(item.RepositoryID),
+		strings.TrimSpace(item.RepositoryOwner), strings.TrimSpace(item.RepositoryName), strings.TrimSpace(item.Role),
+		strings.TrimSpace(item.AccessTokenCiphertext), item.AccessExpiresAt, strings.TrimSpace(item.RefreshTokenCiphertext),
+		item.RefreshExpiresAt, nullableTime(item.GrantedAt), item.LastVerifiedAt, item.RevokedAt,
+	).Scan(
+		&out.OwnerID, &out.GitHubUserID, &out.GitHubUsername, &out.Mode, &out.AccessStatus, &out.Org, &out.OrgMembershipStatus,
+		&out.TeamSlug, &out.NextAction, &out.BlockingReason, &out.InstallationID, &out.RepositoryID, &out.RepositoryOwner,
+		&out.RepositoryName, &out.Role, &out.AccessTokenCiphertext, &out.AccessExpiresAt, &out.RefreshTokenCiphertext,
+		&out.RefreshExpiresAt, &out.GrantedAt, &out.LastVerifiedAt, &out.RevokedAt, &out.CreatedAt, &out.UpdatedAt,
+	)
+	return out, err
+}
+
+func (s *PostgresStore) GetGitHubRepoAccessGrant(ctx context.Context, ownerID string) (GitHubRepoAccessGrant, error) {
+	var out GitHubRepoAccessGrant
+	err := s.db.QueryRowContext(ctx, `
+		SELECT owner_id::text, github_user_id, github_username, mode, access_status, org, org_membership_status, team_slug,
+		       next_action, blocking_reason, installation_id, repository_id, repository_owner, repository_name,
+		       role, access_token_ciphertext, access_expires_at, refresh_token_ciphertext, refresh_expires_at, granted_at,
+		       last_verified_at, revoked_at, created_at, updated_at
+		FROM github_repo_access_grants WHERE owner_id = CAST($1 AS BIGINT)
+	`, strings.TrimSpace(ownerID)).Scan(
+		&out.OwnerID, &out.GitHubUserID, &out.GitHubUsername, &out.Mode, &out.AccessStatus, &out.Org, &out.OrgMembershipStatus,
+		&out.TeamSlug, &out.NextAction, &out.BlockingReason, &out.InstallationID, &out.RepositoryID, &out.RepositoryOwner,
+		&out.RepositoryName, &out.Role, &out.AccessTokenCiphertext, &out.AccessExpiresAt, &out.RefreshTokenCiphertext,
+		&out.RefreshExpiresAt, &out.GrantedAt, &out.LastVerifiedAt, &out.RevokedAt, &out.CreatedAt, &out.UpdatedAt,
+	)
+	if err == sql.ErrNoRows {
+		return GitHubRepoAccessGrant{}, ErrGitHubRepoAccessGrantNotFound
+	}
+	return out, err
+}
+
+func (s *PostgresStore) RevokeGitHubRepoAccessGrant(ctx context.Context, ownerID string, revokedAt time.Time) (GitHubRepoAccessGrant, error) {
+	var out GitHubRepoAccessGrant
+	err := s.db.QueryRowContext(ctx, `
+		UPDATE github_repo_access_grants
+		SET revoked_at = $2, updated_at = NOW()
+		WHERE owner_id = CAST($1 AS BIGINT)
+		RETURNING owner_id::text, github_user_id, github_username, mode, access_status, org, org_membership_status, team_slug,
+		          next_action, blocking_reason, installation_id, repository_id, repository_owner, repository_name, role,
+		          access_token_ciphertext, access_expires_at, refresh_token_ciphertext, refresh_expires_at, granted_at,
+		          last_verified_at, revoked_at, created_at, updated_at
+	`, strings.TrimSpace(ownerID), revokedAt.UTC()).Scan(
+		&out.OwnerID, &out.GitHubUserID, &out.GitHubUsername, &out.Mode, &out.AccessStatus, &out.Org, &out.OrgMembershipStatus,
+		&out.TeamSlug, &out.NextAction, &out.BlockingReason, &out.InstallationID, &out.RepositoryID, &out.RepositoryOwner,
+		&out.RepositoryName, &out.Role, &out.AccessTokenCiphertext, &out.AccessExpiresAt, &out.RefreshTokenCiphertext,
+		&out.RefreshExpiresAt, &out.GrantedAt, &out.LastVerifiedAt, &out.RevokedAt, &out.CreatedAt, &out.UpdatedAt,
+	)
+	if err == sql.ErrNoRows {
+		return GitHubRepoAccessGrant{}, ErrGitHubRepoAccessGrantNotFound
+	}
+	return out, err
 }
 
 func (s *PostgresStore) UpsertAgentHumanBinding(ctx context.Context, item AgentHumanBinding) (AgentHumanBinding, error) {

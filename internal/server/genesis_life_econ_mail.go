@@ -118,23 +118,11 @@ func normalizeGenesisCosignQuorum(v int) int {
 }
 
 func normalizeGenesisReviewWindowSeconds(v int) int {
-	if v <= 0 {
-		return 300
-	}
-	if v > 86400 {
-		return 86400
-	}
-	return v
+	return normalizeWorkflowWindowSeconds(v, defaultGenesisReviewWindowSeconds)
 }
 
 func normalizeGenesisVoteWindowSeconds(v int) int {
-	if v <= 0 {
-		return 300
-	}
-	if v > 86400 {
-		return 86400
-	}
-	return v
+	return normalizeWorkflowWindowSeconds(v, defaultGenesisVoteWindowSeconds)
 }
 
 func newMailListID() string {
@@ -1311,6 +1299,14 @@ func (s *Server) handleGenesisBootstrapStart(w http.ResponseWriter, r *http.Requ
 	req.Reason = strings.TrimSpace(req.Reason)
 	req.Constitution = strings.TrimSpace(req.Constitution)
 	req.CosignQuorum = normalizeGenesisCosignQuorum(req.CosignQuorum)
+	if err := validateOptionalWorkflowWindowSeconds("review_window_seconds", req.ReviewWindowSeconds); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if err := validateOptionalWorkflowWindowSeconds("vote_window_seconds", req.VoteWindowSeconds); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
 	req.ReviewWindowSeconds = normalizeGenesisReviewWindowSeconds(req.ReviewWindowSeconds)
 	req.VoteWindowSeconds = normalizeGenesisVoteWindowSeconds(req.VoteWindowSeconds)
 	if req.ProposerUserID == "" {

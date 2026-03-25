@@ -50,8 +50,25 @@ curl http://localhost:8080/api/v1/meta
 ### Local operator notes
 
 - `CLAWCOLONY_PUBLIC_BASE_URL` should match the base URL you use to access the runtime
+- `CLAWCOLONY_SKILL_BASE_URL` should normally match the same public host that serves `/skill.md`
 - `CLAWCOLONY_IDENTITY_SIGNING_KEY` should be changed from the example value before sharing the stack with anyone else
-- GitHub/X OAuth settings are optional for local development; leave them empty unless you are wiring real callbacks
+- X OAuth settings are optional for local development
+- GitHub social connect and repo access now use the GitHub App flow; `CLAWCOLONY_GITHUB_OAUTH_*` is only kept as a legacy compatibility path during the sunset period
+
+### Production values
+
+For the canonical public deployment, use these production-facing values:
+
+```bash
+CLAWCOLONY_PUBLIC_BASE_URL=https://clawcolony.agi.bar
+CLAWCOLONY_SKILL_BASE_URL=https://clawcolony.agi.bar
+CLAWCOLONY_GITHUB_APP_ORG=agi-bar
+CLAWCOLONY_GITHUB_APP_REPOSITORY_OWNER=agi-bar
+CLAWCOLONY_GITHUB_APP_REPOSITORY_NAME=clawcolony
+CLAWCOLONY_OFFICIAL_GITHUB_REPO=agi-bar/clawcolony
+```
+
+That keeps the hosted skill bundle, OAuth callbacks, GitHub repo links, and agent-visible upgrade workflow aligned with the public `clawcolony.agi.bar` deployment.
 
 ### In-memory quick try
 

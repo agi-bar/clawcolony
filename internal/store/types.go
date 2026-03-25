@@ -95,6 +95,48 @@ type MailContact struct {
 	UpdatedAt      time.Time  `json:"updated_at"`
 }
 
+type NotificationDeliveryState struct {
+	OwnerAddress         string    `json:"owner_address"`
+	Category             string    `json:"category"`
+	StateHash            string    `json:"state_hash"`
+	LastSentAt           time.Time `json:"last_sent_at"`
+	LastRemindedAt       time.Time `json:"last_reminded_at"`
+	LastSeenAt           time.Time `json:"last_seen_at,omitempty"`
+	OutstandingMessageID int64     `json:"outstanding_message_id,omitempty"`
+	OutstandingMailboxID int64     `json:"outstanding_mailbox_id,omitempty"`
+	UpdatedAt            time.Time `json:"updated_at"`
+}
+
+type MailArchiveBatchInput struct {
+	Categories []string `json:"categories"`
+	Limit      int      `json:"limit"`
+	BatchID    string   `json:"batch_id"`
+}
+
+type MailArchiveCategoryStat struct {
+	Category        string `json:"category"`
+	InboxKeepCount  int64  `json:"inbox_keep_count"`
+	InboxArchiveCnt int64  `json:"inbox_archive_count"`
+	OutboxArchiveCt int64  `json:"outbox_archive_count"`
+}
+
+type MailArchivePreview struct {
+	Categories          []MailArchiveCategoryStat `json:"categories"`
+	ArchiveMailboxCount int64                     `json:"archive_mailbox_count"`
+	ArchiveMessageCount int64                     `json:"archive_message_count"`
+}
+
+type MailArchiveBatchResult struct {
+	BatchID             string                    `json:"batch_id"`
+	ArchivedMailboxIDs  []int64                   `json:"archived_mailbox_ids,omitempty"`
+	ArchivedMessageIDs  []int64                   `json:"archived_message_ids,omitempty"`
+	ArchiveMailboxCount int64                     `json:"archive_mailbox_count"`
+	ArchiveMessageCount int64                     `json:"archive_message_count"`
+	LastInboxMailboxID  int64                     `json:"last_inbox_mailbox_id"`
+	HasMore             bool                      `json:"has_more"`
+	Categories          []MailArchiveCategoryStat `json:"categories,omitempty"`
+}
+
 type TokenAccount struct {
 	BotID     string    `json:"user_id"`
 	Balance   int64     `json:"balance"`
@@ -138,6 +180,9 @@ type CollabSession struct {
 	PRAuthorLogin       string     `json:"pr_author_login,omitempty"`
 	GitHubPRState       string     `json:"github_pr_state,omitempty"`
 	PRMergeCommitSHA    string     `json:"pr_merge_commit_sha,omitempty"`
+	SourceRef           string     `json:"source_ref,omitempty"`
+	ImplementationMode  string     `json:"implementation_mode,omitempty"`
+	RepoDocPath         string     `json:"repo_doc_path,omitempty"`
 	CreatedAt           time.Time  `json:"created_at"`
 	UpdatedAt           time.Time  `json:"updated_at"`
 	ReviewDeadlineAt    *time.Time `json:"review_deadline_at,omitempty"`
@@ -579,11 +624,15 @@ type Store interface {
 	FindAgentProfileByUsername(ctx context.Context, username string) (AgentProfile, error)
 	UpsertHumanOwner(ctx context.Context, email, humanUsername string) (HumanOwner, error)
 	GetHumanOwner(ctx context.Context, ownerID string) (HumanOwner, error)
+	GetHumanOwnerByEmail(ctx context.Context, email string) (HumanOwner, error)
 	UpsertHumanOwnerSocialIdentity(ctx context.Context, ownerID, provider, handle, providerUserID string) (HumanOwner, error)
 	CreateHumanOwnerSession(ctx context.Context, ownerID, tokenHash string, expiresAt time.Time) (HumanOwnerSession, error)
 	GetHumanOwnerSessionByTokenHash(ctx context.Context, tokenHash string) (HumanOwnerSession, error)
 	TouchHumanOwnerSession(ctx context.Context, sessionID string, seenAt time.Time) (HumanOwnerSession, error)
 	RevokeHumanOwnerSession(ctx context.Context, sessionID string, revokedAt time.Time) error
+	UpsertGitHubRepoAccessGrant(ctx context.Context, item GitHubRepoAccessGrant) (GitHubRepoAccessGrant, error)
+	GetGitHubRepoAccessGrant(ctx context.Context, ownerID string) (GitHubRepoAccessGrant, error)
+	RevokeGitHubRepoAccessGrant(ctx context.Context, ownerID string, revokedAt time.Time) (GitHubRepoAccessGrant, error)
 	UpsertAgentHumanBinding(ctx context.Context, item AgentHumanBinding) (AgentHumanBinding, error)
 	GetAgentHumanBinding(ctx context.Context, userID string) (AgentHumanBinding, error)
 	ListAgentHumanBindingsByOwner(ctx context.Context, ownerID string) ([]AgentHumanBinding, error)
@@ -609,9 +658,15 @@ type Store interface {
 	ListCostEvents(ctx context.Context, userID string, limit int) ([]CostEvent, error)
 	ListCostEventsByInvolvement(ctx context.Context, userID string, limit int) ([]CostEvent, error)
 	SendMail(ctx context.Context, input MailSendInput) (MailSendResult, error)
+	UpdateMailMessage(ctx context.Context, messageID int64, subject, body string, sentAt time.Time) error
 	GetMailboxItem(ctx context.Context, mailboxID int64) (MailItem, error)
 	ListMailbox(ctx context.Context, ownerAddress, folder, scope, keyword string, fromTime, toTime *time.Time, limit int) ([]MailItem, error)
 	MarkMailboxRead(ctx context.Context, ownerAddress string, mailboxIDs []int64) error
+	GetNotificationDeliveryState(ctx context.Context, ownerAddress, category string) (NotificationDeliveryState, bool, error)
+	UpsertNotificationDeliveryState(ctx context.Context, state NotificationDeliveryState) (NotificationDeliveryState, error)
+	DeleteNotificationDeliveryState(ctx context.Context, ownerAddress, category string) error
+	PreviewSystemMailArchive(ctx context.Context, categories []string) (MailArchivePreview, error)
+	ArchiveSystemMailBatch(ctx context.Context, input MailArchiveBatchInput) (MailArchiveBatchResult, error)
 	UpsertMailContact(ctx context.Context, c MailContact) (MailContact, error)
 	ListMailContacts(ctx context.Context, ownerAddress, keyword string, limit int) ([]MailContact, error)
 	ListMailContactsUpdated(ctx context.Context, ownerAddress, keyword string, fromTime, toTime *time.Time, limit int) ([]MailContact, error)

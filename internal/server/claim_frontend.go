@@ -109,12 +109,11 @@ func (s *Server) handleClaimGitHubStart(w http.ResponseWriter, r *http.Request) 
 		s.writeClaimLookupError(w, err)
 		return
 	}
-	cfg, ok := s.claimGitHubOAuthConfig()
-	if !ok {
-		writeError(w, http.StatusServiceUnavailable, "github claim oauth is not configured")
+	if _, ok := s.gitHubAppAccessConfig(); !ok {
+		writeError(w, http.StatusServiceUnavailable, "github repo access is not configured")
 		return
 	}
-	authorizeURL, err := s.beginClaimGitHubOAuth(w, r, cfg, strings.TrimSpace(req.ClaimToken), reg.UserID)
+	authorizeURL, err := s.beginGitHubRepoAccess(w, r, "claim", strings.TrimSpace(req.ClaimToken), reg.UserID, "", s.claimFrontendCallbackURL(strings.TrimSpace(req.ClaimToken), nil))
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
@@ -128,100 +127,7 @@ func (s *Server) handleClaimGitHubStart(w http.ResponseWriter, r *http.Request) 
 }
 
 func (s *Server) handleClaimGitHubCallback(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
-		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
-		return
-	}
-	rawState := strings.TrimSpace(r.URL.Query().Get("state"))
-	if providerErr := strings.TrimSpace(r.URL.Query().Get("error")); providerErr != "" {
-		claimToken := ""
-		if rawState != "" {
-			var state claimGitHubOAuthStatePayload
-			if err := s.verifySocialOAuthPayload(rawState, &state); err == nil {
-				claimToken = state.ClaimToken
-			}
-		}
-		s.writeClaimGitHubCallbackError(w, r, claimToken, providerErr)
-		return
-	}
-	code := strings.TrimSpace(r.URL.Query().Get("code"))
-	if rawState == "" || code == "" {
-		s.writeClaimGitHubCallbackError(w, r, "", "oauth callback requires code and state")
-		return
-	}
-	var state claimGitHubOAuthStatePayload
-	if err := s.verifySocialOAuthPayload(rawState, &state); err != nil {
-		s.writeClaimGitHubCallbackError(w, r, "", err.Error())
-		return
-	}
-	if state.ExpiresAt < time.Now().UTC().Unix() {
-		s.writeClaimGitHubCallbackError(w, r, state.ClaimToken, "oauth state expired")
-		return
-	}
-	cookiePayload, err := s.readClaimGitHubOAuthCookie(r)
-	if err != nil {
-		s.writeClaimGitHubCallbackError(w, r, state.ClaimToken, err.Error())
-		return
-	}
-	if cookiePayload.ClaimToken != state.ClaimToken || cookiePayload.UserID != state.UserID || cookiePayload.Nonce != state.Nonce {
-		s.writeClaimGitHubCallbackError(w, r, state.ClaimToken, "oauth cookie mismatch")
-		return
-	}
-	if _, err := s.getClaimRegistration(r.Context(), state.ClaimToken); err != nil {
-		s.writeClaimGitHubCallbackError(w, r, state.ClaimToken, s.claimLookupErrorMessage(err))
-		return
-	}
-	cfg, ok := s.claimGitHubOAuthConfig()
-	if !ok {
-		s.writeClaimGitHubCallbackError(w, r, state.ClaimToken, "github claim oauth is not configured")
-		return
-	}
-	accessToken, err := s.exchangeSocialOAuthCode(r.Context(), cfg, code, s.claimGitHubCallbackURI(r), cookiePayload.CodeVerifier)
-	if err != nil {
-		s.writeClaimGitHubCallbackError(w, r, state.ClaimToken, err.Error())
-		return
-	}
-	viewer, err := s.fetchGitHubViewer(r.Context(), accessToken)
-	if err != nil {
-		s.writeClaimGitHubCallbackError(w, r, state.ClaimToken, err.Error())
-		return
-	}
-	email, err := s.fetchGitHubVerifiedEmail(r.Context(), accessToken)
-	if err != nil {
-		s.writeClaimGitHubCallbackError(w, r, state.ClaimToken, err.Error())
-		return
-	}
-	starred, err := s.verifyGitHubStar(r.Context(), viewer.Login)
-	if err != nil {
-		s.writeClaimGitHubCallbackError(w, r, state.ClaimToken, err.Error())
-		return
-	}
-	forked, err := s.verifyGitHubFork(r.Context(), viewer.Login)
-	if err != nil {
-		s.writeClaimGitHubCallbackError(w, r, state.ClaimToken, err.Error())
-		return
-	}
-	expiresAt := time.Now().UTC().Add(claimGitHubResultStateTTL)
-	if err := s.writeClaimGitHubCallbackCookie(w, r, claimGitHubCallbackCookiePayload{
-		ClaimToken:   state.ClaimToken,
-		UserID:       state.UserID,
-		Email:        email,
-		GitHubLogin:  strings.TrimSpace(viewer.Login),
-		GitHubUserID: fmt.Sprintf("%d", viewer.ID),
-		Starred:      starred,
-		Forked:       forked,
-		ExpiresAt:    expiresAt.Unix(),
-	}); err != nil {
-		s.writeClaimGitHubCallbackError(w, r, state.ClaimToken, err.Error())
-		return
-	}
-	s.clearClaimGitHubOAuthCookie(w, r)
-	values := neturl.Values{}
-	values.Set("status", "ok")
-	values.Set("github_username", strings.TrimSpace(viewer.Login))
-	values.Set("starred", fmt.Sprintf("%t", starred))
-	values.Set("forked", fmt.Sprintf("%t", forked))
-	http.Redirect(w, r, s.claimFrontendCallbackURL(state.ClaimToken, values), http.StatusSeeOther)
+	s.handleGitHubRepoAccessCallback(w, r)
 }
 
 func (s *Server) handleClaimGitHubComplete(w http.ResponseWriter, r *http.Request) {
@@ -234,9 +140,13 @@ func (s *Server) handleClaimGitHubComplete(w http.ResponseWriter, r *http.Reques
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	callbackState, err := s.readClaimGitHubCallbackCookie(r)
+	callbackState, err := s.readGitHubRepoAccessCallbackCookie(r)
 	if err != nil {
 		writeError(w, http.StatusUnauthorized, err.Error())
+		return
+	}
+	if !strings.EqualFold(strings.TrimSpace(callbackState.Flow), "claim") {
+		writeError(w, http.StatusUnauthorized, "github repo access callback is not in claim mode")
 		return
 	}
 	reg, err := s.getClaimRegistration(r.Context(), callbackState.ClaimToken)
@@ -261,7 +171,7 @@ func (s *Server) handleClaimGitHubComplete(w http.ResponseWriter, r *http.Reques
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	s.clearClaimGitHubCallbackCookie(w, r)
+	s.clearGitHubRepoAccessCallbackCookie(w, r)
 	writeJSON(w, http.StatusOK, resp)
 }
 
@@ -529,7 +439,7 @@ func (s *Server) githubOAuthUserEmailsURL() string {
 	return defaultGitHubUserEmailsURL
 }
 
-func (s *Server) activateClaimFromGitHub(ctx context.Context, w http.ResponseWriter, r *http.Request, reg store.AgentRegistration, callbackState claimGitHubCallbackCookiePayload, humanUsername string) (map[string]any, error) {
+func (s *Server) activateClaimFromGitHub(ctx context.Context, w http.ResponseWriter, r *http.Request, reg store.AgentRegistration, callbackState gitHubRepoAccessCallbackCookiePayload, humanUsername string) (map[string]any, error) {
 	profile, err := s.store.GetAgentProfile(ctx, reg.UserID)
 	if err != nil {
 		return nil, err
@@ -623,6 +533,10 @@ func (s *Server) activateClaimFromGitHub(ctx context.Context, w http.ResponseWri
 	if err != nil {
 		return nil, err
 	}
+	githubAccessGrant, err := s.ensureGitHubRepoAccessGrant(ctx, owner.OwnerID)
+	if err != nil && err != store.ErrGitHubRepoAccessGrantNotFound {
+		return nil, err
+	}
 	_, _ = s.store.SendMail(ctx, store.MailSendInput{
 		From:    clawWorldSystemID,
 		To:      []string{reg.UserID},
@@ -648,6 +562,7 @@ func (s *Server) activateClaimFromGitHub(ctx context.Context, w http.ResponseWri
 			"starred":  callbackState.Starred,
 			"forked":   callbackState.Forked,
 		},
+		"github_access": s.gitHubRepoAccessStatusPayload(githubAccessGrant),
 		"message": "Your agent identity is now active.",
 	}, nil
 }

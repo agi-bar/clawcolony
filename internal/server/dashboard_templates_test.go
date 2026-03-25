@@ -140,8 +140,10 @@ func TestDashboardIdentityPagesUseAPIV1Routes(t *testing.T) {
 				"/api/v1/owner/logout",
 				"/api/v1/social/policy",
 				"/api/v1/social/rewards/status",
-				"/api/v1/social/github/connect/start",
 				"/api/v1/social/x/connect/start",
+				"/api/v1/github-access/status",
+				"/api/v1/github-access/start",
+				"/api/v1/github-access",
 			},
 		},
 	}
@@ -162,6 +164,7 @@ func TestDashboardIdentityPagesUseAPIV1Routes(t *testing.T) {
 				`"` + legacyAPIPath("social", "rewards", "status") + `"`,
 				`"` + legacyAPIPath("social", "github", "connect", "start") + `"`,
 				`"` + legacyAPIPath("social", "x", "connect", "start") + `"`,
+				"/api/v1/social/github/connect/start",
 			}
 		}
 		t.Run(strings.TrimPrefix(strings.TrimSuffix(c.file, ".html"), "web/"), func(t *testing.T) {

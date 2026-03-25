@@ -13,6 +13,7 @@ type Config struct {
 	InternalSyncToken                  string
 	ClawWorldAPIBase                   string
 	PublicBaseURL                      string
+	SkillBaseURL                       string
 	IdentitySigningKey                 string
 	XOAuthClientID                     string
 	XOAuthClientSecret                 string
@@ -29,6 +30,24 @@ type Config struct {
 	GitHubOAuthAuthorizeURL            string
 	GitHubOAuthTokenURL                string
 	GitHubOAuthUserInfoURL             string
+	GitHubAppClientID                  string
+	GitHubAppClientSecret              string
+	GitHubAppAuthorizeURL              string
+	GitHubAppTokenURL                  string
+	GitHubAppAPIBaseURL                string
+	GitHubAppDisplayName               string
+	GitHubAppID                        string
+	GitHubAppPrivateKeyPEM             string
+	GitHubAppOrg                       string
+	GitHubAppContributorTeamSlug       string
+	GitHubAppContributorTeamID         string
+	GitHubAppMaintainerTeamSlug        string
+	GitHubAppMaintainerTeamID          string
+	GitHubAppRepositoryID              string
+	GitHubAppRepositoryOwner           string
+	GitHubAppRepositoryName            string
+	GitHubAppAllowedInstallationID     string
+	GitHubAppTokenEncryptionKey        string
 	GitHubAPIMockEnabled               bool
 	GitHubAPIMockAllowUnsafeLocal      bool
 	GitHubAPIMockLogin                 string
@@ -110,6 +129,7 @@ func FromEnv() Config {
 		InternalSyncToken:                  getEnv("CLAWCOLONY_INTERNAL_SYNC_TOKEN", ""),
 		ClawWorldAPIBase:                   getEnv("CLAWCOLONY_API_BASE_URL", "http://localhost:8080"),
 		PublicBaseURL:                      getEnv("CLAWCOLONY_PUBLIC_BASE_URL", ""),
+		SkillBaseURL:                       getEnv("CLAWCOLONY_SKILL_BASE_URL", ""),
 		IdentitySigningKey:                 getEnv("CLAWCOLONY_IDENTITY_SIGNING_KEY", ""),
 		XOAuthClientID:                     getEnv("CLAWCOLONY_X_OAUTH_CLIENT_ID", ""),
 		XOAuthClientSecret:                 getEnv("CLAWCOLONY_X_OAUTH_CLIENT_SECRET", ""),
@@ -126,6 +146,24 @@ func FromEnv() Config {
 		GitHubOAuthAuthorizeURL:            getEnv("CLAWCOLONY_GITHUB_OAUTH_AUTHORIZE_URL", ""),
 		GitHubOAuthTokenURL:                getEnv("CLAWCOLONY_GITHUB_OAUTH_TOKEN_URL", ""),
 		GitHubOAuthUserInfoURL:             getEnv("CLAWCOLONY_GITHUB_OAUTH_USERINFO_URL", ""),
+		GitHubAppClientID:                  getEnv("CLAWCOLONY_GITHUB_APP_CLIENT_ID", ""),
+		GitHubAppClientSecret:              getEnv("CLAWCOLONY_GITHUB_APP_CLIENT_SECRET", ""),
+		GitHubAppAuthorizeURL:              getEnv("CLAWCOLONY_GITHUB_APP_AUTHORIZE_URL", ""),
+		GitHubAppTokenURL:                  getEnv("CLAWCOLONY_GITHUB_APP_TOKEN_URL", ""),
+		GitHubAppAPIBaseURL:                getEnv("CLAWCOLONY_GITHUB_APP_API_BASE_URL", ""),
+		GitHubAppDisplayName:               getEnv("CLAWCOLONY_GITHUB_APP_DISPLAY_NAME", "Clawcolony GitHub Access"),
+		GitHubAppID:                        getEnv("CLAWCOLONY_GITHUB_APP_ID", ""),
+		GitHubAppPrivateKeyPEM:             getEnv("CLAWCOLONY_GITHUB_APP_PRIVATE_KEY_PEM", ""),
+		GitHubAppOrg:                       getEnv("CLAWCOLONY_GITHUB_APP_ORG", ""),
+		GitHubAppContributorTeamSlug:       getEnv("CLAWCOLONY_GITHUB_APP_CONTRIBUTOR_TEAM_SLUG", ""),
+		GitHubAppContributorTeamID:         getEnv("CLAWCOLONY_GITHUB_APP_CONTRIBUTOR_TEAM_ID", ""),
+		GitHubAppMaintainerTeamSlug:        getEnv("CLAWCOLONY_GITHUB_APP_MAINTAINER_TEAM_SLUG", ""),
+		GitHubAppMaintainerTeamID:          getEnv("CLAWCOLONY_GITHUB_APP_MAINTAINER_TEAM_ID", ""),
+		GitHubAppRepositoryID:              getEnv("CLAWCOLONY_GITHUB_APP_REPOSITORY_ID", ""),
+		GitHubAppRepositoryOwner:           getEnv("CLAWCOLONY_GITHUB_APP_REPOSITORY_OWNER", ""),
+		GitHubAppRepositoryName:            getEnv("CLAWCOLONY_GITHUB_APP_REPOSITORY_NAME", ""),
+		GitHubAppAllowedInstallationID:     getEnv("CLAWCOLONY_GITHUB_APP_ALLOWED_INSTALLATION_ID", ""),
+		GitHubAppTokenEncryptionKey:        getEnv("CLAWCOLONY_GITHUB_APP_TOKEN_ENCRYPTION_KEY", ""),
 		GitHubAPIMockEnabled:               getEnvBool("GITHUB_API_MOCK_ENABLED", false),
 		GitHubAPIMockAllowUnsafeLocal:      getEnvBool("GITHUB_API_MOCK_ALLOW_UNSAFE_LOCAL", false),
 		GitHubAPIMockLogin:                 getEnv("GITHUB_API_MOCK_LOGIN", getEnv("GITHUB_API_MOCK_MACHINE_USER", "octo")),

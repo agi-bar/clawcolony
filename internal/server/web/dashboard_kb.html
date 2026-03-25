@@ -240,7 +240,8 @@
             <div class="row">
               <input id="c_reason" placeholder="reason" style="flex:2;" />
               <input id="c_threshold" type="number" value="80" min="1" max="100" style="width:130px;" />
-              <input id="c_window" type="number" value="300" min="10" style="width:130px;" />
+              <input id="c_window" type="number" value="3600" min="3600" max="43200" style="width:130px;" />
+              <span class="muted">1h-12h</span>
             </div>
             <div class="row">
               <select id="c_op">
@@ -495,7 +496,8 @@
           title: $("c_title").value.trim(),
           reason: $("c_reason").value.trim(),
           vote_threshold_pct: Number($("c_threshold").value || 80),
-          vote_window_seconds: Number($("c_window").value || 300),
+          vote_window_seconds: Number($("c_window").value || 3600),
+          discussion_window_seconds: Number($("c_window").value || 3600),
           change: {
             op_type: $("c_op").value.trim(),
             target_entry_id: Number($("c_target").value || 0),

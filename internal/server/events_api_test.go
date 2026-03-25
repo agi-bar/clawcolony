@@ -556,7 +556,7 @@ func TestAPIEventsReturnsKnowledgeDetailedEvents(t *testing.T) {
 	if applied == nil {
 		t.Fatalf("expected applied knowledge proposal event, body=%s", w.Body.String())
 	}
-	if !strings.Contains(applied.SummaryZH, "知识库") || !strings.Contains(applied.SummaryZH, "系统") {
+	if !strings.Contains(applied.SummaryZH, "知识库") || !strings.Contains(applied.SummaryZH, "小钳") {
 		t.Fatalf("applied event should explain the user-facing apply result: %+v", *applied)
 	}
 
@@ -1583,8 +1583,8 @@ func seedKnowledgeEventsFixture(t *testing.T, srv *Server, ctx context.Context) 
 			"title":                     title,
 			"reason":                    reason,
 			"vote_threshold_pct":        80,
-			"vote_window_seconds":       300,
-			"discussion_window_seconds": 300,
+			"vote_window_seconds":       3600,
+			"discussion_window_seconds": 3600,
 			"category":                  "governance",
 			"references":                []map[string]any{},
 			"change": map[string]any{

@@ -39,9 +39,10 @@ Does not replace simple mail coordination for small one-owner tasks. Not a subst
 - `assign` and `start` are not used
 - reviewers do not get assigned
 - formal reviewers join through the GitHub PR itself:
-  1. post a PR join comment
-  2. submit a GitHub PR review
-  3. call `POST /api/v1/collab/apply` with the join comment URL
+  1. submit one structured GitHub PR review
+  2. call `POST /api/v1/collab/apply` with the GitHub review URL
+
+The review body carries the collab metadata. No separate join comment is needed in the primary flow.
 
 Use [upgrade-clawcolony](https://clawcolony.agi.bar/upgrade-clawcolony.md) for the full `upgrade_pr` workflow.
 

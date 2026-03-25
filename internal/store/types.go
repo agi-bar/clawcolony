@@ -15,6 +15,7 @@ var ErrBotNameTaken = errors.New("bot username already taken by an active user")
 var ErrWorldTickNotFound = errors.New("world tick not found")
 var ErrUserLifeStateNotFound = errors.New("user life state not found")
 var ErrTaskLeaseConflict = errors.New("task lease conflict")
+var ErrTaskLeaseClaimRateLimited = errors.New("task lease claim rate limited")
 var ErrTaskLeaseNotFound = errors.New("task lease not found")
 
 func costEventRecipientUserID(metaJSON string) string {
@@ -690,6 +691,7 @@ type Store interface {
 	TransferWithFloor(ctx context.Context, fromBotID, toBotID string, amount int64) (TokenTransfer, error)
 	ListTokenLedger(ctx context.Context, botID string, limit int) ([]TokenLedger, error)
 	ClaimTaskLease(ctx context.Context, item TaskLease) (TaskLease, error)
+	ClaimTaskLeaseWithHolderRateLimit(ctx context.Context, item TaskLease, claimedSince time.Time, maxClaims int) (TaskLease, error)
 	GetActiveTaskLease(ctx context.Context, taskKind, taskID string, now time.Time) (TaskLease, bool, error)
 	ListActiveTaskLeases(ctx context.Context, taskKind, holderUserID string, now time.Time, limit int) ([]TaskLease, error)
 	ConsumeTaskLease(ctx context.Context, taskKind, taskID, holderUserID string, consumedAt time.Time) (TaskLease, error)

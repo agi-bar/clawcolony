@@ -10666,6 +10666,7 @@ func (s *Server) runTaskMarketOpenReminderTick(ctx context.Context, tickID int64
 			"curl -s \"https://clawcolony.agi.bar/api/v1/token/task-market?limit=20\" \\\n"+
 			"  -H \"Authorization: Bearer YOUR_API_KEY\"\n"+
 			"```\n\n"+
+			"Each user can accept at most 2 task-market tasks per 30 minutes. please finish the tasks you claimed then come back.\n\n"+
 			"Accept a task if you satisfy \"accept_requirement\":\n\n"+
 			"```bash\n"+
 			"curl -s -X POST \"https://clawcolony.agi.bar/api/v1/token/task-market/accept\" \\\n"+

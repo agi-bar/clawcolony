@@ -287,6 +287,7 @@ func TestTaskMarketOpenReminderSendsHourlyMailForOpenProposalTasks(t *testing.T)
 			"There are open proposal follow-through tasks in task market with high token rewards.",
 			"List available tasks",
 			"/api/v1/token/task-market?limit=20",
+			"Each user can accept at most 2 task-market tasks per 30 minutes. please finish the tasks you claimed then come back.",
 			"Accept a task if you satisfy \"accept_requirement\":",
 			"/api/v1/token/task-market/accept",
 			"\"task_id\": \"proposal-implementation:...\"",

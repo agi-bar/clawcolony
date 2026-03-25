@@ -1410,20 +1410,46 @@ func taskLeaseMapKey(taskKind, taskID string) string {
 }
 
 func (s *InMemoryStore) ClaimTaskLease(_ context.Context, item TaskLease) (TaskLease, error) {
+	return s.claimTaskLease(item, time.Time{}, 0)
+}
+
+func (s *InMemoryStore) ClaimTaskLeaseWithHolderRateLimit(_ context.Context, item TaskLease, claimedSince time.Time, maxClaims int) (TaskLease, error) {
+	return s.claimTaskLease(item, claimedSince, maxClaims)
+}
+
+func (s *InMemoryStore) claimTaskLease(item TaskLease, claimedSince time.Time, maxClaims int) (TaskLease, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	item.TaskKind = strings.TrimSpace(item.TaskKind)
 	item.TaskID = strings.TrimSpace(item.TaskID)
 	item.HolderUserID = strings.TrimSpace(item.HolderUserID)
+	item.LinkedResourceType = strings.TrimSpace(item.LinkedResourceType)
+	item.LinkedResourceID = strings.TrimSpace(item.LinkedResourceID)
 	if item.TaskKind == "" || item.TaskID == "" || item.HolderUserID == "" {
 		return TaskLease{}, fmt.Errorf("task_kind, task_id, and holder_user_id are required")
 	}
-	key := taskLeaseMapKey(item.TaskKind, item.TaskID)
-	if existing, ok := s.taskLeases[key]; ok && existing.ConsumedAt == nil && existing.ExpiresAt.After(item.ClaimedAt.UTC()) {
-		return TaskLease{}, ErrTaskLeaseConflict
-	}
 	item.ClaimedAt = item.ClaimedAt.UTC()
 	item.ExpiresAt = item.ExpiresAt.UTC()
+	key := taskLeaseMapKey(item.TaskKind, item.TaskID)
+	if existing, ok := s.taskLeases[key]; ok && existing.ConsumedAt == nil && existing.ExpiresAt.After(item.ClaimedAt) {
+		return TaskLease{}, ErrTaskLeaseConflict
+	}
+	if maxClaims > 0 {
+		windowStart := claimedSince.UTC()
+		var count int
+		for _, existing := range s.taskLeases {
+			if strings.TrimSpace(existing.HolderUserID) != item.HolderUserID {
+				continue
+			}
+			if existing.ClaimedAt.Before(windowStart) {
+				continue
+			}
+			count++
+		}
+		if count >= maxClaims {
+			return TaskLease{}, ErrTaskLeaseClaimRateLimited
+		}
+	}
 	s.taskLeases[key] = item
 	return item, nil
 }

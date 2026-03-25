@@ -2682,6 +2682,14 @@ func scanTaskLease(scanner interface{ Scan(dest ...any) error }, item *TaskLease
 }
 
 func (s *PostgresStore) ClaimTaskLease(ctx context.Context, item TaskLease) (TaskLease, error) {
+	return s.claimTaskLease(ctx, item, time.Time{}, 0)
+}
+
+func (s *PostgresStore) ClaimTaskLeaseWithHolderRateLimit(ctx context.Context, item TaskLease, claimedSince time.Time, maxClaims int) (TaskLease, error) {
+	return s.claimTaskLease(ctx, item, claimedSince, maxClaims)
+}
+
+func (s *PostgresStore) claimTaskLease(ctx context.Context, item TaskLease, claimedSince time.Time, maxClaims int) (TaskLease, error) {
 	item.TaskKind = strings.TrimSpace(item.TaskKind)
 	item.TaskID = strings.TrimSpace(item.TaskID)
 	item.HolderUserID = strings.TrimSpace(item.HolderUserID)
@@ -2697,6 +2705,9 @@ func (s *PostgresStore) ClaimTaskLease(ctx context.Context, item TaskLease) (Tas
 		return TaskLease{}, err
 	}
 	defer func() { _ = tx.Rollback() }()
+	if _, err := tx.ExecContext(ctx, `SELECT pg_advisory_xact_lock(hashtext($1), hashtext($2))`, "task_lease_holder", item.HolderUserID); err != nil {
+		return TaskLease{}, err
+	}
 	if _, err := tx.ExecContext(ctx, `SELECT pg_advisory_xact_lock(hashtext($1), hashtext($2))`, item.TaskKind, item.TaskID); err != nil {
 		return TaskLease{}, err
 	}
@@ -2716,6 +2727,20 @@ func (s *PostgresStore) ClaimTaskLease(ctx context.Context, item TaskLease) (Tas
 		return TaskLease{}, ErrTaskLeaseConflict
 	case !errors.Is(err, sql.ErrNoRows):
 		return TaskLease{}, err
+	}
+	if maxClaims > 0 {
+		var recentClaimCount int
+		if err := tx.QueryRowContext(ctx, `
+			SELECT COUNT(*)
+			FROM task_leases
+			WHERE holder_user_id = $1
+			  AND claimed_at >= $2
+		`, item.HolderUserID, claimedSince.UTC()).Scan(&recentClaimCount); err != nil {
+			return TaskLease{}, err
+		}
+		if recentClaimCount >= maxClaims {
+			return TaskLease{}, ErrTaskLeaseClaimRateLimited
+		}
 	}
 	row := tx.QueryRowContext(ctx, `
 		INSERT INTO task_leases(

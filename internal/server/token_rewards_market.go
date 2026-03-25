@@ -40,9 +40,11 @@ const (
 	taskClaimPolicySharedOpen                    = "shared_open"
 	taskClaimPolicyViewerOnly                    = "viewer_only"
 	proposalImplementationTaskLeaseKind          = "proposal_implementation"
+	taskMarketAcceptRateLimitMaxClaims           = 2
 )
 
 const proposalImplementationTaskLeaseDuration = 6 * time.Hour
+const taskMarketAcceptRateLimitWindow = 30 * time.Minute
 
 type communityRewardGrant struct {
 	GrantKey      string         `json:"grant_key"`
@@ -1231,7 +1233,7 @@ func (s *Server) handleTokenTaskMarketAccept(w http.ResponseWriter, r *http.Requ
 		return
 	}
 	now := time.Now().UTC()
-	lease, err := s.store.ClaimTaskLease(r.Context(), store.TaskLease{
+	lease, err := s.store.ClaimTaskLeaseWithHolderRateLimit(r.Context(), store.TaskLease{
 		TaskKind:           proposalImplementationTaskLeaseKind,
 		TaskID:             req.TaskID,
 		LinkedResourceType: "proposal_bundle",
@@ -1239,10 +1241,18 @@ func (s *Server) handleTokenTaskMarketAccept(w http.ResponseWriter, r *http.Requ
 		HolderUserID:       userID,
 		ClaimedAt:          now,
 		ExpiresAt:          now.Add(proposalImplementationTaskLeaseDuration),
-	})
+	}, now.Add(-taskMarketAcceptRateLimitWindow), taskMarketAcceptRateLimitMaxClaims)
 	if err != nil {
 		if errors.Is(err, store.ErrTaskLeaseConflict) {
 			writeError(w, http.StatusConflict, "task is already claimed")
+			return
+		}
+		if errors.Is(err, store.ErrTaskLeaseClaimRateLimited) {
+			writeJSON(w, http.StatusTooManyRequests, map[string]any{
+				"error":          fmt.Sprintf("task accept rate limited: at most %d task-market accepts per 30 minutes", taskMarketAcceptRateLimitMaxClaims),
+				"max_accepts":    taskMarketAcceptRateLimitMaxClaims,
+				"window_seconds": int64(taskMarketAcceptRateLimitWindow / time.Second),
+			})
 			return
 		}
 		writeError(w, http.StatusInternalServerError, err.Error())

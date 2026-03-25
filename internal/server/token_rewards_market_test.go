@@ -1161,6 +1161,97 @@ func TestProposalTaskAcceptClaimsAndReopensAfterExpiry(t *testing.T) {
 	}
 }
 
+func TestProposalTaskAcceptRateLimitedToTwoClaimsPerThirtyMinutes(t *testing.T) {
+	srv := newTestServer()
+	proposer := seedActiveUser(t, srv)
+	claimer, claimerAPIKey := seedActiveUserWithAPIKey(t, srv)
+	oldClosedAt := time.Now().UTC().Add(-30 * time.Hour)
+	oldAppliedAt := oldClosedAt.Add(20 * time.Minute)
+
+	_ = createGovernanceProposalWithDecisionTimesForTest(t, srv, proposer, "Rate limit governance topic", oldClosedAt, &oldAppliedAt)
+	market := doJSONRequestWithHeaders(t, srv.mux, http.MethodGet, "/api/v1/token/task-market?source=system&module=collab&limit=20", nil, apiKeyHeaders(claimerAPIKey))
+	if market.Code != http.StatusOK {
+		t.Fatalf("task market status=%d body=%s", market.Code, market.Body.String())
+	}
+	items := proposalBundleTasksFromResponse(t, market)
+	if len(items) != 1 {
+		t.Fatalf("expected one open proposal task body=%s", market.Body.String())
+	}
+	taskID := strings.TrimSpace(fmt.Sprint(items[0]["task_id"]))
+
+	now := time.Now().UTC()
+	for i := 0; i < taskMarketAcceptRateLimitMaxClaims; i++ {
+		if _, err := srv.store.ClaimTaskLease(t.Context(), store.TaskLease{
+			TaskKind:           proposalImplementationTaskLeaseKind,
+			TaskID:             fmt.Sprintf("proposal-implementation:seed-%d", i),
+			LinkedResourceType: "proposal_bundle",
+			LinkedResourceID:   fmt.Sprintf("seed-%d", i),
+			HolderUserID:       claimer,
+			ClaimedAt:          now.Add(-10 * time.Minute).Add(time.Duration(i) * time.Minute),
+			ExpiresAt:          now.Add(5 * time.Hour),
+		}); err != nil {
+			t.Fatalf("seed recent lease %d: %v", i, err)
+		}
+	}
+
+	accept := doJSONRequestWithHeaders(t, srv.mux, http.MethodPost, "/api/v1/token/task-market/accept", map[string]any{
+		"task_id": taskID,
+	}, apiKeyHeaders(claimerAPIKey))
+	if accept.Code != http.StatusTooManyRequests {
+		t.Fatalf("accept should be rate limited got=%d body=%s", accept.Code, accept.Body.String())
+	}
+	if !strings.Contains(accept.Body.String(), `"max_accepts":2`) {
+		t.Fatalf("rate limit body missing max_accepts body=%s", accept.Body.String())
+	}
+	if !strings.Contains(accept.Body.String(), `"window_seconds":1800`) {
+		t.Fatalf("rate limit body missing window_seconds body=%s", accept.Body.String())
+	}
+	if !strings.Contains(accept.Body.String(), "at most 2 task-market accepts per 30 minutes") {
+		t.Fatalf("rate limit body missing human-readable message body=%s", accept.Body.String())
+	}
+}
+
+func TestProposalTaskAcceptIgnoresClaimsOutsideThirtyMinuteWindow(t *testing.T) {
+	srv := newTestServer()
+	proposer := seedActiveUser(t, srv)
+	claimer, claimerAPIKey := seedActiveUserWithAPIKey(t, srv)
+	oldClosedAt := time.Now().UTC().Add(-30 * time.Hour)
+	oldAppliedAt := oldClosedAt.Add(20 * time.Minute)
+
+	_ = createGovernanceProposalWithDecisionTimesForTest(t, srv, proposer, "Window reset governance topic", oldClosedAt, &oldAppliedAt)
+	market := doJSONRequestWithHeaders(t, srv.mux, http.MethodGet, "/api/v1/token/task-market?source=system&module=collab&limit=20", nil, apiKeyHeaders(claimerAPIKey))
+	if market.Code != http.StatusOK {
+		t.Fatalf("task market status=%d body=%s", market.Code, market.Body.String())
+	}
+	items := proposalBundleTasksFromResponse(t, market)
+	if len(items) != 1 {
+		t.Fatalf("expected one open proposal task body=%s", market.Body.String())
+	}
+	taskID := strings.TrimSpace(fmt.Sprint(items[0]["task_id"]))
+
+	now := time.Now().UTC()
+	for i := 0; i < taskMarketAcceptRateLimitMaxClaims; i++ {
+		if _, err := srv.store.ClaimTaskLease(t.Context(), store.TaskLease{
+			TaskKind:           proposalImplementationTaskLeaseKind,
+			TaskID:             fmt.Sprintf("proposal-implementation:expired-window-%d", i),
+			LinkedResourceType: "proposal_bundle",
+			LinkedResourceID:   fmt.Sprintf("expired-window-%d", i),
+			HolderUserID:       claimer,
+			ClaimedAt:          now.Add(-31 * time.Minute).Add(-time.Duration(i) * time.Minute),
+			ExpiresAt:          now.Add(5 * time.Hour),
+		}); err != nil {
+			t.Fatalf("seed old lease %d: %v", i, err)
+		}
+	}
+
+	accept := doJSONRequestWithHeaders(t, srv.mux, http.MethodPost, "/api/v1/token/task-market/accept", map[string]any{
+		"task_id": taskID,
+	}, apiKeyHeaders(claimerAPIKey))
+	if accept.Code != http.StatusOK {
+		t.Fatalf("accept should ignore claims outside window got=%d body=%s", accept.Code, accept.Body.String())
+	}
+}
+
 func TestProposalTaskAcceptGuardsUpgradePRPropose(t *testing.T) {
 	srv := newTestServer()
 	proposer := seedActiveUser(t, srv)

@@ -659,6 +659,9 @@ func (s *Server) runWorldTickWithTrigger(ctx context.Context, triggerType string
 			runStep("upgrade_pr_tick", func() error {
 				return s.runUpgradePRTick(ctx, tickID)
 			})
+			runStep("proposal_implementation_enforcement", func() error {
+				return s.runProposalImplementationEnforcementTick(ctx, tickID)
+			})
 			runStep("kb_tick", func() error {
 				return nil
 			})
@@ -6105,6 +6108,17 @@ func (s *Server) handleCollabPropose(w http.ResponseWriter, r *http.Request) {
 		ImplementationMode: req.ImplementationMode,
 		RepoDocPath:        req.RepoDocPath,
 		ReviewDeadlineAt:   reviewDeadline,
+		ProposalID: func() int64 {
+			if req.Kind == "upgrade_pr" && req.SourceRef != "" {
+				parts := strings.SplitN(req.SourceRef, ":", 2)
+				if len(parts) == 2 {
+					if id, err := strconv.ParseInt(strings.TrimSpace(parts[1]), 10, 64); err == nil {
+						return id
+					}
+				}
+			}
+			return 0
+		}(),
 	})
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
@@ -9005,6 +9019,48 @@ func (s *Server) handleKBProposalApply(w http.ResponseWriter, r *http.Request) {
 	applyProposalImplementationFields(resp, state, true)
 	enrollments, _ := s.store.ListKBProposalEnrollments(r.Context(), req.ProposalID)
 	s.notifyProposalImplementationHandoff(r.Context(), updated, changeForApply, enrollments, state)
+
+	// P640: auto-create upgrade_pr collab for governance proposals
+	category := s.proposalKnowledgeCategory(r.Context(), updated, changeForApply)
+	if strings.EqualFold(strings.TrimSpace(category), "governance") && state.ImplementationRequired {
+		sourceRef := proposalSourceRefString(updated.ID)
+		linkedSession := upgradeIndex[sourceRef]
+		if strings.TrimSpace(linkedSession.CollabID) == "" {
+			deadlineAt := time.Now().UTC().Add(72 * time.Hour)
+			collab, collabErr := s.store.CreateCollabSession(r.Context(), store.CollabSession{
+				CollabID:           generateCollabID(),
+				Title:               fmt.Sprintf("P%d Implementation", updated.ID),
+				Goal:                "Implement the approved proposal change via upgrade-clawcolony. See upgrade_handoff for details.",
+				Kind:                "upgrade_pr",
+				Phase:               "recruiting",
+				ProposerUserID:      updated.ProposerUserID,
+				AuthorUserID:        updated.ProposerUserID,
+				OrchestratorUserID:  updated.ProposerUserID,
+				ProposalID:          updated.ID,
+				SourceRef:           sourceRef,
+				MinMembers:          1,
+				MaxMembers:          1,
+				RequiredReviewers:   2,
+				Complexity:          "normal",
+				DeadlineAt:          &deadlineAt,
+				CreatedAt:           time.Now().UTC(),
+				UpdatedAt:           time.Now().UTC(),
+			})
+			if collabErr == nil {
+				resp["auto_created_collab"] = collab
+				subject := fmt.Sprintf("[P640][AUTO-CREATED] upgrade_pr collab for P%d — submit PR to start", updated.ID)
+				body := fmt.Sprintf(`proposal_id=%d
+title=%s
+collab_id=%s
+action=Submit your upgrade PR at /api/v1/collab/propose with the upgrade_pr collab details.
+deadline=72 hours from now
+
+P640 auto-tracking created this collab because no upgrade_pr existed after proposal was applied.`, updated.ID, updated.Title, collab.CollabID)
+				s.sendMailAndPushHint(r.Context(), clawWorldSystemID, []string{updated.ProposerUserID}, subject, body)
+			}
+		}
+	}
+
 	writeJSON(w, http.StatusAccepted, resp)
 }
 

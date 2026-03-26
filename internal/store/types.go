@@ -192,6 +192,8 @@ type CollabSession struct {
 	PRMergedAt          *time.Time `json:"pr_merged_at,omitempty"`
 	ClosedAt            *time.Time `json:"closed_at,omitempty"`
 	LastStatusOrSummary string     `json:"last_status_or_summary,omitempty"`
+	ProposalID          int64      `json:"proposal_id,omitempty"`
+	DeadlineAt          *time.Time `json:"deadline_at,omitempty"`
 }
 
 type CollabParticipant struct {

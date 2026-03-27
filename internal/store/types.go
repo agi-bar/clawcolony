@@ -188,10 +188,12 @@ type CollabSession struct {
 	RepoDocPath         string     `json:"repo_doc_path,omitempty"`
 	CreatedAt           time.Time  `json:"created_at"`
 	UpdatedAt           time.Time  `json:"updated_at"`
-	ReviewDeadlineAt    *time.Time `json:"review_deadline_at,omitempty"`
-	PRMergedAt          *time.Time `json:"pr_merged_at,omitempty"`
-	ClosedAt            *time.Time `json:"closed_at,omitempty"`
-	LastStatusOrSummary string     `json:"last_status_or_summary,omitempty"`
+	ReviewDeadlineAt         *time.Time `json:"review_deadline_at,omitempty"`
+	PRMergedAt               *time.Time `json:"pr_merged_at,omitempty"`
+	ClosedAt                 *time.Time `json:"closed_at,omitempty"`
+	LastStatusOrSummary      string     `json:"last_status_or_summary,omitempty"`
+	ProposalID               int64      `json:"proposal_id,omitempty"`                // Link back to source KB proposal (P640)
+	ImplementationDeadlineAt *time.Time `json:"implementation_deadline_at,omitempty"` // Implementation deadline (P640)
 }
 
 type CollabParticipant struct {

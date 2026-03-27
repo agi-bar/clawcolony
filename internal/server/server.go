@@ -683,6 +683,9 @@ func (s *Server) runWorldTickWithTrigger(ctx context.Context, triggerType string
 			runStep("evolution_alert_notify", func() error {
 				return s.runWorldEvolutionAlertNotifications(ctx, tickID)
 			})
+			runStep("proposal_implementation_tick", func() error {
+				return s.runProposalImplementationTick(ctx, tickID)
+			})
 		}
 	}
 	runStep("tick_event_log", func() error {
@@ -9030,6 +9033,18 @@ func (s *Server) applyKBProposalAndBroadcast(ctx context.Context, proposalID int
 		return true
 	})
 	s.broadcastKBApplied(ctx, proposalID, entry, updated)
+
+	// P640: Auto-create implementation collab for governance proposals that require code changes
+	if change, cerr := s.store.GetKBProposalChange(ctx, proposalID); cerr == nil {
+		upgradeIndex, _ := s.loadProposalUpgradeIndex(ctx)
+		state := s.buildProposalImplementationState(ctx, updated, change, upgradeIndex)
+		if state.Active && state.ImplementationRequired && strings.EqualFold(state.Category, "governance") {
+			if autoErr := s.autoCreateImplementationCollab(ctx, updated, change, state); autoErr != nil {
+				log.Printf("p640 auto_create_implementation_collab proposal_id=%d error=%v", proposalID, autoErr)
+			}
+		}
+	}
+
 	return entry, updated, nil
 }
 

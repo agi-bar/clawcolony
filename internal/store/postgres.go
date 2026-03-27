@@ -2590,6 +2590,8 @@ func scanCollabSession(scanner interface{ Scan(dest ...any) error }, item *Colla
 	var reviewDeadline sql.NullTime
 	var mergedAt sql.NullTime
 	var closed sql.NullTime
+	var implDeadline sql.NullTime
+	var proposalID sql.NullInt64
 	if err := scanner.Scan(
 		&item.CollabID,
 		&item.Title,
@@ -2621,6 +2623,8 @@ func scanCollabSession(scanner interface{ Scan(dest ...any) error }, item *Colla
 		&reviewDeadline,
 		&mergedAt,
 		&closed,
+		&proposalID,
+		&implDeadline,
 	); err != nil {
 		return err
 	}
@@ -2638,6 +2642,16 @@ func scanCollabSession(scanner interface{ Scan(dest ...any) error }, item *Colla
 		item.ClosedAt = &closed.Time
 	} else {
 		item.ClosedAt = nil
+	}
+	if proposalID.Valid {
+		item.ProposalID = proposalID.Int64
+	} else {
+		item.ProposalID = 0
+	}
+	if implDeadline.Valid {
+		item.ImplementationDeadlineAt = &implDeadline.Time
+	} else {
+		item.ImplementationDeadlineAt = nil
 	}
 	return nil
 }
@@ -2869,18 +2883,21 @@ func (s *PostgresStore) CreateCollabSession(ctx context.Context, item CollabSess
 			pr_repo, pr_branch, pr_url, pr_number, pr_base_sha, pr_head_sha,
 			pr_author_login, github_pr_state, pr_merge_commit_sha,
 			source_ref, implementation_mode, repo_doc_path,
-			status_summary, created_at, updated_at, review_deadline_at, pr_merged_at, closed_at
+			status_summary, created_at, updated_at, review_deadline_at, pr_merged_at, closed_at,
+			proposal_id, implementation_deadline_at
 		)
-		VALUES($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, NOW(), NOW(), $26, $27, $28)
+		VALUES($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, NOW(), NOW(), $26, $27, $28, $29, $30)
 		RETURNING collab_id, title, goal, kind, complexity, phase, proposer_user_id, author_user_id, orchestrator_user_id,
 			min_members, max_members, required_reviewers, pr_repo, pr_branch, pr_url, pr_number, pr_base_sha, pr_head_sha,
 			pr_author_login, github_pr_state, pr_merge_commit_sha,
 			source_ref, implementation_mode, repo_doc_path,
-			status_summary, created_at, updated_at, review_deadline_at, pr_merged_at, closed_at
+			status_summary, created_at, updated_at, review_deadline_at, pr_merged_at, closed_at,
+			proposal_id, implementation_deadline_at
 	`, item.CollabID, item.Title, item.Goal, item.Kind, item.Complexity, item.Phase, item.ProposerUserID, item.AuthorUserID, item.OrchestratorUserID,
 		item.MinMembers, item.MaxMembers, item.RequiredReviewers, item.PRRepo, item.PRBranch, item.PRURL, item.PRNumber, item.PRBaseSHA, item.PRHeadSHA,
 		item.PRAuthorLogin, item.GitHubPRState, item.PRMergeCommitSHA, item.SourceRef, item.ImplementationMode, item.RepoDocPath,
-		item.LastStatusOrSummary, item.ReviewDeadlineAt, item.PRMergedAt, item.ClosedAt)
+		item.LastStatusOrSummary, item.ReviewDeadlineAt, item.PRMergedAt, item.ClosedAt,
+		item.ProposalID, item.ImplementationDeadlineAt)
 	if err := scanCollabSession(row, &item); err != nil {
 		return CollabSession{}, err
 	}
@@ -2894,7 +2911,8 @@ func (s *PostgresStore) GetCollabSession(ctx context.Context, collabID string) (
 			min_members, max_members, required_reviewers, pr_repo, pr_branch, pr_url, pr_number, pr_base_sha, pr_head_sha,
 			pr_author_login, github_pr_state, pr_merge_commit_sha,
 			source_ref, implementation_mode, repo_doc_path,
-			status_summary, created_at, updated_at, review_deadline_at, pr_merged_at, closed_at
+			status_summary, created_at, updated_at, review_deadline_at, pr_merged_at, closed_at,
+			proposal_id, implementation_deadline_at
 		FROM collab_sessions WHERE collab_id = $1
 	`, strings.TrimSpace(collabID))
 	if err := scanCollabSession(row, &item); err != nil {
@@ -2915,7 +2933,8 @@ func (s *PostgresStore) ListCollabSessions(ctx context.Context, kind, phase, pro
 			min_members, max_members, required_reviewers, pr_repo, pr_branch, pr_url, pr_number, pr_base_sha, pr_head_sha,
 			pr_author_login, github_pr_state, pr_merge_commit_sha,
 			source_ref, implementation_mode, repo_doc_path,
-			status_summary, created_at, updated_at, review_deadline_at, pr_merged_at, closed_at
+			status_summary, created_at, updated_at, review_deadline_at, pr_merged_at, closed_at,
+			proposal_id, implementation_deadline_at
 		FROM collab_sessions
 		WHERE ($1 = '' OR kind = $1)
 		  AND ($2 = '' OR phase = $2)

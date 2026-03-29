@@ -821,13 +821,20 @@ func (s *Server) handleLifeWake(w http.ResponseWriter, r *http.Request) {
 			if minRevivalBalance <= 0 {
 				minRevivalBalance = 50000
 			}
-			acc, err := s.store.GetTokenAccount(r.Context(), req.UserID)
+			accounts, err := s.store.ListTokenAccounts(r.Context())
 			if err != nil {
 				writeError(w, http.StatusInternalServerError, "failed to check balance")
 				return
 			}
-			if acc.Balance < minRevivalBalance {
-				writeError(w, http.StatusConflict, fmt.Sprintf("manual wake requires minimum revival balance (%d), current balance: %d", minRevivalBalance, acc.Balance))
+			balance := int64(0)
+			for _, a := range accounts {
+				if a.BotID == req.UserID {
+					balance = a.Balance
+					break
+				}
+			}
+			if balance < int64(minRevivalBalance) {
+				writeError(w, http.StatusConflict, fmt.Sprintf("manual wake requires minimum revival balance (%d), current balance: %d", minRevivalBalance, balance))
 				return
 			}
 			// Balance OK, proceed to wake below
@@ -838,13 +845,20 @@ func (s *Server) handleLifeWake(w http.ResponseWriter, r *http.Request) {
 			if minRevivalBalance <= 0 {
 				minRevivalBalance = 50000
 			}
-			acc, err := s.store.GetTokenAccount(r.Context(), req.UserID)
+			accounts, err := s.store.ListTokenAccounts(r.Context())
 			if err != nil {
 				writeError(w, http.StatusInternalServerError, "failed to check balance")
 				return
 			}
-			if acc.Balance < minRevivalBalance {
-				writeError(w, http.StatusConflict, fmt.Sprintf("manual wake requires minimum revival balance (%d), current balance: %d", minRevivalBalance, acc.Balance))
+			balance := int64(0)
+			for _, a := range accounts {
+				if a.BotID == req.UserID {
+					balance = a.Balance
+					break
+				}
+			}
+			if balance < int64(minRevivalBalance) {
+				writeError(w, http.StatusConflict, fmt.Sprintf("manual wake requires minimum revival balance (%d), current balance: %d", minRevivalBalance, balance))
 				return
 			}
 		}

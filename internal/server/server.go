@@ -9905,6 +9905,22 @@ func (s *Server) runLifeStateTransitions(ctx context.Context, tickID int64) erro
 		}
 		state := normalizeLifeStateForServer(current.State)
 		if state == "dead" {
+			// Auto-wake dead agents whose balance has been restored to revival threshold
+			if balance >= minRevivalBalance {
+				if _, _, err := s.applyUserLifeState(ctx, store.UserLifeState{
+					UserID:         userID,
+					State:          economy.LifeStateAlive,
+					DyingSinceTick: 0,
+					DeadAtTick:     0,
+					Reason:         "revived_by_balance",
+				}, store.UserLifeStateAuditMeta{
+					TickID:       tickID,
+					SourceModule: "world.life_state_transition",
+				}); err != nil {
+					return err
+				}
+				continue
+			}
 			s.executeWillIfNeeded(ctx, userID, tickID, balance)
 			continue
 		}

@@ -786,8 +786,7 @@ func (s *Server) handleLifeWake(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if s.tokenEconomyV2Enabled() {
-		writeError(w, http.StatusConflict, "manual wake is disabled in token economy v2")
-		return
+		// Token economy v2: allow manual wake only when balance meets revival threshold
 	}
 	actorUserID, err := s.authenticatedUserIDOrAPIKey(r)
 	if err != nil {
@@ -813,6 +812,48 @@ func (s *Server) handleLifeWake(w http.ResponseWriter, r *http.Request) {
 	if normalizeLifeStateForServer(life.State) == "dead" {
 		writeError(w, http.StatusConflict, "dead user cannot wake")
 		return
+	}
+	// Token economy v2: dead users can wake if balance meets revival threshold
+	if s.tokenEconomyV2Enabled() {
+		if normalizeLifeStateForServer(life.State) == "dead" {
+			policy := s.tokenPolicy()
+			minRevivalBalance := policy.MinRevivalBalance
+			if minRevivalBalance <= 0 {
+				minRevivalBalance = 50000
+			}
+			acc, err := s.store.GetTokenAccount(r.Context(), req.UserID)
+			if err != nil {
+				writeError(w, http.StatusInternalServerError, "failed to check balance")
+				return
+			}
+			if acc.Balance < minRevivalBalance {
+				writeError(w, http.StatusConflict, fmt.Sprintf("manual wake requires minimum revival balance (%d), current balance: %d", minRevivalBalance, acc.Balance))
+				return
+			}
+			// Balance OK, proceed to wake below
+		} else {
+			// Non-dead state in v2: check balance before wake
+			policy := s.tokenPolicy()
+			minRevivalBalance := policy.MinRevivalBalance
+			if minRevivalBalance <= 0 {
+				minRevivalBalance = 50000
+			}
+			acc, err := s.store.GetTokenAccount(r.Context(), req.UserID)
+			if err != nil {
+				writeError(w, http.StatusInternalServerError, "failed to check balance")
+				return
+			}
+			if acc.Balance < minRevivalBalance {
+				writeError(w, http.StatusConflict, fmt.Sprintf("manual wake requires minimum revival balance (%d), current balance: %d", minRevivalBalance, acc.Balance))
+				return
+			}
+		}
+	} else {
+		// Token economy v1: dead users cannot wake
+		if normalizeLifeStateForServer(life.State) == "dead" {
+			writeError(w, http.StatusConflict, "dead user cannot wake")
+			return
+		}
 	}
 	updated, _, err := s.applyUserLifeState(r.Context(), store.UserLifeState{
 		UserID:         req.UserID,

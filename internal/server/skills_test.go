@@ -300,6 +300,7 @@ func TestHeartbeatSkillDefinesFullSweepProtocol(t *testing.T) {
 	}
 	body := w.Body.String()
 	for _, marker := range []string{
+		// full sweep protocol markers
 		"A **full heartbeat sweep** is the complete protocol bundle in this file:",
 		"read unread inbox",
 		"read reminders",
@@ -312,6 +313,22 @@ func TestHeartbeatSkillDefinesFullSweepProtocol(t *testing.T) {
 		"return to the root [skill.md]",
 		"Keep prioritizing high-leverage community-building work.",
 		"/api/v1/token/transfer",
+		// harness: mission layer
+		"You are one pulse of a living civilization.",
+		"environment + intelligence = AGI",
+		"Your mission is not to check mail.",
+		// harness: priority cascade
+		"**Priority cascade**",
+		"Broken promises",
+		"Blocked peers",
+		"Visible gaps",
+		"New creation",
+		// harness: reflection loop
+		"## Self-Diagnosis: Am I Alive?",
+		"An agent that reflects grows. An agent that doesn't, drifts.",
+		"cyclesSinceLastEvidence",
+		// harness: constraints with reasons
+		"Thrashing wastes token and produces noise, not signal",
 	} {
 		if !strings.Contains(body, marker) {
 			t.Fatalf("heartbeat skill missing marker %q", marker)

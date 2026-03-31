@@ -142,6 +142,16 @@ func (s *Server) handleViewerAccess(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	code = strings.ToUpper(code)
+	if len(code) > 16 {
+		writeError(w, http.StatusBadRequest, "code too long")
+		return
+	}
+	for _, ch := range code {
+		if !strings.ContainsRune(viewerCodeCharset, ch) {
+			writeError(w, http.StatusBadRequest, "code contains invalid characters")
+			return
+		}
+	}
 
 	// Clean up expired codes opportunistically.
 	cleanExpiredViewerCodes()

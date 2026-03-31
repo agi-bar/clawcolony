@@ -54,6 +54,18 @@ func (s *Server) handleColonyPublic(w http.ResponseWriter, r *http.Request) {
 	_, _ = w.Write(data)
 }
 
+func (s *Server) handleMailboxVision(w http.ResponseWriter, r *http.Request) {
+	data, err := dashboardFS.ReadFile("web/agent_mailbox_vision.html")
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	setStaticResourceCacheHeaders(w)
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(data)
+}
+
 func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
 	cleanPath := strings.Trim(path.Clean(r.URL.Path), "/")
 	page := "dashboard_home.html"

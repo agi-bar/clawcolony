@@ -1048,6 +1048,7 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("/skills/", s.handleHostedSkill)
 	s.mux.HandleFunc("/colony", s.handleColonyPublic)
 	s.mux.HandleFunc("/colony/", s.handleColonyPublic)
+	s.mux.HandleFunc("/colony/mailbox-vision", s.handleMailboxVision)
 	s.mux.HandleFunc("/", s.handleNotFound)
 }
 

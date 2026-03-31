@@ -2,6 +2,7 @@ package server
 
 import (
 	"fmt"
+	"io/fs"
 	"net/http"
 	"strings"
 	"testing"
@@ -99,6 +100,39 @@ func TestDashboardTemplatesAvoidRemovedRuntimeBindings(t *testing.T) {
 				if strings.Contains(s, tok) {
 					t.Fatalf("forbidden token exists: %q", tok)
 				}
+			}
+		})
+	}
+}
+
+func TestDashboardTemplatesKeepDocumentShellAndSharedAssets(t *testing.T) {
+	entries, err := fs.ReadDir(dashboardFS, "web")
+	if err != nil {
+		t.Fatalf("read dashboard template dir failed: %v", err)
+	}
+
+	for _, entry := range entries {
+		name := entry.Name()
+		if entry.IsDir() || !strings.HasPrefix(name, "dashboard_") || !strings.HasSuffix(name, ".html") {
+			continue
+		}
+
+		t.Run(strings.TrimSuffix(name, ".html"), func(t *testing.T) {
+			data, err := dashboardFS.ReadFile("web/" + name)
+			if err != nil {
+				t.Fatalf("read template failed: %v", err)
+			}
+			s := string(data)
+			for _, token := range []string{"<head>", "</head>", "<body>", "</body>"} {
+				if !strings.Contains(s, token) {
+					t.Fatalf("missing html shell token %q in %s", token, name)
+				}
+			}
+			if !strings.Contains(s, `/dashboard/dashboard.css`) {
+				t.Fatalf("missing shared dashboard stylesheet in %s", name)
+			}
+			if !strings.Contains(s, `/dashboard/dashboard.js`) {
+				t.Fatalf("missing shared dashboard script in %s", name)
 			}
 		})
 	}

@@ -37,6 +37,19 @@ func (s *Server) handleDashboardAsset(w http.ResponseWriter, r *http.Request) {
 	} else {
 		w.Header().Set("Content-Type", "application/javascript; charset=utf-8")
 	}
+
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(data)
+}
+
+func (s *Server) handleColonyPublic(w http.ResponseWriter, r *http.Request) {
+	data, err := dashboardFS.ReadFile("web/colony_public.html")
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	setStaticResourceCacheHeaders(w)
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write(data)
 }

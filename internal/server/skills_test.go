@@ -26,6 +26,8 @@ func TestHostedSkillRoutes(t *testing.T) {
 		{path: "/ganglia-stack.md", wantBody: "## Ganglia Versus Other Domains", wantType: "text/markdown; charset=utf-8"},
 		{path: "/governance.md", wantBody: "## Decision Framework", wantType: "text/markdown; charset=utf-8"},
 		{path: "/upgrade-clawcolony.md", wantBody: "judgement=agree|disagree", wantType: "text/markdown; charset=utf-8"},
+		{path: "/outreach.md", wantBody: "# Outreach", wantType: "text/markdown; charset=utf-8"},
+		{path: "/skills/outreach.md", wantBody: "# Outreach", wantType: "text/markdown; charset=utf-8"},
 		{path: "/skills/heartbeat.md", wantBody: "# Heartbeat", wantType: "text/markdown; charset=utf-8"},
 		{path: "/skills/upgrade-clawcolony.md", wantBody: "# Upgrade Clawcolony", wantType: "text/markdown; charset=utf-8"},
 	}
@@ -278,6 +280,7 @@ func TestHostedSkillAuthExamplesUseCredentialsJSON(t *testing.T) {
 		"/ganglia-stack.md",
 		"/governance.md",
 		"/upgrade-clawcolony.md",
+		"/outreach.md",
 	} {
 		w := doJSONRequest(t, srv.mux, http.MethodGet, path, nil)
 		if w.Code != http.StatusOK {
@@ -392,6 +395,70 @@ func TestHostedSkillUsesConfiguredSkillAndPublicHosts(t *testing.T) {
 			}
 			if !strings.Contains(body, "clawcolony/clawcolony") {
 				t.Fatalf("%s missing configured repo slug: %s", path, body)
+			}
+		}
+	}
+}
+
+func TestOutreachSkillContent(t *testing.T) {
+	srv := newTestServer()
+
+	w := doJSONRequest(t, srv.mux, http.MethodGet, "/outreach.md", nil)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
+	}
+	body := w.Body.String()
+	for _, marker := range []string{
+		"# Outreach",
+		"/api/v1/colony/status",
+		"/api/v1/mail/send",
+		"/skill.md",
+	} {
+		if !strings.Contains(body, marker) {
+			t.Fatalf("outreach skill missing marker %q", marker)
+		}
+	}
+}
+
+func TestRootSkillIncludesOutreachRouting(t *testing.T) {
+	srv := newTestServer()
+
+	w := doJSONRequest(t, srv.mux, http.MethodGet, "/skill.md", nil)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
+	}
+	body := w.Body.String()
+	if !strings.Contains(body, "outreach") {
+		t.Fatalf("root skill missing outreach routing entry")
+	}
+	if !strings.Contains(body, "OUTREACH.md") {
+		t.Fatalf("root skill missing OUTREACH.md in file listing")
+	}
+}
+
+func TestColonyPublicPageLoads(t *testing.T) {
+	srv := newTestServer()
+
+	for _, route := range []string{"/colony", "/colony/"} {
+		w := doJSONRequest(t, srv.mux, http.MethodGet, route, nil)
+		if w.Code != http.StatusOK {
+			t.Fatalf("route=%s status=%d body=%s", route, w.Code, w.Body.String())
+		}
+		ct := w.Header().Get("Content-Type")
+		if ct != "text/html; charset=utf-8" {
+			t.Fatalf("route=%s content-type=%q", route, ct)
+		}
+		body := w.Body.String()
+		for _, marker := range []string{
+			"Claw Colony",
+			"/api/v1/colony/status",
+			"/api/v1/colony/directory",
+			"/api/v1/colony/chronicle",
+			"/api/v1/tian-dao/law",
+			"/skill.md",
+		} {
+			if !strings.Contains(body, marker) {
+				t.Fatalf("colony public page missing marker %q", marker)
 			}
 		}
 	}

@@ -40,6 +40,8 @@ var hostedSkillAssets = map[string]hostedSkillAsset{
 	"/skills/ganglia-stack.md":      {file: "skillhost/skills/ganglia-stack.md", contentType: "text/markdown; charset=utf-8"},
 	"/skills/governance.md":         {file: "skillhost/skills/governance.md", contentType: "text/markdown; charset=utf-8"},
 	"/skills/upgrade-clawcolony.md": {file: "skillhost/skills/upgrade-clawcolony.md", contentType: "text/markdown; charset=utf-8"},
+	"/outreach.md":                 {file: "skillhost/skills/outreach.md", contentType: "text/markdown; charset=utf-8"},
+	"/skills/outreach.md":          {file: "skillhost/skills/outreach.md", contentType: "text/markdown; charset=utf-8"},
 }
 
 func (s *Server) handleHostedSkill(w http.ResponseWriter, r *http.Request) {

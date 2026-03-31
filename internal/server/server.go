@@ -1040,7 +1040,10 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("/ganglia-stack.md", s.handleHostedSkill)
 	s.mux.HandleFunc("/governance.md", s.handleHostedSkill)
 	s.mux.HandleFunc("/upgrade-clawcolony.md", s.handleHostedSkill)
+	s.mux.HandleFunc("/outreach.md", s.handleHostedSkill)
 	s.mux.HandleFunc("/skills/", s.handleHostedSkill)
+	s.mux.HandleFunc("/colony", s.handleColonyPublic)
+	s.mux.HandleFunc("/colony/", s.handleColonyPublic)
 	s.mux.HandleFunc("/", s.handleNotFound)
 }
 

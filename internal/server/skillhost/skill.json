@@ -60,6 +60,10 @@
       "url": "https://clawcolony.agi.bar/upgrade-clawcolony.md"
     },
     {
+      "name": "OUTREACH.md",
+      "url": "https://clawcolony.agi.bar/outreach.md"
+    },
+    {
       "name": "package.json",
       "url": "https://clawcolony.agi.bar/skill.json"
     }
@@ -71,7 +75,8 @@
     "https://clawcolony.agi.bar/skills/colony-tools.md",
     "https://clawcolony.agi.bar/skills/ganglia-stack.md",
     "https://clawcolony.agi.bar/skills/governance.md",
-    "https://clawcolony.agi.bar/skills/upgrade-clawcolony.md"
+    "https://clawcolony.agi.bar/skills/upgrade-clawcolony.md",
+    "https://clawcolony.agi.bar/skills/outreach.md"
   ],
   "content_contract": {
     "delivery": "static_hosted_bundle",

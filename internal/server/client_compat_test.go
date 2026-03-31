@@ -296,7 +296,7 @@ func TestKBLegacyProposalPayloadsRemainUsableWithoutCategoryAndReferences(t *tes
 			"op_type":     "add",
 			"section":     "governance/runtime",
 			"title":       "Runtime collaboration policy",
-			"new_content": "runtime policy details here",
+			"new_content": kbProposalLongContent("runtime policy details here"),
 			"diff_text":   "diff: clarify runtime collaboration guardrails",
 		},
 	}, proposer.headers())
@@ -330,7 +330,7 @@ func TestKBLegacyProposalPayloadsRemainUsableWithoutCategoryAndReferences(t *tes
 			"op_type":     "add",
 			"section":     "governance/runtime",
 			"title":       "Runtime collaboration policy",
-			"new_content": "runtime collaboration guardrails v2",
+			"new_content": kbProposalLongContent("runtime collaboration guardrails v2"),
 			"diff_text":   "diff: refine review and voting requirements",
 		},
 	}, reviser.headers())
@@ -406,7 +406,7 @@ func TestKBProposalExplicitCategoryOverrideStillWorks(t *testing.T) {
 			"op_type":     "add",
 			"section":     "governance/runtime",
 			"title":       "Custom category proposal",
-			"new_content": "runtime policy details here",
+			"new_content": kbProposalLongContent("runtime policy details here"),
 			"diff_text":   "diff: validate explicit category override",
 		},
 	}, proposer.headers())
@@ -443,7 +443,7 @@ func TestProposalWindowDefaultsAlignWithHeartbeatCadence(t *testing.T) {
 			"op_type":     "add",
 			"section":     "governance/runtime",
 			"title":       "Heartbeat aligned defaults",
-			"new_content": "Proposal stages should remain visible long enough for heartbeat-driven agents.",
+			"new_content": kbProposalLongContent("Proposal stages should remain visible long enough for heartbeat-driven agents"),
 			"diff_text":   "diff: align proposal stage defaults with heartbeat cadence",
 		},
 	}, proposer.headers())
@@ -542,7 +542,7 @@ func TestProposalWindowInputsMustStayWithinOneToTwelveHours(t *testing.T) {
 				"op_type":     "add",
 				"section":     "governance/runtime",
 				"title":       "Too short proposal window",
-				"new_content": "This should be rejected because the vote window is too short.",
+				"new_content": kbProposalLongContent("This should be rejected because the vote window is too short"),
 				"diff_text":   "diff: reject vote windows shorter than one hour",
 			},
 		}, proposer.headers())
@@ -564,7 +564,7 @@ func TestProposalWindowInputsMustStayWithinOneToTwelveHours(t *testing.T) {
 				"op_type":     "add",
 				"section":     "governance/runtime",
 				"title":       "Too long proposal window",
-				"new_content": "This should be rejected because the discussion window is too long.",
+				"new_content": kbProposalLongContent("This should be rejected because the discussion window is too long"),
 				"diff_text":   "diff: reject discussion windows longer than twelve hours",
 			},
 		}, proposer.headers())
@@ -588,7 +588,7 @@ func TestProposalRevisionWindowInputsMustStayWithinOneToTwelveHours(t *testing.T
 			"op_type":     "add",
 			"section":     "governance/runtime",
 			"title":       "Revision window bounds",
-			"new_content": "Proposal text for revise deadline testing.",
+			"new_content": kbProposalLongContent("Proposal text for revise deadline testing"),
 			"diff_text":   "diff: create proposal for revise deadline bounds",
 		},
 	}, proposer.headers())
@@ -610,7 +610,7 @@ func TestProposalRevisionWindowInputsMustStayWithinOneToTwelveHours(t *testing.T
 			"op_type":     "add",
 			"section":     "governance/runtime",
 			"title":       "Revision window bounds",
-			"new_content": "Revised text with an invalid short deadline.",
+			"new_content": kbProposalLongContent("Revised text with an invalid short deadline"),
 			"diff_text":   "diff: reject revised discussion window shorter than one hour",
 		},
 	}, proposer.headers())

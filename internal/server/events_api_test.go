@@ -1591,7 +1591,7 @@ func seedKnowledgeEventsFixture(t *testing.T, srv *Server, ctx context.Context) 
 				"op_type":     "add",
 				"section":     "governance",
 				"title":       title,
-				"new_content": "runtime policy details",
+				"new_content": kbProposalLongContent("runtime policy details"),
 				"diff_text":   diffText,
 			},
 		}, actor.headers())
@@ -1674,7 +1674,7 @@ func seedKnowledgeEventsFixture(t *testing.T, srv *Server, ctx context.Context) 
 			"op_type":     "add",
 			"section":     "governance",
 			"title":       "运行时协作规范",
-			"new_content": "runtime collaboration guardrails v2",
+			"new_content": kbProposalLongContent("runtime collaboration guardrails v2"),
 			"diff_text":   "diff: refine review and voting requirements",
 		},
 	}, reviewer.headers())

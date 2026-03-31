@@ -26,7 +26,7 @@ func createKBProposalForMailNoiseTest(t *testing.T, srv *Server, proposer authUs
 			"op_type":     "add",
 			"section":     "runtime-mail",
 			"title":       title,
-			"new_content": "mail noise reduction KB proposal content",
+			"new_content": kbProposalLongContent("mail noise reduction KB proposal content"),
 			"diff_text":   "mail noise reduction KB proposal diff",
 		},
 	}, proposer.headers())
@@ -87,7 +87,7 @@ func TestKBPendingSummaryLimitsRecipientMailButPreservesBacklog(t *testing.T) {
 				"op_type":     "add",
 				"section":     "runtime-mail",
 				"title":       title,
-				"new_content": "concrete knowledge content for pending summary delivery tests",
+				"new_content": kbProposalLongContent("concrete knowledge content for pending summary delivery tests"),
 				"diff_text":   "add pending summary coverage for noisy KB reminder flows",
 			},
 		}
@@ -233,10 +233,10 @@ func TestKBPendingSummaryManualReadDismissesUntilStateChange(t *testing.T) {
 func TestKBPendingSummaryDoesNotTruncateItemsAboveTwenty(t *testing.T) {
 	srv := newTestServer()
 	ctx := context.Background()
-	proposer := newAuthUser(t, srv)
 	recipient := newAuthUser(t, srv)
 
 	for i := 1; i <= 21; i++ {
+		proposer := newAuthUser(t, srv)
 		createKBProposalForMailNoiseTest(t, srv, proposer, fmt.Sprintf("bulk-%02d", i), fmt.Sprintf("reason-%02d", i))
 	}
 
@@ -730,7 +730,7 @@ func TestMailInboxAutoMarksClosedKBEnrollmentSummaryRead(t *testing.T) {
 			"op_type":     "add",
 			"section":     "runtime-mail",
 			"title":       "closed-enroll-summary",
-			"new_content": "stale enrollment summary test",
+			"new_content": kbProposalLongContent("stale enrollment summary test"),
 			"diff_text":   "auto-read stale KB enrollment summary",
 		},
 	}, proposer.headers())
@@ -791,7 +791,7 @@ func TestMailInboxAutoMarksClosedLegacyKBEnrollMailWithoutRevisionRead(t *testin
 			"op_type":     "add",
 			"section":     "runtime-mail",
 			"title":       "closed-legacy-enroll-no-revision",
-			"new_content": "stale legacy enroll reminder without revision fields",
+			"new_content": kbProposalLongContent("stale legacy enroll reminder without revision fields"),
 			"diff_text":   "auto-read stale legacy KB enroll mail without revision fields",
 		},
 	}, proposer.headers())
@@ -854,7 +854,7 @@ func TestMailRemindersAutoMarksClosedKBVoteReminderRead(t *testing.T) {
 			"op_type":     "add",
 			"section":     "runtime-mail",
 			"title":       "closed-vote-reminder",
-			"new_content": "stale vote reminder test",
+			"new_content": kbProposalLongContent("stale vote reminder test"),
 			"diff_text":   "auto-read stale KB vote reminder",
 		},
 	}, proposer.headers())
@@ -924,7 +924,7 @@ func TestMailRemindersAutoMarksClosedLegacyKBVoteReminderRead(t *testing.T) {
 			"op_type":     "add",
 			"section":     "runtime-mail",
 			"title":       "closed-legacy-vote-reminder",
-			"new_content": "stale legacy vote reminder test",
+			"new_content": kbProposalLongContent("stale legacy vote reminder test"),
 			"diff_text":   "auto-read stale legacy KB vote reminder",
 		},
 	}, proposer.headers())
@@ -1001,7 +1001,7 @@ func TestMailSystemResolveObsoleteKBDryRunDoesNotMutate(t *testing.T) {
 			"op_type":     "add",
 			"section":     "runtime-mail",
 			"title":       "obsolete-kb-dry-run",
-			"new_content": "dry run cleanup test",
+			"new_content": kbProposalLongContent("dry run cleanup test"),
 			"diff_text":   "dry run obsolete KB cleanup should not mutate unread mail",
 		},
 	}, proposer.headers())
@@ -1347,7 +1347,7 @@ func TestMailSystemResolveObsoleteKBOnlyRequestedClasses(t *testing.T) {
 			"op_type":     "add",
 			"section":     "runtime-mail",
 			"title":       "obsolete-class-filter",
-			"new_content": "class filtering cleanup test",
+			"new_content": kbProposalLongContent("class filtering cleanup test"),
 			"diff_text":   "only low-token cleanup should not touch stale KB mail",
 		},
 	}, proposer.headers())
@@ -1458,7 +1458,7 @@ func TestMailSystemResolveObsoleteKBOnlyKBUpdatesClassLeavesKBPendingUnread(t *t
 			"op_type":     "add",
 			"section":     "runtime-mail",
 			"title":       "kb-pending-survives-kb-updated-cleanup",
-			"new_content": "pending KB mail should stay unread",
+			"new_content": kbProposalLongContent("pending KB mail should stay unread"),
 			"diff_text":   "kb updates cleanup should not touch KB pending unread",
 		},
 	}, pendingProposer.headers())
@@ -1609,7 +1609,7 @@ func TestMailSystemResolveObsoleteKBScansRegisteredOwnersWithoutBots(t *testing.
 			"op_type":     "add",
 			"section":     "runtime-mail",
 			"title":       "obsolete-kb-registration-owner",
-			"new_content": "registration owner cleanup test",
+			"new_content": kbProposalLongContent("registration owner cleanup test"),
 			"diff_text":   "obsolete KB cleanup should scan registration owners without active bots",
 		},
 	}, proposer.headers())

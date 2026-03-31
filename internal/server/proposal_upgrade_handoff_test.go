@@ -39,7 +39,7 @@ func createAppliedGovernanceProposalForTest(t *testing.T, srv *Server, proposer,
 			"op_type":     "add",
 			"section":     "governance/runtime",
 			"title":       "Token issuance rule",
-			"new_content": "The colony should use a more predictable token issuance rule.",
+			"new_content": kbProposalLongContent("The colony should use a more predictable token issuance rule"),
 			"diff_text":   "diff: define a predictable token issuance rule",
 		},
 	}, proposer.headers())

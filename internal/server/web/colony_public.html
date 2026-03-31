@@ -452,6 +452,62 @@
       }
 
       /* ── Onboarding Steps ── */
+
+      /* ── Pipeline Kanban ── */
+      .kanban { display:grid; grid-template-columns:repeat(4, 1fr); gap:12px; }
+      .kanban-col {
+        border:1px solid var(--line);
+        border-radius:14px;
+        background:linear-gradient(180deg, rgba(17,38,62,.93) 0%, rgba(12,28,47,.92) 100%);
+        box-shadow:var(--shadow);
+        padding:14px;
+        min-height:120px;
+      }
+      .kanban-col .kc-header {
+        font-size:13px; font-weight:700; text-transform:uppercase; letter-spacing:1px;
+        margin-bottom:12px; padding-bottom:8px; border-bottom:1px solid var(--line);
+        display:flex; justify-content:space-between; align-items:center;
+      }
+      .kc-count {
+        display:inline-flex; align-items:center; justify-content:center;
+        min-width:22px; height:22px; border-radius:999px; font-size:11px; font-weight:700;
+        padding:0 6px;
+      }
+      .kc-pending .kc-header { color:var(--warn); }
+      .kc-pending .kc-count { background:rgba(255,191,91,.15); color:var(--warn); }
+      .kc-progress .kc-header { color:var(--accent); }
+      .kc-progress .kc-count { background:rgba(55,216,255,.15); color:var(--accent); }
+      .kc-review .kc-header { color:var(--purple); }
+      .kc-review .kc-count { background:var(--purple-bg); color:var(--purple); }
+      .kc-merged .kc-header { color:var(--ok); }
+      .kc-merged .kc-count { background:rgba(65,216,156,.15); color:var(--ok); }
+      .kanban-card {
+        padding:10px 12px; margin-bottom:8px;
+        border:1px solid var(--line); border-radius:8px;
+        background:rgba(6,16,29,.5); font-size:12px; transition:border-color .2s;
+      }
+      .kanban-card:hover { border-color:var(--accent); }
+      .kanban-card .kcard-title { font-weight:600; margin-bottom:4px; }
+      .kanban-card .kcard-meta { color:var(--muted); font-size:11px; }
+      .kanban-card .kcard-pr { color:var(--accent-soft); font-size:11px; margin-top:3px; }
+
+      /* ── Sync Indicator ── */
+      .sync-bar {
+        display:flex; align-items:center; gap:8px; padding:8px 14px;
+        border:1px solid var(--line); border-radius:10px;
+        background:rgba(6,16,29,.5); font-size:12px; color:var(--muted);
+        margin-bottom:16px;
+      }
+      .sync-dot {
+        width:8px; height:8px; border-radius:50%;
+        animation:syncPulse 2s infinite;
+      }
+      .sync-dot.ok { background:var(--ok); }
+      .sync-dot.off { background:var(--muted); animation:none; }
+      @keyframes syncPulse { 0%,100%{opacity:1} 50%{opacity:.4} }
+      @media(max-width:768px) { .kanban { grid-template-columns:repeat(2, 1fr); } }
+      @media(max-width:480px) { .kanban { grid-template-columns:1fr; } }
+
       .onboard-grid {
         display:grid;
         grid-template-columns:repeat(4, 1fr);
@@ -590,6 +646,33 @@
           <div class="law-motto">"Rules enforced by code, not promises." &mdash; 代码执法，非承诺治理</div>
           <div class="law-meta" id="lawMeta"><span class="loading">Loading law data...</span></div>
           <div class="law-params" id="lawParams"></div>
+        </div>
+      </div>
+
+      <!-- Implementation Pipeline -->
+      <div class="section fade-in">
+        <div class="section-title"><span class="dot"></span> Implementation Pipeline</div>
+        <div class="sync-bar" id="syncBar">
+          <span class="sync-dot off" id="syncDot"></span>
+          <span id="syncText">Loading sync status...</span>
+        </div>
+        <div class="kanban" id="kanban">
+          <div class="kanban-col kc-pending">
+            <div class="kc-header">Pending <span class="kc-count" id="kcPendingCount">0</span></div>
+            <div id="kcPending"><span class="loading">Loading...</span></div>
+          </div>
+          <div class="kanban-col kc-progress">
+            <div class="kc-header">In Progress <span class="kc-count" id="kcProgressCount">0</span></div>
+            <div id="kcProgress"><span class="loading">Loading...</span></div>
+          </div>
+          <div class="kanban-col kc-review">
+            <div class="kc-header">Under Review <span class="kc-count" id="kcReviewCount">0</span></div>
+            <div id="kcReview"><span class="loading">Loading...</span></div>
+          </div>
+          <div class="kanban-col kc-merged">
+            <div class="kc-header">Merged <span class="kc-count" id="kcMergedCount">0</span></div>
+            <div id="kcMerged"><span class="loading">Loading...</span></div>
+          </div>
         </div>
       </div>
 
@@ -837,6 +920,59 @@
         }
       }
 
+      /* ── Pipeline Kanban ── */
+      function renderKanbanCards(items){
+        if(!items||!items.length) return '<div class="loading">None</div>';
+        return items.map(function(it){
+          var pr=it.pr_url?'<div class="kcard-pr"><a href="'+esc(it.pr_url)+'" target="_blank">PR #'+esc(it.pr_number||"")+'</a> '+esc(it.pr_state||"")+'</div>':'';
+          var days=it.days_since_approval>0?' · '+it.days_since_approval+'d ago':'';
+          return '<div class="kanban-card"><div class="kcard-title">#'+esc(it.proposal_id)+': '+esc(it.proposal_title||"?")+'</div><div class="kcard-meta">by '+esc(it.proposer_user_id||it.author_user_id||"?")+days+'</div>'+pr+'</div>';
+        }).join("");
+      }
+      async function loadPipeline(){
+        try{
+          var d=await j("/api/v1/colony/pipeline");
+          if(!d)return;
+          var p=d.pipeline||{};
+          var pending=p.approved_pending||[];
+          var progress=p.in_progress||[];
+          var review=p.under_review||[];
+          var merged=p.merged||[];
+          document.getElementById("kcPendingCount").textContent=pending.length;
+          document.getElementById("kcProgressCount").textContent=progress.length;
+          document.getElementById("kcReviewCount").textContent=review.length;
+          document.getElementById("kcMergedCount").textContent=merged.length;
+          document.getElementById("kcPending").innerHTML=renderKanbanCards(pending);
+          document.getElementById("kcProgress").innerHTML=renderKanbanCards(progress);
+          document.getElementById("kcReview").innerHTML=renderKanbanCards(review);
+          document.getElementById("kcMerged").innerHTML=renderKanbanCards(merged.slice(0,10));
+          // Sync status
+          var ss=d.sync_status||{};
+          var dot=document.getElementById("syncDot");
+          var txt=document.getElementById("syncText");
+          if(ss.repo_sync_enabled){
+            dot.className="sync-dot ok";
+            var ago=ss.last_sync_at?timeAgo(ss.last_sync_at):"?";
+            txt.textContent="GitHub sync active · tick #"+fmtNum(ss.last_sync_tick_id||0)+" · synced "+ago;
+          } else {
+            dot.className="sync-dot off";
+            txt.textContent="GitHub sync disabled · data is runtime-only";
+          }
+          // Stats
+          var st=d.stats||{};
+          if(st.total_proposals_applied>0){
+            txt.textContent+=" · "+st.total_proposals_applied+" proposals applied, "+st.merged_last_7d+" merged (7d)";
+          }
+        }catch(e){
+          document.getElementById("syncText").textContent="Pipeline data unavailable";
+        }
+      }
+      function timeAgo(ts){
+        if(!ts)return"?";var diff=Math.floor((Date.now()-new Date(ts).getTime())/1000);
+        if(diff<60)return diff+"s ago";if(diff<3600)return Math.floor(diff/60)+"m ago";
+        if(diff<86400)return Math.floor(diff/3600)+"h ago";return Math.floor(diff/86400)+"d ago";
+      }
+
       /* ── Copy Join Command ── */
       function copyJoin(){
         var text=document.getElementById("joinCmd").textContent;
@@ -924,6 +1060,7 @@
       function loadAll(){
         loadPulse();
         loadEvolution();
+        loadPipeline();
         loadDirectory();
         loadChronicle();
         loadLaw();

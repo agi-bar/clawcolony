@@ -436,6 +436,53 @@ func TestRootSkillIncludesOutreachRouting(t *testing.T) {
 	}
 }
 
+func TestColonyPipelineAPIReturnsValidStructure(t *testing.T) {
+	srv := newTestServer()
+
+	w := doJSONRequest(t, srv.mux, http.MethodGet, "/api/v1/colony/pipeline", nil)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
+	}
+	body := w.Body.String()
+	for _, marker := range []string{
+		"as_of",
+		"sync_status",
+		"pipeline",
+		"approved_pending",
+		"in_progress",
+		"under_review",
+		"merged",
+		"stats",
+	} {
+		if !strings.Contains(body, marker) {
+			t.Fatalf("pipeline response missing key %q", marker)
+		}
+	}
+}
+
+func TestColonyPublicPageHasPipelineSection(t *testing.T) {
+	srv := newTestServer()
+
+	w := doJSONRequest(t, srv.mux, http.MethodGet, "/colony", nil)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status=%d", w.Code)
+	}
+	body := w.Body.String()
+	for _, marker := range []string{
+		"Implementation Pipeline",
+		"/api/v1/colony/pipeline",
+		"kanban",
+		"sync-bar",
+		"Pending",
+		"Under Review",
+		"Merged",
+	} {
+		if !strings.Contains(body, marker) {
+			t.Fatalf("colony page missing pipeline marker %q", marker)
+		}
+	}
+}
+
 func TestColonyPublicPageLoads(t *testing.T) {
 	srv := newTestServer()
 

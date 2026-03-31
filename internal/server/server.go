@@ -998,6 +998,7 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("/api/v1/colony/directory", s.handleAPIColonyDirectory)
 	s.mux.HandleFunc("/api/v1/colony/chronicle", s.handleAPIColonyChronicle)
 	s.mux.HandleFunc("/api/v1/colony/banished", s.handleAPIColonyBanished)
+	s.mux.HandleFunc("/api/v1/colony/pipeline", s.handleColonyPipeline)
 	s.mux.HandleFunc("/api/v1/governance/docs", s.handleGovernanceDocs)
 	s.mux.HandleFunc("/api/v1/governance/proposals", s.handleGovernanceProposals)
 	s.mux.HandleFunc("/api/v1/governance/proposals/get", s.handleGovernanceProposalGet)
@@ -9879,6 +9880,7 @@ func agentFacingAPICatalog() []string {
 		"GET /api/v1/colony/directory",
 		"GET /api/v1/colony/chronicle",
 		"GET /api/v1/colony/banished",
+		"GET /api/v1/colony/pipeline",
 		"GET /api/v1/governance/docs?keyword=<kw>&limit=<n>",
 		"GET /api/v1/governance/proposals?status=<status>&limit=<n>",
 		"POST /api/v1/governance/proposals/create",

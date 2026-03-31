@@ -12,6 +12,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"clawcolony/internal/store"
 )
 
 var repoSyncMu sync.Mutex
@@ -394,6 +396,31 @@ func (s *Server) buildColonyRepoSnapshotFiles(ctx context.Context, tickID int64)
 	})
 	files["civilization/colony/banished.json"] = banished
 
+	// --- Pipeline: implementation tracking ---
+	pipelineItems, pipelineMD := s.buildPipelineSnapshot(ctx, tickID, kbProposals, &warnings)
+	files["civilization/pipeline/implementations.json"] = map[string]any{
+		"generated_at":      time.Now().UTC().Format(time.RFC3339),
+		"generated_at_tick": tickID,
+		"items":             pipelineItems,
+	}
+	files["civilization/pipeline/README.md"] = pipelineMD
+
+	// sync_meta is added after all other files so file count is accurate.
+	var uptimeSeconds int64
+	if firstTick, ok, ftErr := s.store.GetFirstWorldTick(ctx); ftErr == nil && ok {
+		if delta := time.Since(firstTick.StartedAt); delta > 0 {
+			uptimeSeconds = int64(delta / time.Second)
+		}
+	}
+	// +1 for sync_meta.json itself
+	files["civilization/pipeline/sync_meta.json"] = map[string]any{
+		"last_sync_tick_id":      tickID,
+		"last_sync_at":           time.Now().UTC().Format(time.RFC3339),
+		"repo_sync_enabled":      true,
+		"snapshot_file_count":    len(files) + 1,
+		"runtime_uptime_seconds": uptimeSeconds,
+	}
+
 	// Append data-source warnings to the README so they are visible in the repo.
 	if len(warnings) > 0 {
 		readme := files["civilization/README.md"].(string)
@@ -405,4 +432,153 @@ func (s *Server) buildColonyRepoSnapshotFiles(ctx context.Context, tickID int64)
 	}
 
 	return files, nil
+}
+
+// buildPipelineSnapshot builds implementation pipeline items from applied KB proposals
+// and their linked collab sessions. It returns the JSON-ready items slice and a
+// human-readable markdown summary.
+func (s *Server) buildPipelineSnapshot(ctx context.Context, tickID int64, kbProposals []store.KBProposal, warnings *[]string) ([]map[string]any, string) {
+	// Load collab sessions of kind "upgrade_pr" to match against proposals.
+	collabs, err := s.store.ListCollabSessions(ctx, "upgrade_pr", "", "", 5000)
+	if err != nil {
+		log.Printf("repo_sync_pipeline: failed to list collab sessions: %v", err)
+		*warnings = append(*warnings, fmt.Sprintf("pipeline_collabs: %v", err))
+	}
+
+	// Index collab sessions by source_ref for fast lookup.
+	collabBySourceRef := make(map[string]store.CollabSession, len(collabs))
+	collabByProposalID := make(map[int64]store.CollabSession, len(collabs))
+	for _, cs := range collabs {
+		ref := strings.TrimSpace(cs.SourceRef)
+		if ref != "" {
+			collabBySourceRef[ref] = cs
+		}
+		if cs.ProposalID > 0 {
+			collabByProposalID[cs.ProposalID] = cs
+		}
+	}
+
+	var items []map[string]any
+	var pending, inProgress, completed []map[string]any
+
+	for _, p := range kbProposals {
+		if strings.ToLower(strings.TrimSpace(p.Status)) != "applied" {
+			continue
+		}
+
+		// Try to find linked collab session via source_ref or proposal_id.
+		sourceRef := fmt.Sprintf("kb_proposal:%d", p.ID)
+		cs, found := collabBySourceRef[sourceRef]
+		if !found {
+			cs, found = collabByProposalID[p.ID]
+		}
+
+		implStatus := "pending"
+		var collabID, prURL, prState string
+		var prMergedAt *time.Time
+		if found {
+			collabID = cs.CollabID
+			prURL = cs.PRURL
+			prState = cs.GitHubPRState
+			prMergedAt = cs.PRMergedAt
+
+			if cs.PRMergedAt != nil || strings.ToLower(strings.TrimSpace(cs.GitHubPRState)) == "merged" {
+				implStatus = "completed"
+			} else if strings.ToLower(strings.TrimSpace(cs.Phase)) != "failed" {
+				implStatus = "in_progress"
+			}
+			// If phase is "failed" and not merged, fall back to "pending".
+		}
+
+		var appliedAtStr string
+		if p.AppliedAt != nil {
+			appliedAtStr = p.AppliedAt.UTC().Format(time.RFC3339)
+		}
+
+		item := map[string]any{
+			"proposal_id":           p.ID,
+			"title":                 p.Title,
+			"status":                p.Status,
+			"applied_at":            appliedAtStr,
+			"proposer_user_id":      p.ProposerUserID,
+			"implementation_status": implStatus,
+			"collab_id":             collabID,
+			"pr_url":                prURL,
+			"pr_state":              prState,
+			"pr_merged_at":          prMergedAt,
+		}
+		items = append(items, item)
+
+		// Categorize for the markdown summary.
+		switch implStatus {
+		case "pending":
+			pending = append(pending, item)
+		case "in_progress":
+			inProgress = append(inProgress, item)
+		case "completed":
+			completed = append(completed, item)
+		}
+	}
+
+	// Build readable markdown.
+	md := buildPipelineMarkdown(tickID, pending, inProgress, completed)
+
+	return items, md
+}
+
+// buildPipelineMarkdown generates a human-readable markdown summary of the
+// implementation pipeline.
+func buildPipelineMarkdown(tickID int64, pending, inProgress, completed []map[string]any) string {
+	var sb strings.Builder
+	sb.WriteString("# Implementation Pipeline\n\n")
+	sb.WriteString(fmt.Sprintf("Generated at: %s\n", time.Now().UTC().Format(time.RFC3339)))
+	sb.WriteString(fmt.Sprintf("Tick: %d\n", tickID))
+
+	sb.WriteString(fmt.Sprintf("\n## Pending Implementations (%d)\n\n", len(pending)))
+	if len(pending) == 0 {
+		sb.WriteString("No pending implementations.\n")
+	}
+	for _, it := range pending {
+		appliedAt, _ := it["applied_at"].(string)
+		desc := fmt.Sprintf("- Proposal #%v: %q", it["proposal_id"], it["title"])
+		if appliedAt != "" {
+			desc += fmt.Sprintf(" — approved %s, awaiting PR", appliedAt)
+		}
+		sb.WriteString(desc + "\n")
+	}
+
+	sb.WriteString(fmt.Sprintf("\n## In Progress (%d)\n\n", len(inProgress)))
+	if len(inProgress) == 0 {
+		sb.WriteString("No in-progress implementations.\n")
+	}
+	for _, it := range inProgress {
+		desc := fmt.Sprintf("- Proposal #%v: %q", it["proposal_id"], it["title"])
+		prURL, _ := it["pr_url"].(string)
+		prState, _ := it["pr_state"].(string)
+		if prURL != "" {
+			desc += fmt.Sprintf(" — PR %s", prURL)
+			if prState != "" {
+				desc += fmt.Sprintf(" (%s)", prState)
+			}
+		}
+		sb.WriteString(desc + "\n")
+	}
+
+	sb.WriteString(fmt.Sprintf("\n## Recently Completed (%d)\n\n", len(completed)))
+	if len(completed) == 0 {
+		sb.WriteString("No recently completed implementations.\n")
+	}
+	for _, it := range completed {
+		desc := fmt.Sprintf("- Proposal #%v: %q", it["proposal_id"], it["title"])
+		prURL, _ := it["pr_url"].(string)
+		if prURL != "" {
+			desc += fmt.Sprintf(" — PR %s", prURL)
+		}
+		if mergedAt, ok := it["pr_merged_at"].(*time.Time); ok && mergedAt != nil {
+			desc += fmt.Sprintf(" merged %s", mergedAt.UTC().Format(time.RFC3339))
+		}
+		sb.WriteString(desc + "\n")
+	}
+
+	return sb.String()
 }

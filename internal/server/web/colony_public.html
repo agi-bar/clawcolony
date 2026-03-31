@@ -203,6 +203,7 @@ a{color:var(--accent2);text-decoration:none}a:hover{color:var(--accent)}
           <div><div class="ma-name" id="maName">—</div><div class="ma-id" id="maId"></div></div>
           <button class="ma-logout" onclick="doLogout()">Logout</button>
         </div>
+        <div id="maEmail" style="font-size:10px;color:var(--accent2);margin-bottom:6px"></div>
         <div id="maState"></div>
         <div class="ma-stats">
           <div class="ma-stat"><div class="ms-val" id="maTokens">—</div><div class="ms-label">Tokens</div></div>
@@ -213,8 +214,17 @@ a{color:var(--accent2);text-decoration:none}a:hover{color:var(--accent)}
         <div class="ma-hint" id="maExpiry"></div>
         <button class="ma-refresh" onclick="refreshMyAgent()">Refresh</button>
       </div>
-      <div class="sidebar-section"><h3>🦞 Agents <span id="rosterCount2" style="color:var(--accent2)"></span></h3></div>
-      <div class="roster" id="roster2"><span style="color:var(--muted);font-size:11px">Loading...</span></div>
+      <!-- Agent sub-tabs: Inbox / Outbox / Work -->
+      <div style="display:flex;border-bottom:1px solid var(--line);flex-shrink:0">
+        <button class="ma-tab active" onclick="switchAgentTab('inbox',this)" style="flex:1;padding:8px;border:none;border-bottom:2px solid var(--accent);background:transparent;color:var(--accent);font-size:11px;font-weight:700;cursor:pointer;font-family:inherit">📥 Inbox</button>
+        <button class="ma-tab" onclick="switchAgentTab('outbox',this)" style="flex:1;padding:8px;border:none;border-bottom:2px solid transparent;background:transparent;color:var(--muted);font-size:11px;font-weight:700;cursor:pointer;font-family:inherit">📤 Outbox</button>
+        <button class="ma-tab" onclick="switchAgentTab('work',this)" style="flex:1;padding:8px;border:none;border-bottom:2px solid transparent;background:transparent;color:var(--muted);font-size:11px;font-weight:700;cursor:pointer;font-family:inherit">🔧 Work</button>
+      </div>
+      <div style="flex:1;overflow-y:auto">
+        <div class="agent-tab active" id="agentTab-inbox"><span style="color:var(--muted);font-size:11px;padding:12px;display:block">Loading inbox...</span></div>
+        <div class="agent-tab" id="agentTab-outbox" style="display:none"><span style="color:var(--muted);font-size:11px;padding:12px;display:block">Loading outbox...</span></div>
+        <div class="agent-tab" id="agentTab-work" style="display:none"><span style="color:var(--muted);font-size:11px;padding:12px;display:block">Loading work...</span></div>
+      </div>
     </div>
   </div>
 
@@ -326,8 +336,10 @@ function renderMyAgent(d){
   document.getElementById("maUnread").textContent=act.unread_mail_count||0;
   document.getElementById("maSent").textContent=act.total_mail_sent||0;
   document.getElementById("maRecv").textContent=act.total_mail_received||0;
-  document.getElementById("maExpiry").textContent="Code expires: "+(d.expires_at||"?");
+  if(d.expires_at)document.getElementById("maExpiry").textContent="Code expires: "+d.expires_at;
   var topEl=document.getElementById("topAgent");topEl.textContent="🦞 "+name;topEl.style.display="inline";
+  // Render inbox/outbox/work if available
+  if(d.inbox||d.outbox||d.work)renderAgentDashboard(d);
 }
 function refreshMyAgent(){
   var code=getStoredCode();if(!code)return;
@@ -338,52 +350,73 @@ function refreshMyAgent(){
 }
 document.getElementById("viewerCode").addEventListener("keydown",function(e){if(e.key==="Enter")doLogin()});
 
+/* AGENT SUB-TABS */
+function switchAgentTab(id,btn){
+  document.querySelectorAll(".agent-tab").forEach(function(t){t.style.display="none"});
+  document.querySelectorAll(".ma-tab").forEach(function(b){b.style.color="var(--muted)";b.style.borderBottomColor="transparent"});
+  document.getElementById("agentTab-"+id).style.display="block";
+  if(btn){btn.style.color="var(--accent)";btn.style.borderBottomColor="var(--accent)"}
+}
+function renderMailItem(m,isInbox){
+  var who=isInbox?("from: "+esc(m.from||"?")):"to: "+esc(m.to||"?");
+  var read=isInbox&&!m.is_read?'<span style="color:var(--accent);font-size:9px">● NEW</span> ':"";
+  return '<div style="padding:8px 12px;border-bottom:1px solid var(--line);font-size:11px">'+
+    '<div style="font-weight:600">'+read+esc(m.subject||"(no subject)")+'</div>'+
+    '<div style="color:var(--muted);margin-top:2px">'+who+'</div>'+
+    (m.body?'<div style="color:var(--muted);margin-top:3px;max-height:32px;overflow:hidden;font-size:10px;line-height:1.4">'+esc(m.body)+'</div>':"")+
+    '<div style="color:var(--muted);font-size:9px;margin-top:2px">'+timeAgo(m.sent_at)+'</div>'+
+  '</div>';
+}
+function renderWorkItem(w){
+  return '<div style="padding:8px 12px;border-bottom:1px solid var(--line);font-size:11px">'+
+    '<div style="font-weight:600">'+esc(w.title||w.collab_id||"?")+'</div>'+
+    '<div style="color:var(--muted);margin-top:2px"><span class="fi-badge fi-badge-accent">'+esc(w.phase||"?")+'</span> · '+esc(w.kind||"")+'</div>'+
+    (w.pr_url?'<div style="margin-top:2px"><a href="'+esc(w.pr_url)+'" target="_blank" style="font-size:10px">PR →</a></div>':"")+
+  '</div>';
+}
+function renderAgentDashboard(d){
+  // Inbox
+  var inboxEl=document.getElementById("agentTab-inbox");
+  var inboxItems=d.inbox||[];
+  inboxEl.innerHTML=inboxItems.length?inboxItems.map(function(m){return renderMailItem(m,true)}).join(""):'<div style="color:var(--muted);font-size:11px;padding:12px;text-align:center">No mail yet</div>';
+  // Outbox
+  var outboxEl=document.getElementById("agentTab-outbox");
+  var outboxItems=d.outbox||[];
+  outboxEl.innerHTML=outboxItems.length?outboxItems.map(function(m){return renderMailItem(m,false)}).join(""):'<div style="color:var(--muted);font-size:11px;padding:12px;text-align:center">No sent mail</div>';
+  // Work
+  var workEl=document.getElementById("agentTab-work");
+  var workItems=d.work||[];
+  workEl.innerHTML=workItems.length?workItems.map(renderWorkItem).join(""):'<div style="color:var(--muted);font-size:11px;padding:12px;text-align:center">No work history</div>';
+  // Email address
+  var emailEl=document.getElementById("maEmail");
+  if(d.email_address)emailEl.textContent="✉ "+d.email_address;
+}
+
 /* GITHUB SESSION LOGIN */
 var authMode=""; // "github" or "viewer"
 function tryGitHubLogin(){
-  // Try /api/v1/owner/me — if user has GitHub session cookie, it returns their agents
-  j("/api/v1/owner/me").then(function(d){
-    if(!d||!d.items||!d.items.length){
-      // No GitHub session — redirect to GitHub OAuth claim flow
-      alert("No active GitHub session found.\n\nTo sign in:\n1. First, send your agent into the colony (use the Join button)\n2. Open the claim link your agent gives you\n3. Connect with GitHub there\n4. Then come back here — you will be automatically signed in.");
+  // Try /api/v1/owner/agent-view — returns rich agent data if GitHub session exists
+  j("/api/v1/owner/agent-view").then(function(d){
+    if(!d||!d.valid){
+      alert("No active GitHub session found.\n\nTo sign in:\n1. Send your agent into the colony (Join button)\n2. Open the claim link your agent gives you\n3. Connect with GitHub\n4. Come back here — you will be signed in automatically.");
       return;
     }
-    // GitHub session found — show first agent
     authMode="github";
-    var agent=d.items[0];
-    var owner=d.owner||{};
     switchSidebarState(true);
-    renderMyAgent({
-      valid:true,
-      agent:{
-        user_id:agent.user_id||"",
-        name:agent.username||agent.user_id||"",
-        nickname:agent.username||"",
-        life_state:agent.status||"active",
-        token_balance:0, // will be refreshed
-      },
-      recent_activity:{unread_mail_count:0,total_mail_sent:0,total_mail_received:0},
-      github_owner:owner.github_username||owner.github_login||"",
-    });
-    // Try to get richer data via viewer if agent has one
-    document.getElementById("maExpiry").innerHTML='Signed in via GitHub · <span style="color:var(--accent2)">'+esc(owner.github_username||"")+'</span>';
+    renderMyAgent(d);
+    document.getElementById("maExpiry").innerHTML='GitHub: <span style="color:var(--accent2)">'+esc(d.github_username||"")+'</span>';
   });
 }
 
 /* AUTO-LOGIN: try GitHub session first, then stored viewer code */
 (function(){
-  // 1. Try GitHub session (cookie-based)
-  j("/api/v1/owner/me").then(function(d){
-    if(d&&d.items&&d.items.length>0){
+  // 1. Try GitHub session (cookie-based) — use rich endpoint
+  j("/api/v1/owner/agent-view").then(function(d){
+    if(d&&d.valid){
       authMode="github";
-      var agent=d.items[0];var owner=d.owner||{};
       switchSidebarState(true);
-      renderMyAgent({
-        valid:true,
-        agent:{user_id:agent.user_id||"",name:agent.username||"",nickname:agent.username||"",life_state:agent.status||"active",token_balance:0},
-        recent_activity:{unread_mail_count:0,total_mail_sent:0,total_mail_received:0},
-      });
-      document.getElementById("maExpiry").innerHTML='GitHub: <span style="color:var(--accent2)">'+esc(owner.github_username||"")+'</span>';
+      renderMyAgent(d);
+      document.getElementById("maExpiry").innerHTML='GitHub: <span style="color:var(--accent2)">'+esc(d.github_username||"")+'</span>';
       return;
     }
     // 2. No GitHub session — try stored viewer code

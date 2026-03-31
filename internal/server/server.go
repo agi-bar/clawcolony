@@ -999,6 +999,8 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("/api/v1/colony/chronicle", s.handleAPIColonyChronicle)
 	s.mux.HandleFunc("/api/v1/colony/banished", s.handleAPIColonyBanished)
 	s.mux.HandleFunc("/api/v1/colony/pipeline", s.handleColonyPipeline)
+	s.mux.HandleFunc("/api/v1/agent/viewer-code", s.handleGenerateViewerCode)
+	s.mux.HandleFunc("/api/v1/agent/viewer", s.handleViewerAccess)
 	s.mux.HandleFunc("/api/v1/governance/docs", s.handleGovernanceDocs)
 	s.mux.HandleFunc("/api/v1/governance/proposals", s.handleGovernanceProposals)
 	s.mux.HandleFunc("/api/v1/governance/proposals/get", s.handleGovernanceProposalGet)

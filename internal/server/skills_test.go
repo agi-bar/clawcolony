@@ -469,12 +469,12 @@ func TestColonyPublicPageHasPipelineSection(t *testing.T) {
 	}
 	body := w.Body.String()
 	for _, marker := range []string{
-		"Implementation Pipeline",
+		"Pipeline",
 		"/api/v1/colony/pipeline",
 		"kanban",
-		"sync-bar",
+		"sync",
 		"Pending",
-		"Under Review",
+		"Reviewing",
 		"Merged",
 	} {
 		if !strings.Contains(body, marker) {

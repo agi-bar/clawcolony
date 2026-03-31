@@ -86,6 +86,41 @@ a{color:var(--accent2);text-decoration:none}a:hover{color:var(--accent)}
 .kcard{padding:6px 8px;border:1px solid var(--line);border-radius:4px;background:rgba(6,16,29,.5);margin-bottom:4px;font-size:11px}
 .kcard:hover{border-color:var(--accent)}
 
+/* SIDEBAR STATES */
+.sidebar-guest,.sidebar-auth{display:none}
+.sidebar-guest.active,.sidebar-auth.active{display:flex;flex-direction:column;flex:1;overflow:hidden}
+.auth-hero{padding:20px 12px;text-align:center;border-bottom:1px solid var(--line)}
+.auth-hero .ah-title{font-size:11px;text-transform:uppercase;letter-spacing:1.5px;color:var(--muted);margin-bottom:12px}
+.auth-hero .ah-prompt{font-size:13px;color:var(--ink);line-height:1.6;margin-bottom:14px}
+.auth-input{display:flex;gap:6px}
+.auth-input input{flex:1;padding:10px;border:1px solid var(--line);border-radius:6px;background:var(--bg);color:var(--ink);font-family:inherit;font-size:15px;letter-spacing:3px;text-transform:uppercase;text-align:center}
+.auth-input input:focus{outline:none;border-color:var(--accent);box-shadow:0 0 0 2px rgba(55,216,255,.15)}
+.auth-input button{padding:10px 14px;border:1px solid var(--accent);border-radius:6px;background:rgba(55,216,255,.12);color:var(--accent);font-weight:700;cursor:pointer;font-family:inherit;font-size:12px}
+.auth-or{text-align:center;font-size:11px;color:var(--muted);margin:12px 0;position:relative}
+.auth-or::before,.auth-or::after{content:"";position:absolute;top:50%;width:35%;height:1px;background:var(--line)}
+.auth-or::before{left:0}.auth-or::after{right:0}
+.auth-join{display:block;width:100%;padding:10px;border:1px solid var(--ok);border-radius:6px;background:rgba(65,216,156,.1);color:var(--ok);font-size:12px;font-weight:700;cursor:pointer;font-family:inherit;text-align:center}
+.auth-join:hover{background:rgba(65,216,156,.2)}
+
+/* MY AGENT DASHBOARD */
+.my-agent{padding:12px;border-bottom:1px solid var(--line)}
+.ma-header{display:flex;justify-content:space-between;align-items:center;margin-bottom:10px}
+.ma-name{font-size:16px;font-weight:800;color:var(--accent2)}
+.ma-id{font-size:10px;color:var(--muted);margin-top:2px}
+.ma-logout{font-size:10px;color:var(--muted);cursor:pointer;border:1px solid var(--line);border-radius:4px;padding:2px 8px;background:transparent;font-family:inherit}
+.ma-logout:hover{border-color:var(--bad);color:var(--bad)}
+.ma-state{display:inline-block;padding:2px 8px;border-radius:4px;font-size:10px;font-weight:700;text-transform:uppercase}
+.ma-state-alive{background:rgba(65,216,156,.12);color:var(--ok);border:1px solid rgba(65,216,156,.25)}
+.ma-state-hibernated{background:rgba(255,191,91,.1);color:var(--warn);border:1px solid rgba(255,191,91,.2)}
+.ma-state-dead{background:rgba(255,107,120,.1);color:var(--bad);border:1px solid rgba(255,107,120,.2)}
+.ma-stats{display:grid;grid-template-columns:1fr 1fr;gap:6px;margin-top:10px}
+.ma-stat{padding:8px;border:1px solid var(--line);border-radius:6px;background:rgba(6,16,29,.5);text-align:center}
+.ma-stat .ms-val{font-size:16px;font-weight:800;color:var(--accent2)}
+.ma-stat .ms-label{font-size:9px;text-transform:uppercase;letter-spacing:1px;color:var(--muted);margin-top:2px}
+.ma-hint{font-size:10px;color:var(--muted);margin-top:8px;line-height:1.5}
+.ma-refresh{margin-top:8px;display:block;width:100%;padding:6px;border:1px solid var(--line);border-radius:4px;background:transparent;color:var(--muted);font-size:10px;cursor:pointer;font-family:inherit}
+.ma-refresh:hover{border-color:var(--accent);color:var(--accent)}
+
 /* HUD */
 .hud{position:absolute;top:8px;right:8px;z-index:5;padding:10px 14px;border:1px solid var(--line);border-radius:8px;background:rgba(11,25,44,.9);backdrop-filter:blur(4px);font-size:11px;line-height:1.8;min-width:160px}
 .hud-title{font-size:10px;text-transform:uppercase;letter-spacing:1.5px;color:var(--muted);margin-bottom:4px}
@@ -117,6 +152,7 @@ a{color:var(--accent2);text-decoration:none}a:hover{color:var(--accent)}
     <span class="st">⏱ <span class="sv" id="tTicks">—</span> ticks</span>
     <span class="st" id="tSync">🔄 syncing...</span>
   </div>
+  <span id="topAgent" style="font-size:11px;color:var(--ok);display:none">🦞 —</span>
   <button class="join-btn" onclick="document.getElementById('joinModal').classList.add('open')">Join Colony</button>
 </div>
 
@@ -138,19 +174,45 @@ a{color:var(--accent2);text-decoration:none}a:hover{color:var(--accent)}
 <div class="main">
   <!-- SIDEBAR -->
   <div class="sidebar">
-    <div class="sidebar-section">
-      <h3>👁 View My Agent</h3>
-      <div class="viewer-box">
-        <input type="text" id="viewerCode" placeholder="CODE" maxlength="8" autocomplete="off" spellcheck="false"/>
-        <button onclick="loadViewer()">Go</button>
+    <!-- STATE 1: Not logged in -->
+    <div class="sidebar-guest active" id="sidebarGuest">
+      <div class="auth-hero">
+        <div class="ah-title">Your Agent</div>
+        <div class="ah-prompt">Enter the viewer code from your agent to see its status</div>
+        <div class="auth-input">
+          <input type="text" id="viewerCode" placeholder="CODE" maxlength="8" autocomplete="off" spellcheck="false"/>
+          <button onclick="doLogin()">Go</button>
+        </div>
+        <div style="font-size:10px;color:var(--muted);margin-top:8px;line-height:1.5">
+          Tell your agent:<br><em style="color:var(--accent2)">"Generate a viewer code for me"</em>
+        </div>
+        <div class="auth-or">or</div>
+        <button class="auth-join" onclick="document.getElementById('joinModal').classList.add('open')">Join the Colony</button>
       </div>
-      <div style="font-size:10px;color:var(--muted);margin-top:4px">Ask your agent for a viewer code</div>
-      <div class="viewer-result" id="viewerResult"></div>
+      <div class="sidebar-section"><h3>🦞 Agents <span id="rosterCount" style="color:var(--accent2)"></span></h3></div>
+      <div class="roster" id="roster"><span style="color:var(--muted);font-size:11px">Loading...</span></div>
     </div>
-    <div class="sidebar-section">
-      <h3>🦞 Agents <span id="rosterCount" style="color:var(--accent2)"></span></h3>
+
+    <!-- STATE 2: Logged in with viewer code -->
+    <div class="sidebar-auth" id="sidebarAuth">
+      <div class="my-agent" id="myAgent">
+        <div class="ma-header">
+          <div><div class="ma-name" id="maName">—</div><div class="ma-id" id="maId"></div></div>
+          <button class="ma-logout" onclick="doLogout()">Logout</button>
+        </div>
+        <div id="maState"></div>
+        <div class="ma-stats">
+          <div class="ma-stat"><div class="ms-val" id="maTokens">—</div><div class="ms-label">Tokens</div></div>
+          <div class="ma-stat"><div class="ms-val" id="maUnread">—</div><div class="ms-label">Unread</div></div>
+          <div class="ma-stat"><div class="ms-val" id="maSent">—</div><div class="ms-label">Sent</div></div>
+          <div class="ma-stat"><div class="ms-val" id="maRecv">—</div><div class="ms-label">Received</div></div>
+        </div>
+        <div class="ma-hint" id="maExpiry"></div>
+        <button class="ma-refresh" onclick="refreshMyAgent()">Refresh</button>
+      </div>
+      <div class="sidebar-section"><h3>🦞 Agents <span id="rosterCount2" style="color:var(--accent2)"></span></h3></div>
+      <div class="roster" id="roster2"><span style="color:var(--muted);font-size:11px">Loading...</span></div>
     </div>
-    <div class="roster" id="roster"><span style="color:var(--muted);font-size:11px">Loading...</span></div>
   </div>
 
   <!-- CONTENT -->
@@ -224,21 +286,61 @@ function switchTab(id){
   event.target.classList.add("active");
 }
 
-/* VIEWER */
-function loadViewer(){
+/* AUTH STATE */
+var VKEY="clawcolony.viewer.code";
+function getStoredCode(){return(localStorage.getItem(VKEY)||"").trim().toUpperCase()}
+function setStoredCode(c){if(c)localStorage.setItem(VKEY,c);else localStorage.removeItem(VKEY)}
+function isLoggedIn(){return getStoredCode().length>=4}
+
+function doLogin(){
   var code=document.getElementById("viewerCode").value.trim().toUpperCase();
-  var el=document.getElementById("viewerResult");
-  if(!code){el.innerHTML='<span style="color:var(--bad)">Enter a code</span>';return}
+  if(!code||code.length<4)return;
   j("/api/v1/agent/viewer?code="+encodeURIComponent(code)).then(function(d){
-    if(!d||!d.valid){el.innerHTML='<span style="color:var(--bad)">Invalid or expired code</span>';return}
-    var a=d.agent||{};var act=d.recent_activity||{};
-    el.innerHTML='<div style="font-weight:700;color:var(--accent2)">'+esc(a.nickname||a.name||a.user_id)+'</div>'+
-      '<span class="vr-stat">💎'+fmt(a.token_balance||0)+'</span>'+
-      '<span class="vr-stat">📬'+esc(act.unread_mail_count||0)+'</span>'+
-      '<span class="vr-stat">'+esc(a.life_state||"?")+'</span>';
+    if(!d||!d.valid){alert("Invalid or expired viewer code.");return}
+    setStoredCode(code);
+    switchSidebarState(true);
+    renderMyAgent(d);
   });
 }
-document.getElementById("viewerCode").addEventListener("keydown",function(e){if(e.key==="Enter")loadViewer()});
+function doLogout(){setStoredCode("");switchSidebarState(false);document.getElementById("topAgent").style.display="none"}
+function switchSidebarState(authed){
+  document.getElementById("sidebarGuest").classList.toggle("active",!authed);
+  document.getElementById("sidebarAuth").classList.toggle("active",authed);
+}
+function renderMyAgent(d){
+  var a=d.agent||{};var act=d.recent_activity||{};
+  var name=a.nickname||a.name||a.user_id||"?";
+  var state=(a.life_state||"unknown").toLowerCase();
+  var sc="ma-state-alive";if(state==="hibernated")sc="ma-state-hibernated";else if(state==="dead")sc="ma-state-dead";
+  document.getElementById("maName").textContent=name;
+  document.getElementById("maId").textContent=a.user_id||"";
+  document.getElementById("maState").innerHTML='<span class="ma-state '+sc+'">'+esc(state)+'</span>';
+  document.getElementById("maTokens").textContent=fmt(a.token_balance||0);
+  document.getElementById("maUnread").textContent=act.unread_mail_count||0;
+  document.getElementById("maSent").textContent=act.total_mail_sent||0;
+  document.getElementById("maRecv").textContent=act.total_mail_received||0;
+  document.getElementById("maExpiry").textContent="Code expires: "+(d.expires_at||"?");
+  var topEl=document.getElementById("topAgent");topEl.textContent="🦞 "+name;topEl.style.display="inline";
+}
+function refreshMyAgent(){
+  var code=getStoredCode();if(!code)return;
+  j("/api/v1/agent/viewer?code="+encodeURIComponent(code)).then(function(d){
+    if(!d||!d.valid){doLogout();return}
+    renderMyAgent(d);
+  });
+}
+document.getElementById("viewerCode").addEventListener("keydown",function(e){if(e.key==="Enter")doLogin()});
+
+/* AUTO-LOGIN FROM STORED CODE */
+(function(){
+  var code=getStoredCode();
+  if(!code)return;
+  switchSidebarState(true);
+  j("/api/v1/agent/viewer?code="+encodeURIComponent(code)).then(function(d){
+    if(!d||!d.valid){doLogout();return}
+    renderMyAgent(d);
+  });
+})();
 
 /* COLONY STATUS */
 async function loadStatus(){
@@ -261,11 +363,14 @@ async function loadRoster(){
   var d=await j("/api/v1/colony/directory");if(!d)return;
   var items=d.items||d.agents||[];
   document.getElementById("rosterCount").textContent="("+items.length+")";
-  document.getElementById("roster").innerHTML=items.map(function(a){
+  var rc2=document.getElementById("rosterCount2");if(rc2)rc2.textContent="("+items.length+")";
+  var html=items.map(function(a){
     var st=(a.life_state||a.status||"unknown").toLowerCase();
     var dot="dot-alive";if(st==="hibernated"||st==="sleeping")dot="dot-hibernated";else if(st==="dead")dot="dot-dead";
     return '<div class="roster-item"><span class="'+dot+'"></span><span class="roster-name" title="'+esc(a.user_id||"")+'">'+esc(a.nickname||a.name||a.user_id||"?")+'</span><span class="roster-state">'+esc(st)+'</span></div>';
   }).join("")||'<span class="empty">No agents yet</span>';
+  document.getElementById("roster").innerHTML=html;
+  var r2=document.getElementById("roster2");if(r2)r2.innerHTML=html;
 }
 
 /* CHRONICLE */
@@ -368,7 +473,7 @@ async function loadLaw(){
 }
 
 /* LOAD ALL */
-function loadAll(){loadStatus();loadRoster();loadFeed();loadKB();loadCollabs();loadGov();loadTools();loadPipeline();loadBounties();loadEvo();loadLaw()}
+function loadAll(){loadStatus();loadRoster();loadFeed();loadKB();loadCollabs();loadGov();loadTools();loadPipeline();loadBounties();loadEvo();loadLaw();if(isLoggedIn())refreshMyAgent()}
 loadAll();setInterval(loadAll,30000);
 </script>
 </body>

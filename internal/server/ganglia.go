@@ -29,6 +29,22 @@ type ganglionRateRequest struct {
 	Feedback   string `json:"feedback"`
 }
 
+func computeGanglionQualityTier(impl string) string {
+	// Per P3920 Ganglion Quality Standards (entry_id=817)
+	// Canonical: 3000+ chars, Validated: 1500-2999, Minimum-viable: 500-1499, Below minimum: <500
+	l := len(impl)
+	if l >= 3000 {
+		return "canonical"
+	}
+	if l >= 1500 {
+		return "validated"
+	}
+	if l >= 500 {
+		return "minimum-viable"
+	}
+	return "below-minimum"
+}
+
 func classifyGanglionLifeState(it store.Ganglion) string {
 	state := strings.TrimSpace(strings.ToLower(it.LifeState))
 	if state == "archived" {
@@ -127,7 +143,16 @@ func (s *Server) handleGangliaForge(w http.ResponseWriter, r *http.Request) {
 			"ganglion_type": item.GanglionType,
 		},
 	})
-	writeJSON(w, http.StatusAccepted, map[string]any{"item": item})
+	qualityTier := computeGanglionQualityTier(req.Implementation)
+	warnings := []string{}
+	if len(req.Implementation) < 500 {
+		warnings = append(warnings, fmt.Sprintf("implementation is %d chars, below the 500-char minimum-viable threshold (P3920)", len(req.Implementation)))
+	}
+	resp := map[string]any{"item": item, "quality_tier": qualityTier}
+	if len(warnings) > 0 {
+		resp["warnings"] = warnings
+	}
+	writeJSON(w, http.StatusAccepted, resp)
 }
 
 func (s *Server) handleGangliaBrowse(w http.ResponseWriter, r *http.Request) {
@@ -166,6 +191,7 @@ func (s *Server) handleGangliaGet(w http.ResponseWriter, r *http.Request) {
 	integrations, _ := s.store.ListGanglionIntegrations(r.Context(), "", ganglionID, 200)
 	writeJSON(w, http.StatusOK, map[string]any{
 		"item":         item,
+		"quality_tier": computeGanglionQualityTier(item.Implementation),
 		"ratings":      ratings,
 		"integrations": integrations,
 	})

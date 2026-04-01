@@ -1367,7 +1367,12 @@ func (s *PostgresStore) ApplyUserLifeState(ctx context.Context, item UserLifeSta
 		WHERE user_id = $1
 		FOR UPDATE
 	`, item.UserID).Scan(&current.UserID, &current.State, &current.DyingSinceTick, &current.DeadAtTick, &current.Reason, &current.UpdatedAt)
-	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+	if err == nil {
+		found = true
+		if normalizeLifeState(current.State) == "dead" && item.State != "dead" {
+			return UserLifeState{}, nil, fmt.Errorf("user life state is immutable once dead: %s", item.UserID)
+		}
+	} else if !errors.Is(err, sql.ErrNoRows) {
 		return UserLifeState{}, nil, err
 	}
 
@@ -2593,7 +2598,6 @@ func scanCollabSession(scanner interface{ Scan(dest ...any) error }, item *Colla
 	var closed sql.NullTime
 	var implDeadline sql.NullTime
 	var proposalID sql.NullInt64
-	var lastDeadlineReminderAt sql.NullTime
 	if err := scanner.Scan(
 		&item.CollabID,
 		&item.Title,
@@ -2627,7 +2631,6 @@ func scanCollabSession(scanner interface{ Scan(dest ...any) error }, item *Colla
 		&closed,
 		&proposalID,
 		&implDeadline,
-		&lastDeadlineReminderAt,
 	); err != nil {
 		return err
 	}
@@ -2655,11 +2658,6 @@ func scanCollabSession(scanner interface{ Scan(dest ...any) error }, item *Colla
 		item.ImplementationDeadlineAt = &implDeadline.Time
 	} else {
 		item.ImplementationDeadlineAt = nil
-	}
-	if lastDeadlineReminderAt.Valid {
-		item.LastDeadlineReminderAt = &lastDeadlineReminderAt.Time
-	} else {
-		item.LastDeadlineReminderAt = nil
 	}
 	return nil
 }
@@ -2892,20 +2890,20 @@ func (s *PostgresStore) CreateCollabSession(ctx context.Context, item CollabSess
 			pr_author_login, github_pr_state, pr_merge_commit_sha,
 			source_ref, implementation_mode, repo_doc_path,
 			status_summary, created_at, updated_at, review_deadline_at, pr_merged_at, closed_at,
-			proposal_id, implementation_deadline_at, last_deadline_reminder_at
+			proposal_id, implementation_deadline_at
 		)
-		VALUES($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, NOW(), NOW(), $26, $27, $28, $29, $30, $31)
+		VALUES($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, NOW(), NOW(), $26, $27, $28, $29, $30)
 		RETURNING collab_id, title, goal, kind, complexity, phase, proposer_user_id, author_user_id, orchestrator_user_id,
 			min_members, max_members, required_reviewers, pr_repo, pr_branch, pr_url, pr_number, pr_base_sha, pr_head_sha,
 			pr_author_login, github_pr_state, pr_merge_commit_sha,
 			source_ref, implementation_mode, repo_doc_path,
 			status_summary, created_at, updated_at, review_deadline_at, pr_merged_at, closed_at,
-			proposal_id, implementation_deadline_at, last_deadline_reminder_at
+			proposal_id, implementation_deadline_at
 	`, item.CollabID, item.Title, item.Goal, item.Kind, item.Complexity, item.Phase, item.ProposerUserID, item.AuthorUserID, item.OrchestratorUserID,
 		item.MinMembers, item.MaxMembers, item.RequiredReviewers, item.PRRepo, item.PRBranch, item.PRURL, item.PRNumber, item.PRBaseSHA, item.PRHeadSHA,
 		item.PRAuthorLogin, item.GitHubPRState, item.PRMergeCommitSHA, item.SourceRef, item.ImplementationMode, item.RepoDocPath,
 		item.LastStatusOrSummary, item.ReviewDeadlineAt, item.PRMergedAt, item.ClosedAt,
-		item.ProposalID, item.ImplementationDeadlineAt, item.LastDeadlineReminderAt)
+		item.ProposalID, item.ImplementationDeadlineAt)
 	if err := scanCollabSession(row, &item); err != nil {
 		return CollabSession{}, err
 	}
@@ -2920,7 +2918,7 @@ func (s *PostgresStore) GetCollabSession(ctx context.Context, collabID string) (
 			pr_author_login, github_pr_state, pr_merge_commit_sha,
 			source_ref, implementation_mode, repo_doc_path,
 			status_summary, created_at, updated_at, review_deadline_at, pr_merged_at, closed_at,
-			proposal_id, implementation_deadline_at, last_deadline_reminder_at
+			proposal_id, implementation_deadline_at
 		FROM collab_sessions WHERE collab_id = $1
 	`, strings.TrimSpace(collabID))
 	if err := scanCollabSession(row, &item); err != nil {
@@ -2942,7 +2940,7 @@ func (s *PostgresStore) ListCollabSessions(ctx context.Context, kind, phase, pro
 			pr_author_login, github_pr_state, pr_merge_commit_sha,
 			source_ref, implementation_mode, repo_doc_path,
 			status_summary, created_at, updated_at, review_deadline_at, pr_merged_at, closed_at,
-			proposal_id, implementation_deadline_at, last_deadline_reminder_at
+			proposal_id, implementation_deadline_at
 		FROM collab_sessions
 		WHERE ($1 = '' OR kind = $1)
 		  AND ($2 = '' OR phase = $2)
@@ -2980,7 +2978,7 @@ func (s *PostgresStore) UpdateCollabPhase(ctx context.Context, collabID, phase, 
 			pr_author_login, github_pr_state, pr_merge_commit_sha,
 			source_ref, implementation_mode, repo_doc_path,
 			status_summary, created_at, updated_at, review_deadline_at, pr_merged_at, closed_at,
-			proposal_id, implementation_deadline_at, last_deadline_reminder_at
+			proposal_id, implementation_deadline_at
 	`, strings.TrimSpace(collabID), strings.TrimSpace(phase), strings.TrimSpace(orchestratorUserID), strings.TrimSpace(statusSummary), closedAt)
 	if err := scanCollabSession(row, &item); err != nil {
 		return CollabSession{}, err
@@ -3009,7 +3007,7 @@ func (s *PostgresStore) UpdateCollabPR(ctx context.Context, input CollabPRUpdate
 			pr_author_login, github_pr_state, pr_merge_commit_sha,
 			source_ref, implementation_mode, repo_doc_path,
 			status_summary, created_at, updated_at, review_deadline_at, pr_merged_at, closed_at,
-			proposal_id, implementation_deadline_at, last_deadline_reminder_at
+			proposal_id, implementation_deadline_at
 	`, strings.TrimSpace(input.CollabID), strings.TrimSpace(input.PRBranch), strings.TrimSpace(input.PRURL), input.PRNumber, strings.TrimSpace(input.PRBaseSHA), strings.TrimSpace(input.PRHeadSHA), strings.TrimSpace(input.PRAuthorLogin), strings.TrimSpace(input.GitHubPRState), strings.TrimSpace(input.PRMergeCommitSHA), input.ReviewDeadlineAt, input.PRMergedAt)
 	if err := scanCollabSession(row, &item); err != nil {
 		return CollabSession{}, err
@@ -3085,13 +3083,6 @@ func (s *PostgresStore) CreateCollabArtifact(ctx context.Context, item CollabArt
 		return CollabArtifact{}, err
 	}
 	return item, nil
-}
-
-func (s *PostgresStore) RecordDeadlineReminderSent(ctx context.Context, collabID string, sentAt time.Time) error {
-	_, err := s.db.ExecContext(ctx,
-		`UPDATE collab_sessions SET last_deadline_reminder_at = $2, updated_at = NOW() WHERE collab_id = $1`,
-		strings.TrimSpace(collabID), sentAt)
-	return err
 }
 
 func (s *PostgresStore) UpdateCollabArtifactReview(ctx context.Context, artifactID int64, status, reviewNote string) (CollabArtifact, error) {
@@ -4152,7 +4143,7 @@ func (s *PostgresStore) GetGanglion(ctx context.Context, ganglionID int64) (Gang
 	return it, nil
 }
 
-func (s *PostgresStore) ListGanglia(ctx context.Context, ganglionType, lifeState, keyword, qualityFilter string, limit int) ([]Ganglion, error) {
+func (s *PostgresStore) ListGanglia(ctx context.Context, ganglionType, lifeState, keyword string, limit int) ([]Ganglion, error) {
 	if limit <= 0 {
 		limit = 100
 	}
@@ -4162,19 +4153,6 @@ func (s *PostgresStore) ListGanglia(ctx context.Context, ganglionType, lifeState
 	ganglionType = strings.TrimSpace(strings.ToLower(ganglionType))
 	lifeState = strings.TrimSpace(strings.ToLower(lifeState))
 	keyword = strings.TrimSpace(strings.ToLower(keyword))
-	qualityFilter = strings.TrimSpace(strings.ToLower(qualityFilter))
-
-	// Per P4195 Ganglion Lifecycle Management — filter by minimum implementation length
-	qualityThresholds := map[string]int{
-		"canonical":       3000,
-		"validated":        1500,
-		"minimum-viable":   500,
-	}
-	minImplLen := 0
-	if thresh, ok := qualityThresholds[qualityFilter]; ok {
-		minImplLen = thresh
-	}
-
 	var (
 		query strings.Builder
 		args  []any
@@ -4202,11 +4180,6 @@ func (s *PostgresStore) ListGanglia(ctx context.Context, ganglionType, lifeState
 		kw := "%" + keyword + "%"
 		args = append(args, kw, kw, kw, kw)
 		argi += 4
-	}
-	if minImplLen > 0 {
-		query.WriteString(fmt.Sprintf(" AND LENGTH(implementation) >= $%d", argi))
-		args = append(args, minImplLen)
-		argi++
 	}
 	query.WriteString(fmt.Sprintf(" ORDER BY updated_at DESC, id DESC LIMIT $%d", argi))
 	args = append(args, limit)

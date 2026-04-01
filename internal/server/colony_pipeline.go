@@ -60,6 +60,85 @@ type pipelineResponse struct {
 	Stats      pipelineStats      `json:"stats"`
 }
 
+func pipelineAuthorUserID(session store.CollabSession) string {
+	authorID := strings.TrimSpace(session.AuthorUserID)
+	if authorID == "" {
+		authorID = strings.TrimSpace(session.OrchestratorUserID)
+	}
+	return authorID
+}
+
+func pipelineStageForUpgradePR(session store.CollabSession) string {
+	switch {
+	case upgradePRMerged(session):
+		return "merged"
+	case upgradePROpenForReview(session):
+		return "under_review"
+	case upgradePRClosedOnGitHub(session) || upgradePRTerminalPhase(session):
+		return "recently_closed"
+	default:
+		return "in_progress"
+	}
+}
+
+func pipelineSessionRecent(session store.CollabSession, since time.Time) bool {
+	if session.ClosedAt != nil && session.ClosedAt.After(since) {
+		return true
+	}
+	if session.PRMergedAt != nil && session.PRMergedAt.After(since) {
+		return true
+	}
+	return session.UpdatedAt.After(since)
+}
+
+func pipelineItemWithUpgradeSession(base pipelineItem, session store.CollabSession) pipelineItem {
+	base.CollabID = strings.TrimSpace(session.CollabID)
+	base.CollabPhase = strings.ToLower(strings.TrimSpace(session.Phase))
+	base.PRURL = strings.TrimSpace(session.PRURL)
+	base.PRNumber = session.PRNumber
+	base.PRState = upgradePRCanonicalState(session)
+	base.PRMergedAt = session.PRMergedAt
+	base.ImplementationMode = strings.TrimSpace(session.ImplementationMode)
+	base.DeadlineAt = session.ImplementationDeadlineAt
+	if base.DeadlineAt == nil {
+		base.DeadlineAt = session.ReviewDeadlineAt
+	}
+	base.AuthorUserID = pipelineAuthorUserID(session)
+	base.Stage = pipelineStageForUpgradePR(session)
+	return base
+}
+
+func appendPipelineItem(sections *pipelineSections, item pipelineItem) {
+	switch strings.ToLower(strings.TrimSpace(item.Stage)) {
+	case "approved_pending":
+		sections.ApprovedPending = append(sections.ApprovedPending, item)
+	case "under_review":
+		sections.UnderReview = append(sections.UnderReview, item)
+	case "merged":
+		sections.Merged = append(sections.Merged, item)
+	case "recently_closed":
+		sections.RecentlyClosed = append(sections.RecentlyClosed, item)
+	default:
+		item.Stage = "in_progress"
+		sections.InProgress = append(sections.InProgress, item)
+	}
+}
+
+func proposalIDFromSourceRef(sourceRef string) int64 {
+	parts := strings.SplitN(strings.TrimSpace(sourceRef), ":", 2)
+	if len(parts) != 2 || parts[0] != "kb_proposal" {
+		return 0
+	}
+	var pid int64
+	for _, ch := range parts[1] {
+		if ch < '0' || ch > '9' {
+			return 0
+		}
+		pid = pid*10 + int64(ch-'0')
+	}
+	return pid
+}
+
 // --- handler ---
 
 func (s *Server) handleColonyPipeline(w http.ResponseWriter, r *http.Request) {
@@ -72,38 +151,40 @@ func (s *Server) handleColonyPipeline(w http.ResponseWriter, r *http.Request) {
 	now := time.Now().UTC()
 	sevenDaysAgo := now.AddDate(0, 0, -7)
 
-	// Load all applied proposals.
 	proposals, err := s.store.ListKBProposals(ctx, "applied", 5000)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to list proposals")
 		return
 	}
-
-	// Build upgrade index: sourceRef -> CollabSession for active sessions.
-	upgradeIndex, err := s.loadProposalUpgradeIndex(ctx)
+	allUpgradeSessions, err := s.store.ListCollabSessions(ctx, "upgrade_pr", "", "", 1000)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "failed to load upgrade index")
+		writeError(w, http.StatusInternalServerError, "failed to list upgrade sessions")
 		return
 	}
 
-	// Load recently closed collab sessions.
-	closedSessions, err := s.store.ListCollabSessions(ctx, "upgrade_pr", "closed", "", 50)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "failed to list closed sessions")
-		return
-	}
-
-	// Build a set of sourceRefs for closed sessions (for recently_closed bucket).
-	closedByRef := make(map[string]store.CollabSession, len(closedSessions))
-	for _, cs := range closedSessions {
-		ref := strings.TrimSpace(cs.SourceRef)
-		if ref == "" {
+	upgradeIndex := make(map[string]store.CollabSession, len(allUpgradeSessions))
+	closedByRef := make(map[string]store.CollabSession, len(allUpgradeSessions))
+	manualByPRKey := make(map[string]store.CollabSession)
+	manualWithoutPR := make([]store.CollabSession, 0)
+	for _, session := range allUpgradeSessions {
+		if ref := strings.TrimSpace(session.SourceRef); ref != "" {
+			if current, ok := upgradeIndex[ref]; !ok || session.UpdatedAt.After(current.UpdatedAt) {
+				upgradeIndex[ref] = session
+			}
+			if pipelineStageForUpgradePR(session) == "recently_closed" {
+				if current, ok := closedByRef[ref]; !ok || session.UpdatedAt.After(current.UpdatedAt) {
+					closedByRef[ref] = session
+				}
+			}
 			continue
 		}
-		// Keep the most recently updated one per ref.
-		if existing, ok := closedByRef[ref]; !ok || cs.UpdatedAt.After(existing.UpdatedAt) {
-			closedByRef[ref] = cs
+		if prKey := canonicalGitHubPRKeyForSession(session); prKey != "" {
+			if current, ok := manualByPRKey[prKey]; !ok || session.UpdatedAt.After(current.UpdatedAt) {
+				manualByPRKey[prKey] = session
+			}
+			continue
 		}
+		manualWithoutPR = append(manualWithoutPR, session)
 	}
 
 	sections := pipelineSections{
@@ -116,8 +197,11 @@ func (s *Server) handleColonyPipeline(w http.ResponseWriter, r *http.Request) {
 
 	var stats pipelineStats
 	stats.TotalProposalsApplied = len(proposals)
+	activePRKeys := make(map[string]struct{})
+	capturedProposals := make(map[int64]struct{}, len(proposals))
 
 	for _, proposal := range proposals {
+		capturedProposals[proposal.ID] = struct{}{}
 		change, changeErr := s.store.GetKBProposalChange(ctx, proposal.ID)
 		if changeErr != nil {
 			continue
@@ -147,153 +231,96 @@ func (s *Server) handleColonyPipeline(w http.ResponseWriter, r *http.Request) {
 		}
 
 		if !hasSession || strings.TrimSpace(session.CollabID) == "" {
-			// No collab yet — approved pending.
 			item.Stage = "approved_pending"
-			item.ImplementationMode = ""
-			sections.ApprovedPending = append(sections.ApprovedPending, item)
+			appendPipelineItem(&sections, item)
 			stats.PendingImplementations++
 			continue
 		}
 
-		// Has a linked collab session.
-		collabID := strings.TrimSpace(session.CollabID)
-		phase := strings.TrimSpace(strings.ToLower(session.Phase))
-		prState := strings.TrimSpace(strings.ToLower(session.GitHubPRState))
-		prURL := strings.TrimSpace(session.PRURL)
-		prNumber := session.PRNumber
-		implMode := strings.TrimSpace(session.ImplementationMode)
-
-		item.CollabID = collabID
-		item.CollabPhase = phase
-		item.PRURL = prURL
-		item.PRNumber = prNumber
-		item.PRState = prState
-		item.PRMergedAt = session.PRMergedAt
-		item.ImplementationMode = implMode
-		item.DeadlineAt = session.ImplementationDeadlineAt
-		if item.DeadlineAt == nil {
-			item.DeadlineAt = session.ReviewDeadlineAt
-		}
-
-		// Determine author: prefer AuthorUserID, fall back to OrchestratorUserID.
-		authorID := strings.TrimSpace(session.AuthorUserID)
-		if authorID == "" {
-			authorID = strings.TrimSpace(session.OrchestratorUserID)
-		}
-		item.AuthorUserID = authorID
-
-		// Classify into pipeline stage.
-		merged := session.PRMergedAt != nil ||
-			strings.TrimSpace(session.PRMergeCommitSHA) != "" ||
-			strings.EqualFold(prState, "merged")
-
-		if merged {
-			item.Stage = "merged"
-			sections.Merged = append(sections.Merged, item)
-			if session.PRMergedAt != nil && session.PRMergedAt.After(sevenDaysAgo) {
-				stats.MergedLast7d++
-			} else if merged && session.UpdatedAt.After(sevenDaysAgo) {
-				// If PRMergedAt is nil but we know it's merged and was updated recently, count it.
-				stats.MergedLast7d++
-			}
+		item = pipelineItemWithUpgradeSession(item, session)
+		if item.Stage == "recently_closed" && !pipelineSessionRecent(session, sevenDaysAgo) {
 			continue
 		}
-
-		if strings.EqualFold(phase, "closed") || strings.EqualFold(phase, "failed") || strings.EqualFold(phase, "abandoned") {
-			// Check if closed within last 7 days.
-			closedAt := session.ClosedAt
-			recentEnough := false
-			if closedAt != nil && closedAt.After(sevenDaysAgo) {
-				recentEnough = true
-			} else if session.UpdatedAt.After(sevenDaysAgo) {
-				recentEnough = true
-			}
-			if recentEnough {
-				item.Stage = "recently_closed"
-				sections.RecentlyClosed = append(sections.RecentlyClosed, item)
-				stats.Abandoned++
-			}
-			continue
+		appendPipelineItem(&sections, item)
+		if item.Stage == "merged" && pipelineSessionRecent(session, sevenDaysAgo) {
+			stats.MergedLast7d++
 		}
-
-		if strings.EqualFold(phase, "reviewing") || strings.EqualFold(phase, "review") {
-			item.Stage = "under_review"
-			sections.UnderReview = append(sections.UnderReview, item)
-			if prNumber > 0 && !strings.EqualFold(prState, "closed") {
-				stats.ActivePRs++
-			}
-			continue
+		if item.Stage == "recently_closed" {
+			stats.Abandoned++
 		}
-
-		// Default: in_progress (drafting, open, implementing, etc.)
-		item.Stage = "in_progress"
-		sections.InProgress = append(sections.InProgress, item)
-		if prNumber > 0 && !strings.EqualFold(prState, "closed") {
-			stats.ActivePRs++
+		if upgradePROpenForReview(session) {
+			if prKey := canonicalGitHubPRKeyForSession(session); prKey != "" {
+				activePRKeys[prKey] = struct{}{}
+			}
 		}
 	}
 
-	// Also check closed sessions for proposals not already captured.
-	// These are sessions whose proposals might not be in "applied" status anymore.
-	capturedProposals := make(map[int64]struct{}, len(proposals))
-	for _, p := range proposals {
-		capturedProposals[p.ID] = struct{}{}
-	}
-	for ref, cs := range closedByRef {
-		// Parse proposal ID from sourceRef "kb_proposal:123".
-		parts := strings.SplitN(ref, ":", 2)
-		if len(parts) != 2 || parts[0] != "kb_proposal" {
-			continue
-		}
-		pid := int64(0)
-		for _, ch := range parts[1] {
-			if ch >= '0' && ch <= '9' {
-				pid = pid*10 + int64(ch-'0')
-			} else {
-				pid = 0
-				break
-			}
-		}
+	for ref, session := range closedByRef {
+		pid := proposalIDFromSourceRef(ref)
 		if pid == 0 {
 			continue
 		}
 		if _, already := capturedProposals[pid]; already {
 			continue
 		}
-
-		closedAt := cs.ClosedAt
-		recentEnough := false
-		if closedAt != nil && closedAt.After(sevenDaysAgo) {
-			recentEnough = true
-		} else if cs.UpdatedAt.After(sevenDaysAgo) {
-			recentEnough = true
-		}
-		if !recentEnough {
+		if !pipelineSessionRecent(session, sevenDaysAgo) {
 			continue
 		}
-
-		item := pipelineItem{
+		item := pipelineItemWithUpgradeSession(pipelineItem{
 			ProposalID:      pid,
-			ProposalTitle:   strings.TrimSpace(cs.Title),
-			CollabID:        strings.TrimSpace(cs.CollabID),
-			CollabPhase:     strings.TrimSpace(cs.Phase),
-			PRURL:           strings.TrimSpace(cs.PRURL),
-			PRNumber:        cs.PRNumber,
-			PRState:         strings.TrimSpace(cs.GitHubPRState),
-			PRMergedAt:      cs.PRMergedAt,
-			Stage:           "recently_closed",
+			ProposalTitle:   strings.TrimSpace(session.Title),
 			TakeoverAllowed: false,
-		}
-		authorID := strings.TrimSpace(cs.AuthorUserID)
-		if authorID == "" {
-			authorID = strings.TrimSpace(cs.OrchestratorUserID)
-		}
-		item.AuthorUserID = authorID
-		sections.RecentlyClosed = append(sections.RecentlyClosed, item)
+		}, session)
+		item.Stage = "recently_closed"
+		appendPipelineItem(&sections, item)
 		stats.Abandoned++
 	}
 
-	// Gather sync status.
+	for _, session := range manualByPRKey {
+		item := pipelineItemWithUpgradeSession(pipelineItem{
+			ProposalTitle:   strings.TrimSpace(session.Title),
+			ProposerUserID:  strings.TrimSpace(session.ProposerUserID),
+			Category:        "upgrade_pr",
+			TakeoverAllowed: false,
+		}, session)
+		if item.Stage == "recently_closed" && !pipelineSessionRecent(session, sevenDaysAgo) {
+			continue
+		}
+		appendPipelineItem(&sections, item)
+		if item.Stage == "merged" && pipelineSessionRecent(session, sevenDaysAgo) {
+			stats.MergedLast7d++
+		}
+		if item.Stage == "recently_closed" {
+			stats.Abandoned++
+		}
+		if upgradePROpenForReview(session) {
+			if prKey := canonicalGitHubPRKeyForSession(session); prKey != "" {
+				activePRKeys[prKey] = struct{}{}
+			}
+		}
+	}
+
+	for _, session := range manualWithoutPR {
+		item := pipelineItemWithUpgradeSession(pipelineItem{
+			ProposalTitle:   strings.TrimSpace(session.Title),
+			ProposerUserID:  strings.TrimSpace(session.ProposerUserID),
+			Category:        "upgrade_pr",
+			TakeoverAllowed: false,
+		}, session)
+		if item.Stage == "recently_closed" && !pipelineSessionRecent(session, sevenDaysAgo) {
+			continue
+		}
+		appendPipelineItem(&sections, item)
+		if item.Stage == "merged" && pipelineSessionRecent(session, sevenDaysAgo) {
+			stats.MergedLast7d++
+		}
+		if item.Stage == "recently_closed" {
+			stats.Abandoned++
+		}
+	}
+
+	stats.ActivePRs = len(activePRKeys)
+
 	s.worldTickMu.Lock()
 	tickID := s.worldTickID
 	tickAt := s.worldTickAt

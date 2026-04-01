@@ -70,6 +70,36 @@ updated_count=1
 	}
 }
 
+func seedGitHubReadyReminderRecipientForTest(t *testing.T, srv *Server, userID string) {
+	t.Helper()
+	ctx := context.Background()
+	owner, err := srv.store.UpsertHumanOwner(ctx, userID+"@example.com", "owner-"+strings.TrimPrefix(userID, "user-test-"))
+	if err != nil {
+		t.Fatalf("upsert human owner: %v", err)
+	}
+	if _, err := srv.store.UpsertAgentHumanBinding(ctx, store.AgentHumanBinding{
+		UserID:              userID,
+		OwnerID:             owner.OwnerID,
+		HumanNameVisibility: "public",
+	}); err != nil {
+		t.Fatalf("upsert agent human binding: %v", err)
+	}
+	expiresAt := time.Now().UTC().Add(24 * time.Hour)
+	if _, err := srv.store.UpsertGitHubRepoAccessGrant(ctx, store.GitHubRepoAccessGrant{
+		OwnerID:         owner.OwnerID,
+		GitHubUsername:  "octo-" + strings.TrimPrefix(userID, "user-test-"),
+		Mode:            "upstream_via_org_team",
+		AccessStatus:    "active_contributor",
+		RepositoryOwner: "agi-bar",
+		RepositoryName:  "clawcolony",
+		Role:            "contributor",
+		GrantedAt:       time.Now().UTC(),
+		AccessExpiresAt: &expiresAt,
+	}); err != nil {
+		t.Fatalf("upsert github repo access grant: %v", err)
+	}
+}
+
 func TestKBPendingSummaryLimitsRecipientMailButPreservesBacklog(t *testing.T) {
 	srv := newTestServer()
 	proposerA := newAuthUser(t, srv)
@@ -305,6 +335,40 @@ func TestTaskMarketOpenReminderSendsHourlyMailForOpenProposalTasks(t *testing.T)
 		}
 		if state.StateHash == "" {
 			t.Fatalf("expected notification state hash for %s", uid)
+		}
+	}
+}
+
+func TestTaskMarketOpenReminderPrioritizesGitHubReadyUsers(t *testing.T) {
+	srv := newTestServer()
+	ctx := context.Background()
+	proposer := seedActiveUser(t, srv)
+	githubReady := seedActiveUser(t, srv)
+	notReady := seedActiveUser(t, srv)
+	oldClosedAt := time.Now().UTC().Add(-3 * time.Hour)
+	oldAppliedAt := oldClosedAt.Add(20 * time.Minute)
+
+	seedGitHubReadyReminderRecipientForTest(t, srv, githubReady)
+	createGovernanceProposalWithDecisionTimesForTest(t, srv, proposer, "GitHub ready reminder targeting", oldClosedAt, &oldAppliedAt)
+
+	if err := srv.runTaskMarketOpenReminderTick(ctx, 43); err != nil {
+		t.Fatalf("run task market reminder: %v", err)
+	}
+
+	readyInbox, err := srv.store.ListMailbox(ctx, githubReady, "inbox", "", "[TASK-MARKET][PRIORITY:P1]", nil, nil, 10)
+	if err != nil {
+		t.Fatalf("list github-ready inbox: %v", err)
+	}
+	if len(readyInbox) != 1 {
+		t.Fatalf("expected github-ready user to receive reminder, got=%d", len(readyInbox))
+	}
+	for _, uid := range []string{proposer, notReady} {
+		inbox, err := srv.store.ListMailbox(ctx, uid, "inbox", "", "[TASK-MARKET][PRIORITY:P1]", nil, nil, 10)
+		if err != nil {
+			t.Fatalf("list inbox for %s: %v", uid, err)
+		}
+		if len(inbox) != 0 {
+			t.Fatalf("expected non-GitHub-ready user %s to be skipped while targeted recipients exist, got=%d", uid, len(inbox))
 		}
 	}
 }

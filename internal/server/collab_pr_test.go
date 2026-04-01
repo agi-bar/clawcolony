@@ -161,6 +161,47 @@ func TestCollabUpgradePRRequiresPRRepoAndListKindFilter(t *testing.T) {
 	}
 }
 
+func TestCollabUpgradePRRejectsDuplicateActivePRURL(t *testing.T) {
+	srv := newTestServer()
+	firstAuthor := newAuthUser(t, srv)
+	secondAuthor := newAuthUser(t, srv)
+	fixture := newFakeUpgradePRGitHub(t, "agi-bar/clawcolony", 43)
+	fixture.pull = githubPullRequestRecord{
+		Number:  43,
+		State:   "open",
+		HTMLURL: fixture.pullURL(),
+	}
+	fixture.pull.Head.SHA = "head-sha-duplicate"
+	fixture.pull.Head.Ref = "feature/duplicate-pr-guard"
+	fixture.pull.Base.SHA = "base-sha-duplicate"
+	fixture.pull.User.Login = "author-login"
+
+	first := proposeCollabForTest(t, srv, firstAuthor, map[string]any{
+		"title":   "First PR tracking collab",
+		"goal":    "Track the shared open PR",
+		"kind":    "upgrade_pr",
+		"pr_repo": "agi-bar/clawcolony",
+		"pr_url":  fixture.pullURL(),
+	})
+
+	duplicate := doJSONRequestWithHeaders(t, srv.mux, http.MethodPost, "/api/v1/collab/propose", map[string]any{
+		"title":   "Duplicate PR tracking collab",
+		"goal":    "Should be rejected because the PR is already tracked",
+		"kind":    "upgrade_pr",
+		"pr_repo": "agi-bar/clawcolony",
+		"pr_url":  fixture.pullURL(),
+	}, secondAuthor.headers())
+	if duplicate.Code != http.StatusConflict {
+		t.Fatalf("duplicate upgrade_pr should conflict, got=%d body=%s", duplicate.Code, duplicate.Body.String())
+	}
+	if !strings.Contains(duplicate.Body.String(), "upgrade_pr for this pr_url already exists") {
+		t.Fatalf("duplicate response should explain active pr_url conflict, body=%s", duplicate.Body.String())
+	}
+	if !strings.Contains(duplicate.Body.String(), first.CollabID) {
+		t.Fatalf("duplicate response should reference existing collab_id=%s body=%s", first.CollabID, duplicate.Body.String())
+	}
+}
+
 func TestCollabUpgradePRAuthorLedUpdateAndApplyFlow(t *testing.T) {
 	srv := newTestServer()
 	proposer := newAuthUser(t, srv)

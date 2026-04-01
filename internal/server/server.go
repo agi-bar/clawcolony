@@ -5965,6 +5965,33 @@ func generateCollabID() string {
 	return fmt.Sprintf("collab-%d-%04d", time.Now().UnixMilli(), rand.Intn(10000))
 }
 
+func (s *Server) findActiveUpgradePRCollabByPRKey(ctx context.Context, prKey string) (store.CollabSession, bool, error) {
+	prKey = strings.TrimSpace(prKey)
+	if prKey == "" {
+		return store.CollabSession{}, false, nil
+	}
+	sessions, err := s.store.ListCollabSessions(ctx, "upgrade_pr", "", "", 1000)
+	if err != nil {
+		return store.CollabSession{}, false, err
+	}
+	var match store.CollabSession
+	for _, session := range sessions {
+		if !upgradePRBlocksDuplicate(session) {
+			continue
+		}
+		if canonicalGitHubPRKeyForSession(session) != prKey {
+			continue
+		}
+		if strings.TrimSpace(match.CollabID) == "" || session.UpdatedAt.After(match.UpdatedAt) {
+			match = session
+		}
+	}
+	if strings.TrimSpace(match.CollabID) == "" {
+		return store.CollabSession{}, false, nil
+	}
+	return match, true, nil
+}
+
 func (s *Server) handleCollabPropose(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
@@ -6052,6 +6079,15 @@ func (s *Server) handleCollabPropose(w http.ResponseWriter, r *http.Request) {
 		}
 		if pull.Merged || !strings.EqualFold(strings.TrimSpace(pull.State), "open") {
 			writeError(w, http.StatusBadRequest, "upgrade_pr requires an open GitHub pull request")
+			return
+		}
+		existingPR, ok, err := s.findActiveUpgradePRCollabByPRKey(r.Context(), canonicalGitHubPRKey(req.PRURL, req.PRRepo, pull.Number))
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		if ok {
+			writeError(w, http.StatusConflict, fmt.Sprintf("upgrade_pr for this pr_url already exists (collab_id=%s)", strings.TrimSpace(existingPR.CollabID)))
 			return
 		}
 		phase = "reviewing"
@@ -10868,26 +10904,69 @@ func taskMarketOpenReminderStateHash(items []tokenTaskMarketItem) string {
 	return fmt.Sprintf("count=%d|max_reward=%d|tasks=%s", len(items), maxReward, strings.Join(parts, ","))
 }
 
+func (s *Server) taskMarketOpenReminderTargets(ctx context.Context) []string {
+	targets := s.activeUserIDs(ctx)
+	if len(targets) == 0 {
+		return nil
+	}
+	base := make([]string, 0, len(targets))
+	githubReady := make([]string, 0, len(targets))
+	for _, uid := range targets {
+		uid = strings.TrimSpace(uid)
+		if uid == "" || isExcludedTokenUserID(uid) {
+			continue
+		}
+		life, err := s.store.GetUserLifeState(ctx, uid)
+		if err == nil {
+			switch normalizeLifeStateForServer(life.State) {
+			case "dead", "hibernated":
+				continue
+			}
+		}
+		base = append(base, uid)
+		binding, err := s.store.GetAgentHumanBinding(ctx, uid)
+		if err != nil || strings.TrimSpace(binding.OwnerID) == "" {
+			continue
+		}
+		grant, err := s.store.GetGitHubRepoAccessGrant(ctx, binding.OwnerID)
+		if err != nil {
+			continue
+		}
+		switch githubRepoAccessStatus(grant) {
+		case "active_contributor", "active_maintainer":
+			githubReady = append(githubReady, uid)
+		}
+	}
+	if len(githubReady) > 0 {
+		return githubReady
+	}
+	return base
+}
+
 func (s *Server) runTaskMarketOpenReminderTick(ctx context.Context, tickID int64) error {
 	if ctx == nil {
 		ctx = context.Background()
+	}
+	allTargets := s.activeUserIDs(ctx)
+	if len(allTargets) == 0 {
+		return nil
 	}
 	items, err := s.collectProposalImplementationTaskMarketItems(ctx, "", "open")
 	if err != nil {
 		return err
 	}
-	targets := s.activeUserIDs(ctx)
-	if len(targets) == 0 {
-		return nil
-	}
+	targets := s.taskMarketOpenReminderTargets(ctx)
 	if len(items) == 0 {
-		for _, uid := range targets {
+		for _, uid := range allTargets {
 			uid = strings.TrimSpace(uid)
 			if uid == "" || isExcludedTokenUserID(uid) {
 				continue
 			}
 			_ = s.store.DeleteNotificationDeliveryState(ctx, uid, notificationCategoryTaskMarketOpen)
 		}
+		return nil
+	}
+	if len(targets) == 0 {
 		return nil
 	}
 	now := time.Now().UTC()
@@ -10903,16 +10982,8 @@ func (s *Server) runTaskMarketOpenReminderTick(ctx context.Context, tickID int64
 	nextStates := make(map[string]store.NotificationDeliveryState, len(targets))
 	for _, uid := range targets {
 		uid = strings.TrimSpace(uid)
-		if uid == "" || isExcludedTokenUserID(uid) {
+		if uid == "" {
 			continue
-		}
-		life, err := s.store.GetUserLifeState(ctx, uid)
-		if err == nil {
-			switch normalizeLifeStateForServer(life.State) {
-			case "dead", "hibernated":
-				_ = s.store.DeleteNotificationDeliveryState(ctx, uid, notificationCategoryTaskMarketOpen)
-				continue
-			}
 		}
 		state, ok, err := s.store.GetNotificationDeliveryState(ctx, uid, notificationCategoryTaskMarketOpen)
 		if err != nil {

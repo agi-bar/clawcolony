@@ -45,6 +45,7 @@ const (
 
 const proposalImplementationTaskLeaseDuration = 6 * time.Hour
 const taskMarketAcceptRateLimitWindow = 30 * time.Minute
+const proposalImplementationTaskOpenDelay = time.Hour
 
 type communityRewardGrant struct {
 	GrantKey      string         `json:"grant_key"`
@@ -133,7 +134,15 @@ func proposalImplementationTaskEligible(group proposalImplementationGroup, cutof
 	if !state.Active || !state.ImplementationRequired || strings.TrimSpace(state.TargetSkill) != skillUpgrade {
 		return false
 	}
-	if strings.TrimSpace(strings.ToLower(state.ImplementationStatus)) != "pending" {
+	status := strings.TrimSpace(strings.ToLower(state.ImplementationStatus))
+	switch status {
+	case "pending":
+	case "in_progress":
+		linked := state.LinkedUpgrade
+		if linked == nil || strings.TrimSpace(linked.CollabID) == "" || strings.TrimSpace(linked.PRURL) != "" || strings.EqualFold(strings.TrimSpace(linked.Phase), "failed") || linked.Merged {
+			return false
+		}
+	default:
 		return false
 	}
 	for _, member := range group.Members {
@@ -988,7 +997,7 @@ func (s *Server) loadEligibleGovernanceProposalImplementationGroups(ctx context.
 	if err != nil {
 		return nil, err
 	}
-	cutoff := time.Now().UTC().Add(-24 * time.Hour)
+	cutoff := time.Now().UTC().Add(-proposalImplementationTaskOpenDelay)
 	out := make([]proposalImplementationGroup, 0, len(groups))
 	for _, group := range groups {
 		if proposalImplementationTaskEligible(group, cutoff) {

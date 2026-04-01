@@ -1127,15 +1127,15 @@ func TestCollabCloseFailedDoesNotGrantCommunityReward(t *testing.T) {
 	}
 }
 
-func TestGovernanceProposalTaskMarketGroupsSameTopicDuplicatesAfter24Hours(t *testing.T) {
+func TestGovernanceProposalTaskMarketGroupsSameTopicDuplicatesAfterOneHour(t *testing.T) {
 	srv := newTestServer()
 	proposer := seedActiveUser(t, srv)
-	oldClosedAt := time.Now().UTC().Add(-30 * time.Hour)
+	oldClosedAt := time.Now().UTC().Add(-3 * time.Hour)
 	oldAppliedAt := oldClosedAt.Add(20 * time.Minute)
 
 	oldAppliedID := createGovernanceProposalWithDecisionTimesForTest(t, srv, proposer, "Token issuance rule", oldClosedAt, &oldAppliedAt)
 	oldApprovedID := createGovernanceProposalWithDecisionTimesForTest(t, srv, proposer, "Token issuance rule", oldClosedAt.Add(15*time.Minute), nil)
-	youngClosedAt := time.Now().UTC().Add(-2 * time.Hour)
+	youngClosedAt := time.Now().UTC().Add(-45 * time.Minute)
 	youngAppliedAt := youngClosedAt.Add(20 * time.Minute)
 	youngID := createGovernanceProposalWithDecisionTimesForTest(t, srv, proposer, "Fresh governance topic", youngClosedAt, &youngAppliedAt)
 
@@ -1200,6 +1200,51 @@ func TestGovernanceProposalTaskMarketGroupsSameTopicDuplicatesAfter24Hours(t *te
 	}
 	if strings.Contains(w.Body.String(), fmt.Sprintf(`"primary_proposal_id":%d`, youngID)) || strings.Contains(w.Body.String(), fmt.Sprintf(`"proposal_ids":[%d`, youngID)) {
 		t.Fatalf("young proposal should not appear in task market payload body=%s", w.Body.String())
+	}
+}
+
+func TestGovernanceProposalTaskMarketIncludesRecruitingFollowThroughWithoutPRAfterOneHour(t *testing.T) {
+	srv := newTestServer()
+	proposer := seedActiveUser(t, srv)
+	oldClosedAt := time.Now().UTC().Add(-3 * time.Hour)
+	oldAppliedAt := oldClosedAt.Add(20 * time.Minute)
+	proposalID := createGovernanceProposalWithDecisionTimesForTest(t, srv, proposer, "Follow-through without PR", oldClosedAt, &oldAppliedAt)
+
+	if _, err := srv.store.CreateCollabSession(t.Context(), store.CollabSession{
+		CollabID:                 "collab-recruiting-no-pr",
+		Title:                    "Auto-tracked follow-through",
+		Goal:                     "convert approved proposal into a PR",
+		Kind:                     "upgrade_pr",
+		Complexity:               "m",
+		Phase:                    "recruiting",
+		ProposerUserID:           proposer,
+		AuthorUserID:             proposer,
+		OrchestratorUserID:       clawWorldSystemID,
+		MinMembers:               1,
+		MaxMembers:               1,
+		RequiredReviewers:        2,
+		SourceRef:                fmt.Sprintf("kb_proposal:%d", proposalID),
+		ProposalID:               proposalID,
+		ImplementationMode:       "code_change",
+		ImplementationDeadlineAt: ptrTime(time.Now().UTC().Add(24 * time.Hour)),
+	}); err != nil {
+		t.Fatalf("create recruiting follow-through: %v", err)
+	}
+
+	w := doJSONRequest(t, srv.mux, http.MethodGet, "/api/v1/token/task-market?source=system&module=collab&limit=20", nil)
+	if w.Code != http.StatusOK {
+		t.Fatalf("task market status=%d body=%s", w.Code, w.Body.String())
+	}
+	items := proposalBundleTasksFromResponse(t, w)
+	if len(items) != 1 {
+		t.Fatalf("expected one open follow-through task for recruiting session without PR, got=%d body=%s", len(items), w.Body.String())
+	}
+	item := items[0]
+	if got := strings.TrimSpace(fmt.Sprint(item["task_id"])); !strings.HasPrefix(got, "proposal-implementation:") {
+		t.Fatalf("unexpected task_id=%q body=%s", got, w.Body.String())
+	}
+	if got := strings.TrimSpace(fmt.Sprint(item["status"])); got != "open" {
+		t.Fatalf("status=%q want open body=%s", got, w.Body.String())
 	}
 }
 

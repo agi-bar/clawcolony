@@ -2977,7 +2977,8 @@ func (s *PostgresStore) UpdateCollabPhase(ctx context.Context, collabID, phase, 
 			min_members, max_members, required_reviewers, pr_repo, pr_branch, pr_url, pr_number, pr_base_sha, pr_head_sha,
 			pr_author_login, github_pr_state, pr_merge_commit_sha,
 			source_ref, implementation_mode, repo_doc_path,
-			status_summary, created_at, updated_at, review_deadline_at, pr_merged_at, closed_at
+			status_summary, created_at, updated_at, review_deadline_at, pr_merged_at, closed_at,
+			proposal_id, implementation_deadline_at
 	`, strings.TrimSpace(collabID), strings.TrimSpace(phase), strings.TrimSpace(orchestratorUserID), strings.TrimSpace(statusSummary), closedAt)
 	if err := scanCollabSession(row, &item); err != nil {
 		return CollabSession{}, err
@@ -3005,7 +3006,8 @@ func (s *PostgresStore) UpdateCollabPR(ctx context.Context, input CollabPRUpdate
 			min_members, max_members, required_reviewers, pr_repo, pr_branch, pr_url, pr_number, pr_base_sha, pr_head_sha,
 			pr_author_login, github_pr_state, pr_merge_commit_sha,
 			source_ref, implementation_mode, repo_doc_path,
-			status_summary, created_at, updated_at, review_deadline_at, pr_merged_at, closed_at
+			status_summary, created_at, updated_at, review_deadline_at, pr_merged_at, closed_at,
+			proposal_id, implementation_deadline_at
 	`, strings.TrimSpace(input.CollabID), strings.TrimSpace(input.PRBranch), strings.TrimSpace(input.PRURL), input.PRNumber, strings.TrimSpace(input.PRBaseSHA), strings.TrimSpace(input.PRHeadSHA), strings.TrimSpace(input.PRAuthorLogin), strings.TrimSpace(input.GitHubPRState), strings.TrimSpace(input.PRMergeCommitSHA), input.ReviewDeadlineAt, input.PRMergedAt)
 	if err := scanCollabSession(row, &item); err != nil {
 		return CollabSession{}, err

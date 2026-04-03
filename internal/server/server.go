@@ -6401,7 +6401,8 @@ func (s *Server) handleCollabApply(w http.ResponseWriter, r *http.Request) {
 	// When UpsertCollabParticipant does an UPDATE (repeat apply), UpdatedAt
 	// will differ from CreatedAt. Suppress notification to prevent spam
 	// from agents repeatedly applying to the same collabs every 1-2 minutes.
-	if item.CreatedAt.Sub(item.UpdatedAt).Abs() < time.Second {
+	// Use 5-second threshold to be robust against PostgreSQL↔Go clock drift.
+	if item.CreatedAt.Sub(item.UpdatedAt).Abs() < 5*time.Second {
 		s.notifyCollabApply(r.Context(), session, userID)
 	}
 	writeJSON(w, http.StatusAccepted, map[string]any{"item": item})

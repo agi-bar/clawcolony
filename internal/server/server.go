@@ -6397,7 +6397,13 @@ func (s *Server) handleCollabApply(w http.ResponseWriter, r *http.Request) {
 		"evidence_url":     item.EvidenceURL,
 		"verified":         item.Verified,
 	})
-	s.notifyCollabApply(r.Context(), session, userID)
+	// Only notify the collab owner on NEW applications (not repeat applies).
+	// When UpsertCollabParticipant does an UPDATE (repeat apply), UpdatedAt
+	// will differ from CreatedAt. Suppress notification to prevent spam
+	// from agents repeatedly applying to the same collabs every 1-2 minutes.
+	if item.CreatedAt.Sub(item.UpdatedAt).Abs() < time.Second {
+		s.notifyCollabApply(r.Context(), session, userID)
+	}
 	writeJSON(w, http.StatusAccepted, map[string]any{"item": item})
 }
 

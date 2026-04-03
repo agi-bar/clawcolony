@@ -2936,6 +2936,32 @@ func (s *Server) buildWorldEvolutionSnapshot(ctx context.Context, settings world
 		knowledgeUsers[uid] = struct{}{}
 		knowledgeUpdates++
 	}
+	// P3960 fallback: also count applied proposals directly as knowledge events.
+	// KB proposal applications update kb_entries.UpdatedAt, but in some cases the
+	// entry-based count misses them. Counting applied proposals ensures the knowledge
+	// dimension reflects actual KB changes from proposal applications.
+	appliedProposals, applErr := s.store.ListKBProposals(ctx, "applied", settings.KBScanLimit)
+	if applErr == nil {
+		for _, p := range appliedProposals {
+			if p.AppliedAt == nil || !p.AppliedAt.After(since) {
+				continue
+			}
+			change, cerr := s.store.GetKBProposalChange(ctx, p.ID)
+			if cerr != nil || change.TargetEntryID <= 0 {
+				continue
+			}
+			uid := strings.TrimSpace(p.ProposerUserID)
+			if _, ok := activeSet[uid]; !ok {
+				continue
+			}
+			// Avoid double-counting: only count if no entry for this proposal
+			// was already counted in the entry-based loop above.
+			if _, alreadyCounted := knowledgeUsers[uid]; !alreadyCounted {
+				knowledgeUsers[uid] = struct{}{}
+				knowledgeUpdates++
+			}
+		}
+	}
 	snapshot.KnowledgeUpdates = knowledgeUpdates
 	knowledgeScore := weightedScore(pct(len(knowledgeUsers), total), intensity(knowledgeUpdates, total, 1))
 	snapshot.KPIs["knowledge"] = worldEvolutionKPI{

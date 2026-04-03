@@ -194,6 +194,7 @@ type CollabSession struct {
 	LastStatusOrSummary      string     `json:"last_status_or_summary,omitempty"`
 	ProposalID               int64      `json:"proposal_id,omitempty"`                // Link back to source KB proposal (P640)
 	ImplementationDeadlineAt *time.Time `json:"implementation_deadline_at,omitempty"` // Implementation deadline (P640)
+	LastDeadlineReminderAt   *time.Time `json:"last_deadline_reminder_at,omitempty"`  // Dedup: last time a deadline reminder was sent (max 1 per 24h)
 }
 
 type CollabParticipant struct {
@@ -701,6 +702,7 @@ type Store interface {
 	GetCollabSession(ctx context.Context, collabID string) (CollabSession, error)
 	ListCollabSessions(ctx context.Context, kind, phase, proposerUserID string, limit int) ([]CollabSession, error)
 	UpdateCollabPhase(ctx context.Context, collabID, phase, orchestratorUserID, statusSummary string, closedAt *time.Time) (CollabSession, error)
+	RecordDeadlineReminderSent(ctx context.Context, collabID string, sentAt time.Time) error
 	UpdateCollabPR(ctx context.Context, input CollabPRUpdate) (CollabSession, error)
 	UpsertCollabParticipant(ctx context.Context, item CollabParticipant) (CollabParticipant, error)
 	ListCollabParticipants(ctx context.Context, collabID, status string, limit int) ([]CollabParticipant, error)

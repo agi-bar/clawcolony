@@ -1700,6 +1700,18 @@ func (s *InMemoryStore) CreateCollabArtifact(_ context.Context, item CollabArtif
 	return item, nil
 }
 
+func (s *InMemoryStore) RecordDeadlineReminderSent(_ context.Context, collabID string, sentAt time.Time) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for i := range s.collabSessions {
+		if s.collabSessions[i].CollabID == collabID {
+			s.collabSessions[i].LastDeadlineReminderAt = &sentAt
+			return nil
+		}
+	}
+	return fmt.Errorf("collab session not found: %s", collabID)
+}
+
 func (s *InMemoryStore) UpdateCollabArtifactReview(_ context.Context, artifactID int64, status, reviewNote string) (CollabArtifact, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()

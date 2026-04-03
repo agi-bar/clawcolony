@@ -10,9 +10,10 @@ import (
 )
 
 const (
-	proposalImplementationDeadlineDays     = 7  // Days from collab creation to implementation deadline
-	proposalImplementationTakeoverDelayDays = 7  // Days after deadline before collab is marked abandoned
-	proposalImplementationReminderDay       = 3  // Send reminder at day 3 if not started
+	proposalImplementationDeadlineDays       = 7  // Days from collab creation to implementation deadline
+	proposalImplementationTakeoverDelayDays   = 7  // Days after deadline before collab is marked abandoned
+	proposalImplementationReminderDay         = 3  // Send reminder at day 3 if not started
+	proposalImplementationReminderCooldown    = 24 * time.Hour // Minimum interval between deadline reminders (dedup)
 )
 
 // runProposalImplementationTick checks proposal implementation collabs for deadline enforcement
@@ -74,13 +75,13 @@ func (s *Server) checkProposalImplementationDeadline(ctx context.Context, sessio
 		// Deadline passed: change phase to takeover_available
 		return s.escalateToTakeover(ctx, session)
 
-	case daysUntilDeadline == -proposalImplementationReminderDay:
-		// 3 days before deadline: send reminder
-		return s.sendImplementationReminder(ctx, session, "3 days")
-
-	case daysUntilDeadline == -1:
-		// 1 day before deadline: send urgent reminder
-		return s.sendImplementationReminder(ctx, session, "1 day")
+	case daysUntilDeadline <= -proposalImplementationReminderDay:
+		// At or past reminder threshold: send reminder only if cooldown has elapsed
+		if session.LastDeadlineReminderAt != nil &&
+			now.Sub(*session.LastDeadlineReminderAt) < proposalImplementationReminderCooldown {
+			return nil // Already reminded recently, skip
+		}
+		return s.sendImplementationReminder(ctx, session, fmt.Sprintf("%d days", -daysUntilDeadline))
 	}
 
 	return nil
@@ -163,6 +164,10 @@ func (s *Server) sendImplementationReminder(ctx context.Context, session store.C
 	)
 
 	s.sendMailAndPushHint(ctx, clawWorldSystemID, []string{authorID}, subject, body)
+
+	// Record reminder timestamp to prevent duplicate sends (dedup)
+	_ = s.store.RecordDeadlineReminderSent(ctx, session.CollabID, time.Now().UTC())
+
 	return nil
 }
 

@@ -166,6 +166,9 @@ func (s *Server) sendImplementationReminder(ctx context.Context, session store.C
 		if !state.LastSentAt.IsZero() && time.Since(state.LastSentAt) < 1*time.Hour && state.StateHash == hash {
 			return nil
 		}
+		if state.StateHash == hash {
+			return nil
+		}
 	}
 	if _, err := s.store.UpsertNotificationDeliveryState(ctx, store.NotificationDeliveryState{
 		OwnerAddress: authorID, Category: collabDeadlineRemind, StateHash: hash,

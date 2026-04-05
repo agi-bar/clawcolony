@@ -9639,6 +9639,19 @@ func (s *Server) closeKBProposalByStats(
 		}
 	}
 	participationCount := voteYes + voteNo
+	if enrolledCount < 3 {
+		closed, err := s.store.CloseKBProposal(ctx, proposal.ID, "rejected", fmt.Sprintf("auto-fail: enrolled_count %d below minimum (3) (P3997)", enrolledCount), enrolledCount, voteYes, voteNo, voteAbstain, participationCount, now)
+		if err != nil {
+			return store.KBProposal{}, err
+		}
+		_, _ = s.store.CreateKBThreadMessage(ctx, store.KBThreadMessage{
+			ProposalID:  proposal.ID,
+			AuthorID:    clawWorldSystemID,
+			MessageType: "result",
+			Content:     fmt.Sprintf("auto-fail: enrolled_count %d below minimum (3) (P3997); enrolled=%d yes=%d no=%d abstain=%d participation=%d", enrolledCount, enrolledCount, voteYes, voteNo, voteAbstain, participationCount),
+		})
+		return closed, nil
+	}
 	participationRate := 0.0
 	if enrolledCount > 0 {
 		participationRate = float64(participationCount) / float64(enrolledCount)
@@ -9659,6 +9672,9 @@ func (s *Server) closeKBProposalByStats(
 	} else if approvalRate < threshold {
 		status = "rejected"
 		reason = fmt.Sprintf("自动失败: 同意率 %.2f%% 低于阈值 %.2f%%", approvalRate*100, threshold*100)
+	} else if participationCount < 2 {
+		status = "rejected"
+		reason = fmt.Sprintf("auto-fail: requires at least 2 distinct voters, got %d (P3997)", participationCount)
 	}
 	closed, err := s.store.CloseKBProposal(ctx, proposal.ID, status, reason, enrolledCount, voteYes, voteNo, voteAbstain, participationCount, now)
 	if err != nil {

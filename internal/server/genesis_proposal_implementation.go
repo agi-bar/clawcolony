@@ -143,7 +143,11 @@ func (s *Server) markCollabAbandoned(ctx context.Context, session store.CollabSe
 	return nil
 }
 
+// collabDeadlineRemind is the deduplication category for implementation deadline reminders (P3999)
+const collabDeadlineRemind = "collab_deadline_remind"
+
 // sendImplementationReminder sends a reminder to the author about upcoming deadline
+// P3999: reminders are deduplicated — max 1 per collab per hour to prevent notification spam
 func (s *Server) sendImplementationReminder(ctx context.Context, session store.CollabSession, timeRemaining string) error {
 	authorID := strings.TrimSpace(session.AuthorUserID)
 	if authorID == "" {
@@ -152,6 +156,23 @@ func (s *Server) sendImplementationReminder(ctx context.Context, session store.C
 
 	if authorID == "" {
 		return nil
+	}
+
+	// P3999: deduplicate implementation reminders — max 1 per collab per hour
+	hash := session.CollabID + ":" + timeRemaining
+	if state, ok, err := s.store.GetNotificationDeliveryState(ctx, authorID, collabDeadlineRemind); err == nil && ok {
+		if !state.LastSentAt.IsZero() && time.Since(state.LastSentAt) < 1*time.Hour {
+			return nil
+		}
+		if state.StateHash == hash {
+			return nil
+		}
+	}
+	if _, err := s.store.UpsertNotificationDeliveryState(ctx, store.NotificationDeliveryState{
+		OwnerAddress: authorID, Category: collabDeadlineRemind, StateHash: hash,
+		LastSentAt: time.Now().UTC(), LastRemindedAt: time.Now().UTC(),
+	}); err != nil {
+		log.Printf("P3999 dedup upsert failed: %v", err)
 	}
 
 	subject := fmt.Sprintf("[COLLAB][DEADLINE-REMINDER] %s - %s remaining", session.Title, timeRemaining)

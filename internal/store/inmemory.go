@@ -1703,13 +1703,13 @@ func (s *InMemoryStore) CreateCollabArtifact(_ context.Context, item CollabArtif
 func (s *InMemoryStore) RecordDeadlineReminderSent(_ context.Context, collabID string, sentAt time.Time) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	for i := range s.collabSessions {
-		if s.collabSessions[i].CollabID == collabID {
-			s.collabSessions[i].LastDeadlineReminderAt = &sentAt
-			return nil
-		}
+	session, ok := s.collab[collabID]
+	if !ok {
+		return fmt.Errorf("collab session not found: %s", collabID)
 	}
-	return fmt.Errorf("collab session not found: %s", collabID)
+	session.LastDeadlineReminderAt = &sentAt
+	s.collab[collabID] = session
+	return nil
 }
 
 func (s *InMemoryStore) UpdateCollabArtifactReview(_ context.Context, artifactID int64, status, reviewNote string) (CollabArtifact, error) {

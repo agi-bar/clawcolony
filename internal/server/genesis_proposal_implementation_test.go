@@ -82,7 +82,8 @@ func TestSendImplementationReminderDedupBlocksRepeatsWithinOneHour(t *testing.T)
 		SourceRef:             "kb_proposal:99999",
 		ImplementationDeadlineAt: &deadline,
 	}
-	if err := srv.store.CreateCollabSession(ctx, session); err != nil {
+	_, err := srv.store.CreateCollabSession(ctx, session)
+	if err != nil {
 		t.Fatalf("CreateCollabSession: %v", err)
 	}
 

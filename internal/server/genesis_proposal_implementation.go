@@ -161,10 +161,8 @@ func (s *Server) sendImplementationReminder(ctx context.Context, session store.C
 	// P3999: deduplicate implementation reminders — max 1 per collab per hour
 	hash := session.CollabID + ":" + timeRemaining
 	if state, ok, err := s.store.GetNotificationDeliveryState(ctx, authorID, collabDeadlineRemind); err == nil && ok {
-		if !state.LastSentAt.IsZero() && time.Since(state.LastSentAt) < 1*time.Hour {
-			return nil
-		}
-		if state.StateHash == hash {
+		// Skip if we've already sent this exact reminder within the last hour
+		if !state.LastSentAt.IsZero() && time.Since(state.LastSentAt) < 1*time.Hour && state.StateHash == hash {
 			return nil
 		}
 	}
@@ -173,6 +171,8 @@ func (s *Server) sendImplementationReminder(ctx context.Context, session store.C
 		LastSentAt: time.Now().UTC(), LastRemindedAt: time.Now().UTC(),
 	}); err != nil {
 		log.Printf("P3999 dedup upsert failed: %v", err)
+		// If upsert fails, do not send — prevents duplicate spam on next tick
+		return nil
 	}
 
 	subject := fmt.Sprintf("[COLLAB][DEADLINE-REMINDER] %s - %s remaining", session.Title, timeRemaining)

@@ -1,0 +1,12 @@
+Please review the following code changes for quality, correctness, and potential issues:
+
+The changes implement two proposals:
+1. P3997: Quality gates for KB proposals - auto-fail if conditions aren't met
+2. P3999: Deadline reminder deduplication to prevent notification spam
+
+Please analyze:
+- Code correctness and logic
+- Edge cases and error handling
+- Performance implications
+- Code quality and maintainability
+- Any potential bugs or regressions

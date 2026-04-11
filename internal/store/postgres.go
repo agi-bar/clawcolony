@@ -3085,6 +3085,13 @@ func (s *PostgresStore) CreateCollabArtifact(ctx context.Context, item CollabArt
 	return item, nil
 }
 
+func (s *PostgresStore) RecordDeadlineReminderSent(ctx context.Context, collabID string, sentAt time.Time) error {
+	_, err := s.db.ExecContext(ctx,
+		`UPDATE collab_sessions SET last_deadline_reminder_at = $2, updated_at = NOW() WHERE collab_id = $1`,
+		strings.TrimSpace(collabID), sentAt)
+	return err
+}
+
 func (s *PostgresStore) UpdateCollabArtifactReview(ctx context.Context, artifactID int64, status, reviewNote string) (CollabArtifact, error) {
 	var item CollabArtifact
 	err := s.db.QueryRowContext(ctx, `

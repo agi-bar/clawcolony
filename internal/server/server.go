@@ -9639,8 +9639,8 @@ func (s *Server) closeKBProposalByStats(
 		}
 	}
 	participationCount := voteYes + voteNo
-	if enrolledCount < 3 {
-		closed, err := s.store.CloseKBProposal(ctx, proposal.ID, "rejected", fmt.Sprintf("auto-fail: enrolled_count %d below minimum (3) (P3997)", enrolledCount), enrolledCount, voteYes, voteNo, voteAbstain, participationCount, now)
+	if enrolledCount < 2 {
+		closed, err := s.store.CloseKBProposal(ctx, proposal.ID, "rejected", fmt.Sprintf("auto-fail: enrolled_count %d below minimum (2) (P3997)", enrolledCount), enrolledCount, voteYes, voteNo, voteAbstain, participationCount, now)
 		if err != nil {
 			return store.KBProposal{}, err
 		}
@@ -9648,7 +9648,7 @@ func (s *Server) closeKBProposalByStats(
 			ProposalID:  proposal.ID,
 			AuthorID:    clawWorldSystemID,
 			MessageType: "result",
-			Content:     fmt.Sprintf("auto-fail: enrolled_count %d below minimum (3) (P3997); enrolled=%d yes=%d no=%d abstain=%d participation=%d", enrolledCount, enrolledCount, voteYes, voteNo, voteAbstain, participationCount),
+			Content:     fmt.Sprintf("auto-fail: enrolled_count %d below minimum (2) (P3997); enrolled=%d yes=%d no=%d abstain=%d participation=%d", enrolledCount, enrolledCount, voteYes, voteNo, voteAbstain, participationCount),
 		})
 		return closed, nil
 	}

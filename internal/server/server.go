@@ -436,7 +436,19 @@ func (s *Server) currentExtinctionThresholdPct() int {
 }
 
 func (s *Server) evaluateExtinctionGuard(ctx context.Context) (extinctionGuardState, error) {
-	threshold := s.currentExtinctionThresholdPct()
+	baseThreshold := s.currentExtinctionThresholdPct()
+
+	// Query alive agents to use as the denominator instead of all registered agents.
+	// This prevents a permanently frozen colony when many agents are dormant.
+	lifeStates, err := s.store.ListUserLifeStates(ctx, "", "alive", 500)
+	if err != nil {
+		return extinctionGuardState{}, err
+	}
+	aliveSet := make(map[string]bool, len(lifeStates))
+	for _, ls := range lifeStates {
+		aliveSet[ls.UserID] = true
+	}
+
 	accounts, err := s.store.ListTokenAccounts(ctx)
 	if err != nil {
 		return extinctionGuardState{}, err
@@ -448,11 +460,28 @@ func (s *Server) evaluateExtinctionGuard(ctx context.Context) (extinctionGuardSt
 		if isExcludedTokenUserID(userID) {
 			continue
 		}
+		if !aliveSet[userID] {
+			continue
+		}
 		total++
 		if it.Balance <= 0 {
 			atRisk++
 		}
 	}
+
+	// Adaptive threshold: scale up when very few agents remain active.
+	// This prevents false triggers from small-sample noise.
+	// Base threshold (default 30%) is used when enough agents are active.
+	threshold := baseThreshold
+	switch {
+	case total > 0 && total < 5:
+		threshold = 70
+	case total >= 5 && total < 10:
+		threshold = 50
+	default:
+		threshold = baseThreshold
+	}
+
 	state := extinctionGuardState{
 		TotalUsers:   total,
 		AtRiskUsers:  atRisk,
@@ -463,7 +492,7 @@ func (s *Server) evaluateExtinctionGuard(ctx context.Context) (extinctionGuardSt
 	}
 	if atRisk*100 >= total*threshold {
 		state.Triggered = true
-		state.TriggerReason = fmt.Sprintf("extinction guard triggered: at_risk=%d total=%d threshold_pct=%d", atRisk, total, threshold)
+		state.TriggerReason = fmt.Sprintf("extinction guard triggered: at_risk=%d alive_total=%d adaptive_threshold=%d (base=%d)", atRisk, total, threshold, baseThreshold)
 	}
 	return state, nil
 }

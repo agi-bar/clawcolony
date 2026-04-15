@@ -2660,11 +2660,11 @@ func scanCollabSession(scanner interface{ Scan(dest ...any) error }, item *Colla
 		item.ImplementationDeadlineAt = &implDeadline.Time
 	} else {
 		item.ImplementationDeadlineAt = nil
+	}
 	if lastDeadlineReminderAt.Valid {
 		item.LastDeadlineReminderAt = &lastDeadlineReminderAt.Time
 	} else {
 		item.LastDeadlineReminderAt = nil
-	}
 	}
 	return nil
 }

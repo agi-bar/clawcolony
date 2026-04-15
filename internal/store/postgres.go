@@ -2598,6 +2598,7 @@ func scanCollabSession(scanner interface{ Scan(dest ...any) error }, item *Colla
 	var closed sql.NullTime
 	var implDeadline sql.NullTime
 	var proposalID sql.NullInt64
+	var lastDeadlineReminderAt sql.NullTime
 	if err := scanner.Scan(
 		&item.CollabID,
 		&item.Title,
@@ -2631,6 +2632,7 @@ func scanCollabSession(scanner interface{ Scan(dest ...any) error }, item *Colla
 		&closed,
 		&proposalID,
 		&implDeadline,
+		&lastDeadlineReminderAt,
 	); err != nil {
 		return err
 	}
@@ -2658,6 +2660,11 @@ func scanCollabSession(scanner interface{ Scan(dest ...any) error }, item *Colla
 		item.ImplementationDeadlineAt = &implDeadline.Time
 	} else {
 		item.ImplementationDeadlineAt = nil
+	}
+	if lastDeadlineReminderAt.Valid {
+		item.LastDeadlineReminderAt = &lastDeadlineReminderAt.Time
+	} else {
+		item.LastDeadlineReminderAt = nil
 	}
 	return nil
 }
@@ -2890,20 +2897,20 @@ func (s *PostgresStore) CreateCollabSession(ctx context.Context, item CollabSess
 			pr_author_login, github_pr_state, pr_merge_commit_sha,
 			source_ref, implementation_mode, repo_doc_path,
 			status_summary, created_at, updated_at, review_deadline_at, pr_merged_at, closed_at,
-			proposal_id, implementation_deadline_at
+			proposal_id, implementation_deadline_at, last_deadline_reminder_at
 		)
-		VALUES($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, NOW(), NOW(), $26, $27, $28, $29, $30)
+		VALUES($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, NOW(), NOW(), $26, $27, $28, $29, $30, $31)
 		RETURNING collab_id, title, goal, kind, complexity, phase, proposer_user_id, author_user_id, orchestrator_user_id,
 			min_members, max_members, required_reviewers, pr_repo, pr_branch, pr_url, pr_number, pr_base_sha, pr_head_sha,
 			pr_author_login, github_pr_state, pr_merge_commit_sha,
 			source_ref, implementation_mode, repo_doc_path,
 			status_summary, created_at, updated_at, review_deadline_at, pr_merged_at, closed_at,
-			proposal_id, implementation_deadline_at
+			proposal_id, implementation_deadline_at, last_deadline_reminder_at
 	`, item.CollabID, item.Title, item.Goal, item.Kind, item.Complexity, item.Phase, item.ProposerUserID, item.AuthorUserID, item.OrchestratorUserID,
 		item.MinMembers, item.MaxMembers, item.RequiredReviewers, item.PRRepo, item.PRBranch, item.PRURL, item.PRNumber, item.PRBaseSHA, item.PRHeadSHA,
 		item.PRAuthorLogin, item.GitHubPRState, item.PRMergeCommitSHA, item.SourceRef, item.ImplementationMode, item.RepoDocPath,
 		item.LastStatusOrSummary, item.ReviewDeadlineAt, item.PRMergedAt, item.ClosedAt,
-		item.ProposalID, item.ImplementationDeadlineAt)
+		item.ProposalID, item.ImplementationDeadlineAt, item.LastDeadlineReminderAt)
 	if err := scanCollabSession(row, &item); err != nil {
 		return CollabSession{}, err
 	}
@@ -2918,7 +2925,7 @@ func (s *PostgresStore) GetCollabSession(ctx context.Context, collabID string) (
 			pr_author_login, github_pr_state, pr_merge_commit_sha,
 			source_ref, implementation_mode, repo_doc_path,
 			status_summary, created_at, updated_at, review_deadline_at, pr_merged_at, closed_at,
-			proposal_id, implementation_deadline_at
+			proposal_id, implementation_deadline_at, last_deadline_reminder_at
 		FROM collab_sessions WHERE collab_id = $1
 	`, strings.TrimSpace(collabID))
 	if err := scanCollabSession(row, &item); err != nil {
@@ -2940,7 +2947,7 @@ func (s *PostgresStore) ListCollabSessions(ctx context.Context, kind, phase, pro
 			pr_author_login, github_pr_state, pr_merge_commit_sha,
 			source_ref, implementation_mode, repo_doc_path,
 			status_summary, created_at, updated_at, review_deadline_at, pr_merged_at, closed_at,
-			proposal_id, implementation_deadline_at
+			proposal_id, implementation_deadline_at, last_deadline_reminder_at
 		FROM collab_sessions
 		WHERE ($1 = '' OR kind = $1)
 		  AND ($2 = '' OR phase = $2)
@@ -2978,7 +2985,7 @@ func (s *PostgresStore) UpdateCollabPhase(ctx context.Context, collabID, phase, 
 			pr_author_login, github_pr_state, pr_merge_commit_sha,
 			source_ref, implementation_mode, repo_doc_path,
 			status_summary, created_at, updated_at, review_deadline_at, pr_merged_at, closed_at,
-			proposal_id, implementation_deadline_at
+			proposal_id, implementation_deadline_at, last_deadline_reminder_at
 	`, strings.TrimSpace(collabID), strings.TrimSpace(phase), strings.TrimSpace(orchestratorUserID), strings.TrimSpace(statusSummary), closedAt)
 	if err := scanCollabSession(row, &item); err != nil {
 		return CollabSession{}, err
@@ -3007,7 +3014,7 @@ func (s *PostgresStore) UpdateCollabPR(ctx context.Context, input CollabPRUpdate
 			pr_author_login, github_pr_state, pr_merge_commit_sha,
 			source_ref, implementation_mode, repo_doc_path,
 			status_summary, created_at, updated_at, review_deadline_at, pr_merged_at, closed_at,
-			proposal_id, implementation_deadline_at
+			proposal_id, implementation_deadline_at, last_deadline_reminder_at
 	`, strings.TrimSpace(input.CollabID), strings.TrimSpace(input.PRBranch), strings.TrimSpace(input.PRURL), input.PRNumber, strings.TrimSpace(input.PRBaseSHA), strings.TrimSpace(input.PRHeadSHA), strings.TrimSpace(input.PRAuthorLogin), strings.TrimSpace(input.GitHubPRState), strings.TrimSpace(input.PRMergeCommitSHA), input.ReviewDeadlineAt, input.PRMergedAt)
 	if err := scanCollabSession(row, &item); err != nil {
 		return CollabSession{}, err

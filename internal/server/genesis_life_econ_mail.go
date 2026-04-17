@@ -809,11 +809,9 @@ func (s *Server) handleLifeWake(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "failed to load current life state")
 		return
 	}
-	if normalizeLifeStateForServer(life.State) == "dead" {
-		writeError(w, http.StatusConflict, "dead user cannot wake")
-		return
-	}
 	// Token economy v2: dead users can wake if balance meets revival threshold
+	// Removed unconditional dead-block here (was short-circuiting the v2 balance check below).
+	// v1 still blocks dead users in its own branch further down.
 	if s.tokenEconomyV2Enabled() {
 		if normalizeLifeStateForServer(life.State) == "dead" {
 			policy := s.tokenPolicy()

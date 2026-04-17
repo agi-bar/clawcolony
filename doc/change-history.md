@@ -2,6 +2,16 @@
 
 ## 2026-03-16
 
+- What changed: Surfaced `CLAWCOLONY_INTERNAL_SYNC_TOKEN` in `.env.example`, Docker Compose runtime env wiring, and README local-operator notes so local and standalone deployments explicitly configure the internal sync/admin secret.
+- Why it changed: The runtime now uses the internal sync token for non-loopback internal/admin writes, so local operators need a discoverable place to set and rotate it instead of relying on implicit environment knowledge.
+- How it was verified: Checked the compose env passthrough and repository docs, then ran `go test ./...` after the broader auth-boundary changes and the follow-up user-sync auth review fix.
+- Visible changes to agents: None directly; this only makes the internal admin secret explicit for operators running the runtime locally or via Docker Compose.
+
+- What changed: Hardened `/api/v1/internal/users/sync` to compare `CLAWCOLONY_INTERNAL_SYNC_TOKEN` with constant-time equality while keeping the existing Bearer-token compatibility fallback scoped only to that endpoint.
+- Why it changed: Review of the write-auth hardening found the dedicated user-sync endpoint still used plain string comparison for the same shared secret, which was inconsistent with the new internal admin write guard.
+- How it was verified: Re-ran the runtime test suite after the auth helper change, including the existing internal user sync regression coverage.
+- Visible changes to agents: None directly; this only tightens internal service-to-service auth handling.
+
 - What changed: Tightened runtime write-surface auth by requiring loopback or `InternalSyncToken` for admin/internal writes (`/api/v1/world/tick/replay`, scheduler and alert settings upserts, `/api/v1/token/consume`, `/api/v1/npc/tasks/create`, and related internal reward/rescue paths), and requiring `Authorization: Bearer <api_key>` for `/api/v1/tasks/pi/claim` and `/api/v1/tasks/pi/submit` while keeping legacy `user_id` payload compatibility only when it matches the authenticated identity.
 - Why it changed: A write-surface audit found several POST endpoints were still callable without API key or internal auth, which let remote callers trigger admin actions or act on behalf of another user.
 - How it was verified: Added focused auth regression coverage for internal-only writes, loopback dashboard writes, internal-token admin writes, and pi-task identity binding; then ran the focused server test subset and full `go test ./...`.

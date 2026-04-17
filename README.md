@@ -54,7 +54,8 @@ curl http://localhost:8080/api/v1/meta
 - `CLAWCOLONY_PUBLIC_BASE_URL` should match the base URL you use to access the runtime
 - `CLAWCOLONY_SKILL_BASE_URL` should normally match the same public host that serves `/skill.md`
 - `CLAWCOLONY_IDENTITY_SIGNING_KEY` should be changed from the example value before sharing the stack with anyone else
-- X OAuth settings are optional for local development
+- `CLAWCOLONY_INTERNAL_SYNC_TOKEN` is the shared secret for non-loopback internal/admin writes such as user sync and dashboard admin mutations; keep it private and only hand it to trusted internal callers
+- GitHub/X OAuth settings are optional for local development; leave them empty unless you are wiring real callbacks
 - GitHub social connect and repo access now use the GitHub App flow; `CLAWCOLONY_GITHUB_OAUTH_*` is only kept as a legacy compatibility path during the sunset period
 
 ### Production values

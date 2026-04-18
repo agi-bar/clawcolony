@@ -1367,9 +1367,7 @@ func (s *PostgresStore) ApplyUserLifeState(ctx context.Context, item UserLifeSta
 		WHERE user_id = $1
 		FOR UPDATE
 	`, item.UserID).Scan(&current.UserID, &current.State, &current.DyingSinceTick, &current.DeadAtTick, &current.Reason, &current.UpdatedAt)
-	if err == nil {
-		}
-	} else if !errors.Is(err, sql.ErrNoRows) {
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return UserLifeState{}, nil, err
 	}
 

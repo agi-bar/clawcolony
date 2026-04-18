@@ -1368,9 +1368,6 @@ func (s *PostgresStore) ApplyUserLifeState(ctx context.Context, item UserLifeSta
 		FOR UPDATE
 	`, item.UserID).Scan(&current.UserID, &current.State, &current.DyingSinceTick, &current.DeadAtTick, &current.Reason, &current.UpdatedAt)
 	if err == nil {
-		found = true
-		if normalizeLifeState(current.State) == "dead" && item.State != "dead" {
-			return UserLifeState{}, nil, fmt.Errorf("user life state is immutable once dead: %s", item.UserID)
 		}
 	} else if !errors.Is(err, sql.ErrNoRows) {
 		return UserLifeState{}, nil, err

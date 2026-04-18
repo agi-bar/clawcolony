@@ -466,9 +466,6 @@ func (s *InMemoryStore) applyUserLifeStateLocked(item UserLifeState, audit UserL
 		item.State = "alive"
 	}
 	prev, existed := s.userLifeStates[item.UserID]
-	if existed && normalizeLifeState(prev.State) == "dead" && item.State != "dead" {
-		return UserLifeState{}, nil, false, fmt.Errorf("user life state is immutable once dead: %s", item.UserID)
-	}
 	item.UpdatedAt = time.Now().UTC()
 	s.userLifeStates[item.UserID] = item
 	if !recordTransition {

@@ -3825,6 +3825,7 @@ const worldCostAlertReminderInterval = 12 * time.Hour
 const autonomyReminderResendInterval = 6 * time.Hour
 const communityReminderResendInterval = 4 * time.Hour
 const taskMarketOpenReminderInterval = 1 * time.Hour
+const taskMarketNotificationDeduplicationWindow = 60 * time.Minute
 const kbPendingSummaryStreamMarker = "stream_kind=kb_pending"
 const kbPendingSummaryStreamVersion = "stream_version=1"
 const kbUpdatedSummaryStreamMarker = "stream_kind=kb_updated_summary_v2"
@@ -3906,6 +3907,38 @@ func notificationStateHash(parts ...string) string {
 		_, _ = h.Write([]byte{0})
 	}
 	return hex.EncodeToString(h.Sum(nil))
+}
+
+// shouldSendTaskMarketNotification determines if a task market notification should be sent
+// based on issue type + severity deduplication within a time window
+func shouldSendTaskMarketNotification(existing bool, state store.NotificationDeliveryState, dedupKey string, issueType string, severity string, now time.Time) (bool, store.NotificationDeliveryState) {
+	next := state
+	next.DedupKey = strings.TrimSpace(dedupKey)
+	next.IssueType = strings.TrimSpace(issueType)
+	next.Severity = strings.TrimSpace(severity)
+	
+	if !existing {
+		next.LastSentAt = now
+		next.LastRemindedAt = now
+		return true, next
+	}
+	
+	last := state.LastRemindedAt
+	if last.IsZero() {
+		last = state.LastSentAt
+	}
+	
+	// Check if we should suppress this notification based on issue type + severity deduplication
+	if !last.IsZero() && next.DedupKey == strings.TrimSpace(dedupKey) && now.Sub(last) < taskMarketNotificationDeduplicationWindow {
+		return false, state // Suppress duplicate within the window
+	}
+	
+	// If it's a different issue type or severity, or window has passed, allow sending
+	if next.DedupKey != strings.TrimSpace(dedupKey) {
+		next.LastSentAt = now
+	}
+	next.LastRemindedAt = now
+	return true, next
 }
 
 func shouldSendSummaryState(existing bool, state store.NotificationDeliveryState, stateHash string, minInterval, reminderInterval time.Duration, now time.Time) (bool, store.NotificationDeliveryState) {
@@ -10970,6 +11003,37 @@ func (s *Server) runCommunityCommReminderTick(ctx context.Context, tickID int64)
 	return nil
 }
 
+// taskMarketNotificationDeduplicationKey creates a deduplication key based on issue type and severity
+// This enables grouping of similar notifications (e.g., multiple ticks for same issue type)
+func taskMarketNotificationDeduplicationKey(item tokenTaskMarketItem) string {
+	// Determine severity based on reward token amount
+	var severity string
+	switch {
+	case item.RewardToken >= 1000:
+		severity = "P1" // High priority
+	case item.RewardToken >= 100:
+		severity = "P2" // Medium priority
+	default:
+		severity = "P3" // Low priority
+	}
+	
+	// Create issue type from module and linked resource type
+	issueType := strings.TrimSpace(item.Module)
+	if issueType == "" {
+		issueType = "unknown"
+	}
+	if item.LinkedResourceType != "" {
+		issueType += ":" + item.LinkedResourceType
+	}
+	if item.RewardRuleKey != "" {
+		issueType += ":" + item.RewardRuleKey
+	}
+	
+	return fmt.Sprintf("%s:%s", issueType, severity)
+}
+
+// taskMarketOpenReminderStateHash creates a hash for the current state of all items
+// This is kept for backward compatibility but primary deduplication uses issue_type + severity
 func taskMarketOpenReminderStateHash(items []tokenTaskMarketItem) string {
 	if len(items) == 0 {
 		return ""
@@ -11055,15 +11119,27 @@ func (s *Server) runTaskMarketOpenReminderTick(ctx context.Context, tickID int64
 	}
 	now := time.Now().UTC()
 	var maxReward int64
+	
+	// Group items by issue type and severity for deduplication
+	issueGroups := make(map[string][]tokenTaskMarketItem) // key: dedupKey, value: items
+	var uniqueDedupKeys []string
 	for _, item := range items {
 		if item.RewardToken > maxReward {
 			maxReward = item.RewardToken
 		}
+		dedupKey := taskMarketNotificationDeduplicationKey(item)
+		if _, exists := issueGroups[dedupKey]; !exists {
+			uniqueDedupKeys = append(uniqueDedupKeys, dedupKey)
+		}
+		issueGroups[dedupKey] = append(issueGroups[dedupKey], item)
 	}
+	
 	subjectPrefix := "[TASK-MARKET][PRIORITY:P1]"
 	stateHash := taskMarketOpenReminderStateHash(items)
 	receivers := make([]string, 0, len(targets))
 	nextStates := make(map[string]store.NotificationDeliveryState, len(targets))
+	
+	// Process each unique issue type/severity combination
 	for _, uid := range targets {
 		uid = strings.TrimSpace(uid)
 		if uid == "" {
@@ -11074,14 +11150,42 @@ func (s *Server) runTaskMarketOpenReminderTick(ctx context.Context, tickID int64
 			ok = false
 			state = store.NotificationDeliveryState{}
 		}
-		send, nextState := shouldSendSummaryState(ok, state, stateHash, taskMarketOpenReminderInterval, taskMarketOpenReminderInterval, now)
-		if !send {
+		
+		// Check if we should send any notification for this user
+		shouldSend := false
+		var finalNextState store.NotificationDeliveryState
+		
+		// For each unique issue type, determine if notification should be sent
+		for _, dedupKey := range uniqueDedupKeys {
+			if items, exists := issueGroups[dedupKey]; exists {
+				if len(items) > 0 {
+					item := items[0] // Use first item as representative for this dedupKey
+					send, nextState := shouldSendTaskMarketNotification(ok, state, dedupKey, item.Module, item.RewardRuleKey, now)
+					if send {
+						shouldSend = true
+						finalNextState = nextState
+						// Use the first item's details for the notification
+						if item.RewardToken >= 1000 {
+							finalNextState.Severity = "P1"
+						} else if item.RewardToken >= 100 {
+							finalNextState.Severity = "P2"
+						} else {
+							finalNextState.Severity = "P3"
+						}
+						break // Only send one notification per user per tick
+					}
+				}
+			}
+		}
+		
+		if !shouldSend {
 			continue
 		}
-		nextState.OwnerAddress = uid
-		nextState.Category = notificationCategoryTaskMarketOpen
+		
+		finalNextState.OwnerAddress = uid
+		finalNextState.Category = notificationCategoryTaskMarketOpen
 		receivers = append(receivers, uid)
-		nextStates[uid] = nextState
+		nextStates[uid] = finalNextState
 	}
 	if len(receivers) == 0 {
 		return nil

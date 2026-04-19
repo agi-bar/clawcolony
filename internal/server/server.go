@@ -11135,7 +11135,6 @@ func (s *Server) runTaskMarketOpenReminderTick(ctx context.Context, tickID int64
 	}
 	
 	subjectPrefix := "[TASK-MARKET][PRIORITY:P1]"
-	stateHash := taskMarketOpenReminderStateHash(items)
 	receivers := make([]string, 0, len(targets))
 	nextStates := make(map[string]store.NotificationDeliveryState, len(targets))
 	

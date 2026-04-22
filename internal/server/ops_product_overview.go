@@ -171,7 +171,7 @@ func (s *Server) buildOpsProductOverview(ctx context.Context, now, from, to time
 	if err != nil {
 		return opsProductOverviewResponse{}, err
 	}
-	ganglia, err := s.store.ListGanglia(ctx, "", "", "", 5000)
+	ganglia, err := s.store.ListGanglia(ctx, "", "", "", "", 5000)
 	if err != nil {
 		return opsProductOverviewResponse{}, err
 	}

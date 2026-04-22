@@ -81,7 +81,7 @@ func (s *Server) syncGanglionLifeState(ctx context.Context, it store.Ganglion) (
 }
 
 func (s *Server) runGangliaMetabolism(ctx context.Context) (int, error) {
-	items, err := s.store.ListGanglia(ctx, "", "", "", 2000)
+	items, err := s.store.ListGanglia(ctx, "", "", "", "", 2000)
 	if err != nil {
 		return 0, err
 	}

@@ -637,7 +637,7 @@ func (s *Server) handleAPIColonyStatus(w http.ResponseWriter, r *http.Request) {
 
 	// Ganglia stack aggregated by life_state
 	gangliaStack := map[string]any{}
-	allGanglia, gangliaErr := s.store.ListGanglia(r.Context(), "", "", "", 2000)
+	allGanglia, gangliaErr := s.store.ListGanglia(r.Context(), "", "", "", "", 2000)
 	if gangliaErr == nil {
 		counts := map[string]int{}
 		for _, g := range allGanglia {

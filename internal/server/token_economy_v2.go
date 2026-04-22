@@ -2046,7 +2046,7 @@ func (s *Server) ganglionForgeRewardDecision(ctx context.Context, item contribut
 	if err != nil {
 		return economyRewardDecision{}, false, err
 	}
-	others, err := s.store.ListGanglia(ctx, ganglion.GanglionType, "", "", 10000)
+	others, err := s.store.ListGanglia(ctx, ganglion.GanglionType, "", "", "", 10000)
 	if err != nil {
 		return economyRewardDecision{}, false, err
 	}

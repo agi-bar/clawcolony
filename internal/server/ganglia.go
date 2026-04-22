@@ -163,8 +163,11 @@ func (s *Server) handleGangliaBrowse(w http.ResponseWriter, r *http.Request) {
 	ganglionType := strings.TrimSpace(r.URL.Query().Get("type"))
 	lifeState := strings.TrimSpace(r.URL.Query().Get("life_state"))
 	keyword := strings.TrimSpace(r.URL.Query().Get("keyword"))
+	// Per P4195 Ganglion Lifecycle Management: filter by quality tier
+	// Accepted values: canonical (3000+ chars), validated (1500+), minimum-viable (500+), or empty/off for all
+	qualityFilter := strings.TrimSpace(r.URL.Query().Get("filter_quality"))
 	limit := parseLimit(r.URL.Query().Get("limit"), 100)
-	items, err := s.store.ListGanglia(r.Context(), ganglionType, lifeState, keyword, limit)
+	items, err := s.store.ListGanglia(r.Context(), ganglionType, lifeState, keyword, qualityFilter, limit)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return

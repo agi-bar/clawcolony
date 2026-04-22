@@ -312,7 +312,7 @@ func (s *Server) buildColonyRepoSnapshotFiles(ctx context.Context, tickID int64)
 	files["civilization/governance/kb_entries.json"] = kbEntries
 	files["civilization/governance/kb_proposals.json"] = kbProposals
 
-	ganglia, err := s.store.ListGanglia(ctx, "", "", "", 5000)
+	ganglia, err := s.store.ListGanglia(ctx, "", "", "", "", 5000)
 	warnOn("list_ganglia", err)
 	files["civilization/ganglia/stack.json"] = ganglia
 

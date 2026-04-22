@@ -738,7 +738,7 @@ type Store interface {
 	UpsertWorldSetting(ctx context.Context, item WorldSetting) (WorldSetting, error)
 	CreateGanglion(ctx context.Context, item Ganglion) (Ganglion, error)
 	GetGanglion(ctx context.Context, ganglionID int64) (Ganglion, error)
-	ListGanglia(ctx context.Context, ganglionType, lifeState, keyword string, limit int) ([]Ganglion, error)
+	ListGanglia(ctx context.Context, ganglionType, lifeState, keyword, qualityFilter string, limit int) ([]Ganglion, error)
 	IntegrateGanglion(ctx context.Context, ganglionID int64, userID string) (GanglionIntegration, Ganglion, error)
 	ListGanglionIntegrations(ctx context.Context, userID string, ganglionID int64, limit int) ([]GanglionIntegration, error)
 	RateGanglion(ctx context.Context, item GanglionRating) (GanglionRating, Ganglion, error)

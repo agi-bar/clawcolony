@@ -4157,7 +4157,7 @@ func (s *PostgresStore) GetGanglion(ctx context.Context, ganglionID int64) (Gang
 	return it, nil
 }
 
-func (s *PostgresStore) ListGanglia(ctx context.Context, ganglionType, lifeState, keyword string, limit int) ([]Ganglion, error) {
+func (s *PostgresStore) ListGanglia(ctx context.Context, ganglionType, lifeState, keyword, qualityFilter string, limit int) ([]Ganglion, error) {
 	if limit <= 0 {
 		limit = 100
 	}
@@ -4167,6 +4167,19 @@ func (s *PostgresStore) ListGanglia(ctx context.Context, ganglionType, lifeState
 	ganglionType = strings.TrimSpace(strings.ToLower(ganglionType))
 	lifeState = strings.TrimSpace(strings.ToLower(lifeState))
 	keyword = strings.TrimSpace(strings.ToLower(keyword))
+	qualityFilter = strings.TrimSpace(strings.ToLower(qualityFilter))
+
+	// Per P4195 Ganglion Lifecycle Management — filter by minimum implementation length
+	qualityThresholds := map[string]int{
+		"canonical":       3000,
+		"validated":        1500,
+		"minimum-viable":   500,
+	}
+	minImplLen := 0
+	if thresh, ok := qualityThresholds[qualityFilter]; ok {
+		minImplLen = thresh
+	}
+
 	var (
 		query strings.Builder
 		args  []any
@@ -4194,6 +4207,11 @@ func (s *PostgresStore) ListGanglia(ctx context.Context, ganglionType, lifeState
 		kw := "%" + keyword + "%"
 		args = append(args, kw, kw, kw, kw)
 		argi += 4
+	}
+	if minImplLen > 0 {
+		query.WriteString(fmt.Sprintf(" AND LENGTH(implementation) >= $%d", argi))
+		args = append(args, minImplLen)
+		argi++
 	}
 	query.WriteString(fmt.Sprintf(" ORDER BY updated_at DESC, id DESC LIMIT $%d", argi))
 	args = append(args, limit)

@@ -365,7 +365,7 @@ func (s *Server) buildOpsOverview(ctx context.Context, now time.Time, window str
 		}
 	}
 
-	ganglia, err := s.store.ListGanglia(ctx, "", "", "", sourceLimit)
+	ganglia, err := s.store.ListGanglia(ctx, "", "", "", "", sourceLimit)
 	if err != nil {
 		return opsOverviewResponse{}, err
 	}

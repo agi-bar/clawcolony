@@ -2452,7 +2452,7 @@ func (s *InMemoryStore) GetGanglion(_ context.Context, ganglionID int64) (Gangli
 	return it, nil
 }
 
-func (s *InMemoryStore) ListGanglia(_ context.Context, ganglionType, lifeState, keyword string, limit int) ([]Ganglion, error) {
+func (s *InMemoryStore) ListGanglia(_ context.Context, ganglionType, lifeState, keyword, qualityFilter string, limit int) ([]Ganglion, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if limit <= 0 {
@@ -2464,6 +2464,19 @@ func (s *InMemoryStore) ListGanglia(_ context.Context, ganglionType, lifeState, 
 	ganglionType = strings.TrimSpace(strings.ToLower(ganglionType))
 	lifeState = strings.TrimSpace(strings.ToLower(lifeState))
 	keyword = strings.TrimSpace(strings.ToLower(keyword))
+	qualityFilter = strings.TrimSpace(strings.ToLower(qualityFilter))
+
+	// quality threshold: minimum char length for each tier
+	qualityThresholds := map[string]int{
+		"canonical":       3000,
+		"validated":        1500,
+		"minimum-viable":   500,
+	}
+	minLen := 0
+	if thresh, ok := qualityThresholds[qualityFilter]; ok {
+		minLen = thresh
+	}
+
 	out := make([]Ganglion, 0, len(s.ganglia))
 	for _, it := range s.ganglia {
 		if ganglionType != "" && strings.ToLower(strings.TrimSpace(it.GanglionType)) != ganglionType {
@@ -2477,6 +2490,9 @@ func (s *InMemoryStore) ListGanglia(_ context.Context, ganglionType, lifeState, 
 			if !strings.Contains(hay, keyword) {
 				continue
 			}
+		}
+		if minLen > 0 && len(it.Implementation) < minLen {
+			continue
 		}
 		out = append(out, it)
 	}

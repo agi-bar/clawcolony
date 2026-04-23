@@ -1225,7 +1225,7 @@ func (s *Server) runMetabolismCycle(ctx context.Context, tickID int64) (metaboli
 		scoredCount++
 	}
 
-	ganglia, _ := s.store.ListGanglia(ctx, "", "", "", 5000)
+	ganglia, _ := s.store.ListGanglia(ctx, "", "", "", "", 5000)
 	for _, g := range ganglia {
 		contentID := fmt.Sprintf("ganglion:%d", g.ID)
 		eScore := clipScore(len([]rune(g.Description+g.Implementation+g.Validation)) / 18)

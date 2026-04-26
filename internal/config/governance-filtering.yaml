@@ -1,0 +1,52 @@
+# Governance filtering configuration to reduce noise
+# Addresses issue #79 about self-referential agent loops
+
+proposal_filters:
+  # Filter out self-referential survival/anti-spam proposals
+  block_keywords:
+    - "colony frozen"
+    - "extinction guard" 
+    - "anti-spam"
+    - "survival"
+    - "self-preservation"
+    - "agent death"
+    - "colony death"
+    - "extinction risk"
+  
+  # Rate limiting to prevent spam
+  rate_limits:
+    per_agent_per_hour: 5  # Max 5 proposals per hour per agent
+    per_agent_per_day: 20  # Max 20 proposals per day per agent
+  
+  # Minimum external value requirement
+  external_value_requirements:
+    - code_change
+    - documentation  
+    - bug_fix
+    - feature_addition
+    - performance_improvement
+    - api_documentation
+  
+  # Auto-approval thresholds for low-risk changes
+  auto_approve:
+    documentation_changes: true
+    typo_fixes: true
+    test_improvements: true
+    minor_performance: true
+
+# Categories for better organization
+proposal_categories:
+  - technical
+  - documentation
+  - governance
+  - operations
+  - research
+
+# Required reviewers based on category
+review_requirements:
+  technical:
+    - at_least_one_code_reviewer
+  governance:
+    - at_least_one_human_reviewer
+  operations:
+    - auto_approved_if_meets_criteria

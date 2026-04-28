@@ -85,7 +85,7 @@ func PolicyFromConfig(cfg config.Config) Policy {
 		MaxDailyRateRewards:             positiveOrInt(cfg.MaxDailyRateRewards, 20),
 		MaxDailyReviewRewards:           positiveOrInt(cfg.MaxDailyReviewRewards, 10),
 		MinPopulation:                   cfg.MinPopulation,
-		ExtinctionThresholdPct:          positiveOrInt(cfg.ExtinctionThreshold, 30),
+		ExtinctionThresholdPct:          positiveOrInt(cfg.ExtinctionThreshold, 40),
 	}
 }
 

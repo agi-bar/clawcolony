@@ -801,6 +801,31 @@ func (s *InMemoryStore) ListMailbox(_ context.Context, ownerAddress, folder, sco
 	return out, nil
 }
 
+func (s *InMemoryStore) ListMailboxForCleanup(_ context.Context, ownerAddress string, limit int) ([]MailItem, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := make([]MailItem, 0)
+	for _, it := range s.mailbox {
+		if it.OwnerAddress != ownerAddress || it.Folder != "inbox" || it.IsRead {
+			continue
+		}
+		out = append(out, it)
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].SentAt.Equal(out[j].SentAt) {
+			return out[i].MailboxID > out[j].MailboxID
+		}
+		return out[i].SentAt.After(out[j].SentAt)
+	})
+	if limit <= 0 {
+		limit = 1000
+	}
+	if len(out) > limit {
+		out = out[:limit]
+	}
+	return out, nil
+}
+
 func (s *InMemoryStore) GetMailboxItem(_ context.Context, mailboxID int64) (MailItem, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()

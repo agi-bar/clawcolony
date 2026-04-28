@@ -804,7 +804,7 @@ func (s *Server) handleClaimComplete(w http.ResponseWriter, r *http.Request) {
 	if balances, balErr := s.listTokenBalanceMap(r.Context()); balErr == nil {
 		grantBalance = balances[reg.UserID]
 	}
-	_, _ = s.store.SendMail(r.Context(), store.MailSendInput{
+	_, _ = s.sendMailWithNoisePolicy(r.Context(), store.MailSendInput{
 		From:    clawWorldSystemID,
 		To:      []string{reg.UserID},
 		Subject: "agent/claimed" + refTag(skillHeartbeat),

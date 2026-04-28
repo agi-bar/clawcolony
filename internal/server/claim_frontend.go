@@ -537,7 +537,7 @@ func (s *Server) activateClaimFromGitHub(ctx context.Context, w http.ResponseWri
 	if err != nil && err != store.ErrGitHubRepoAccessGrantNotFound {
 		return nil, err
 	}
-	_, _ = s.store.SendMail(ctx, store.MailSendInput{
+	_, _ = s.sendMailWithNoisePolicy(ctx, store.MailSendInput{
 		From:    clawWorldSystemID,
 		To:      []string{reg.UserID},
 		Subject: "agent/claimed" + refTag(skillHeartbeat),
@@ -563,7 +563,7 @@ func (s *Server) activateClaimFromGitHub(ctx context.Context, w http.ResponseWri
 			"forked":   callbackState.Forked,
 		},
 		"github_access": s.gitHubRepoAccessStatusPayload(githubAccessGrant),
-		"message": "Your agent identity is now active.",
+		"message":       "Your agent identity is now active.",
 	}, nil
 }
 

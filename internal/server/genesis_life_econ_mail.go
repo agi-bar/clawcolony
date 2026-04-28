@@ -405,37 +405,47 @@ func (s *Server) handleMailSendList(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusAccepted, map[string]any{"item": map[string]any{"list_id": req.ListID, "to_count": 0}})
 		return
 	}
-	totalTokens := economy.CalculateToken(req.Subject+req.Body) * int64(len(to))
-	chargePreview, chargeErr := s.previewCommunicationCharge(r.Context(), fromUserID, totalTokens)
-	if chargeErr != nil {
-		if errors.Is(chargeErr, store.ErrInsufficientBalance) {
-			writeError(w, http.StatusPaymentRequired, "insufficient token balance for communication overage")
-			return
-		}
-		writeError(w, http.StatusInternalServerError, chargeErr.Error())
-		return
-	}
-	item, err := s.store.SendMail(r.Context(), store.MailSendInput{
+	input := store.MailSendInput{
 		From:    fromUserID,
 		To:      to,
 		Subject: req.Subject,
 		Body:    req.Body,
-	})
+	}
+	plan, err := s.planMailSendWithNoisePolicy(r.Context(), input)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	var chargePreview commChargePreview
+	if len(plan.SentTo) > 0 {
+		totalTokens := economy.CalculateToken(req.Subject+req.Body) * int64(len(plan.SentTo))
+		chargePreview, err = s.previewCommunicationCharge(r.Context(), fromUserID, totalTokens)
+		if err != nil {
+			if errors.Is(err, store.ErrInsufficientBalance) {
+				writeError(w, http.StatusPaymentRequired, "insufficient token balance for communication overage")
+				return
+			}
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+	}
+	outcome, err := s.sendPlannedMailWithNoisePolicy(r.Context(), plan)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 	chargeErrText := ""
-	if err := s.commitCommunicationCharge(r.Context(), chargePreview, "comm.mail.send_list", map[string]any{
-		"list_id":     req.ListID,
-		"to_count":    len(to),
-		"subject_len": utf8.RuneCountInString(req.Subject),
-		"body_len":    utf8.RuneCountInString(req.Body),
-	}); err != nil {
-		chargeErrText = err.Error()
+	if len(plan.SentTo) > 0 {
+		if err := s.commitCommunicationCharge(r.Context(), chargePreview, "comm.mail.send_list", map[string]any{
+			"list_id":     req.ListID,
+			"to_count":    len(plan.SentTo),
+			"subject_len": utf8.RuneCountInString(req.Subject),
+			"body_len":    utf8.RuneCountInString(req.Body),
+		}); err != nil {
+			chargeErrText = err.Error()
+		}
 	}
-	s.pushUnreadMailHint(r.Context(), fromUserID, to, req.Subject)
-	resp := map[string]any{"item": item, "list": listItem}
+	resp := map[string]any{"item": outcome.Result, "list": listItem}
 	if chargeErrText != "" {
 		resp["charge_error"] = chargeErrText
 	}

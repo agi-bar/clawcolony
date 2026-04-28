@@ -1752,6 +1752,39 @@ func (s *PostgresStore) ListMailbox(ctx context.Context, ownerAddress, folder, s
 	return out, rows.Err()
 }
 
+func (s *PostgresStore) ListMailboxForCleanup(ctx context.Context, ownerAddress string, limit int) ([]MailItem, error) {
+	if limit <= 0 {
+		limit = 1000
+	}
+	if limit > 50000 {
+		limit = 50000
+	}
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT mb.id, mb.message_id, mb.owner_address, mb.folder, mm.sender_address, mb.to_address,
+		       mm.subject, mm.body, mm.reply_to_mailbox_id, mb.is_read, mb.read_at, mm.sent_at
+		FROM mail_mailboxes mb
+		JOIN mail_messages mm ON mm.id = mb.message_id
+		WHERE mb.owner_address = $1
+		  AND mb.folder = 'inbox'
+		  AND mb.is_read = false
+		ORDER BY mm.sent_at DESC, mb.id DESC
+		LIMIT $2
+	`, ownerAddress, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := make([]MailItem, 0)
+	for rows.Next() {
+		var it MailItem
+		if err := rows.Scan(&it.MailboxID, &it.MessageID, &it.OwnerAddress, &it.Folder, &it.FromAddress, &it.ToAddress, &it.Subject, &it.Body, &it.ReplyToMailboxID, &it.IsRead, &it.ReadAt, &it.SentAt); err != nil {
+			return nil, err
+		}
+		out = append(out, it)
+	}
+	return out, rows.Err()
+}
+
 func (s *PostgresStore) GetMailboxItem(ctx context.Context, mailboxID int64) (MailItem, error) {
 	var item MailItem
 	err := s.db.QueryRowContext(ctx, `

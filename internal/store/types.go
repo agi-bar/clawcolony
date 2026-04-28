@@ -165,32 +165,32 @@ type TokenTransfer struct {
 }
 
 type CollabSession struct {
-	CollabID            string     `json:"collab_id"`
-	Title               string     `json:"title"`
-	Goal                string     `json:"goal"`
-	Kind                string     `json:"kind"`
-	Complexity          string     `json:"complexity"`
-	Phase               string     `json:"phase"`
-	ProposerUserID      string     `json:"proposer_user_id"`
-	AuthorUserID        string     `json:"author_user_id,omitempty"`
-	OrchestratorUserID  string     `json:"orchestrator_user_id"`
-	MinMembers          int        `json:"min_members"`
-	MaxMembers          int        `json:"max_members"`
-	RequiredReviewers   int        `json:"required_reviewers,omitempty"`
-	PRRepo              string     `json:"pr_repo,omitempty"`
-	PRBranch            string     `json:"pr_branch,omitempty"`
-	PRURL               string     `json:"pr_url,omitempty"`
-	PRNumber            int        `json:"pr_number,omitempty"`
-	PRBaseSHA           string     `json:"pr_base_sha,omitempty"`
-	PRHeadSHA           string     `json:"pr_head_sha,omitempty"`
-	PRAuthorLogin       string     `json:"pr_author_login,omitempty"`
-	GitHubPRState       string     `json:"github_pr_state,omitempty"`
-	PRMergeCommitSHA    string     `json:"pr_merge_commit_sha,omitempty"`
-	SourceRef           string     `json:"source_ref,omitempty"`
-	ImplementationMode  string     `json:"implementation_mode,omitempty"`
-	RepoDocPath         string     `json:"repo_doc_path,omitempty"`
-	CreatedAt           time.Time  `json:"created_at"`
-	UpdatedAt           time.Time  `json:"updated_at"`
+	CollabID                 string     `json:"collab_id"`
+	Title                    string     `json:"title"`
+	Goal                     string     `json:"goal"`
+	Kind                     string     `json:"kind"`
+	Complexity               string     `json:"complexity"`
+	Phase                    string     `json:"phase"`
+	ProposerUserID           string     `json:"proposer_user_id"`
+	AuthorUserID             string     `json:"author_user_id,omitempty"`
+	OrchestratorUserID       string     `json:"orchestrator_user_id"`
+	MinMembers               int        `json:"min_members"`
+	MaxMembers               int        `json:"max_members"`
+	RequiredReviewers        int        `json:"required_reviewers,omitempty"`
+	PRRepo                   string     `json:"pr_repo,omitempty"`
+	PRBranch                 string     `json:"pr_branch,omitempty"`
+	PRURL                    string     `json:"pr_url,omitempty"`
+	PRNumber                 int        `json:"pr_number,omitempty"`
+	PRBaseSHA                string     `json:"pr_base_sha,omitempty"`
+	PRHeadSHA                string     `json:"pr_head_sha,omitempty"`
+	PRAuthorLogin            string     `json:"pr_author_login,omitempty"`
+	GitHubPRState            string     `json:"github_pr_state,omitempty"`
+	PRMergeCommitSHA         string     `json:"pr_merge_commit_sha,omitempty"`
+	SourceRef                string     `json:"source_ref,omitempty"`
+	ImplementationMode       string     `json:"implementation_mode,omitempty"`
+	RepoDocPath              string     `json:"repo_doc_path,omitempty"`
+	CreatedAt                time.Time  `json:"created_at"`
+	UpdatedAt                time.Time  `json:"updated_at"`
 	ReviewDeadlineAt         *time.Time `json:"review_deadline_at,omitempty"`
 	PRMergedAt               *time.Time `json:"pr_merged_at,omitempty"`
 	ClosedAt                 *time.Time `json:"closed_at,omitempty"`
@@ -681,6 +681,7 @@ type Store interface {
 	UpdateMailMessage(ctx context.Context, messageID int64, subject, body string, sentAt time.Time) error
 	GetMailboxItem(ctx context.Context, mailboxID int64) (MailItem, error)
 	ListMailbox(ctx context.Context, ownerAddress, folder, scope, keyword string, fromTime, toTime *time.Time, limit int) ([]MailItem, error)
+	ListMailboxForCleanup(ctx context.Context, ownerAddress string, limit int) ([]MailItem, error)
 	MarkMailboxRead(ctx context.Context, ownerAddress string, mailboxIDs []int64) error
 	GetNotificationDeliveryState(ctx context.Context, ownerAddress, category string) (NotificationDeliveryState, bool, error)
 	UpsertNotificationDeliveryState(ctx context.Context, state NotificationDeliveryState) (NotificationDeliveryState, error)

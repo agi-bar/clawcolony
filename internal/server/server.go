@@ -593,6 +593,7 @@ func (s *Server) runWorldTickWithTrigger(ctx context.Context, triggerType string
 		appendSkipped("low_energy_alert", "world_frozen")
 		appendSkipped("death_grace_check", "world_frozen")
 		appendSkipped("mail_delivery", "world_frozen")
+		appendSkipped("mail_noise_cleanup", "world_frozen")
 		appendSkipped("wake_lobsters_inbox_notice", "world_frozen")
 		appendSkipped("autonomy_reminder", "world_frozen")
 		appendSkipped("community_comm_reminder", "world_frozen")
@@ -645,6 +646,7 @@ func (s *Server) runWorldTickWithTrigger(ctx context.Context, triggerType string
 		runStep("extinction_guard_post", func() error { return nil })
 		if frozen {
 			appendSkipped("mail_delivery", "world_frozen")
+			appendSkipped("mail_noise_cleanup", "world_frozen")
 			appendSkipped("wake_lobsters_inbox_notice", "world_frozen")
 			appendSkipped("autonomy_reminder", "world_frozen")
 			appendSkipped("community_comm_reminder", "world_frozen")
@@ -662,6 +664,9 @@ func (s *Server) runWorldTickWithTrigger(ctx context.Context, triggerType string
 		} else {
 			runStep("mail_delivery", func() error {
 				return s.runMailDeliveryTick(ctx, tickID)
+			})
+			runStep("mail_noise_cleanup", func() error {
+				return s.runMailNoiseCleanupTick(ctx, tickID)
 			})
 			runStep("wake_lobsters_inbox_notice", func() error {
 				s.kbTick(ctx, tickID)
@@ -948,6 +953,7 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("/api/v1/mail/contacts/upsert", s.handleMailContactsUpsert)
 	s.mux.HandleFunc("/api/v1/mail/overview", s.handleMailOverview)
 	s.mux.HandleFunc("/api/v1/mail/system/archive", s.handleMailSystemArchive)
+	s.mux.HandleFunc("/api/v1/mail/system/resolve-obsolete-mail", s.handleMailSystemResolveObsoleteMail)
 	s.mux.HandleFunc("/api/v1/mail/system/resolve-obsolete-kb", s.handleMailSystemResolveObsoleteKB)
 	s.mux.HandleFunc("/api/v1/mail/lists", s.handleMailLists)
 	s.mux.HandleFunc("/api/v1/mail/lists/create", s.handleMailListCreate)
@@ -2521,7 +2527,7 @@ func (s *Server) runWorldCostAlertNotifications(ctx context.Context, tickID int6
 			settings.ScanLimit,
 			settings.NotifyCooldownS,
 		)
-		if _, sendErr := s.store.SendMail(ctx, store.MailSendInput{
+		if _, sendErr := s.sendMailWithNoisePolicy(ctx, store.MailSendInput{
 			From:    clawWorldSystemID,
 			To:      []string{it.UserID},
 			Subject: subject,
@@ -3081,7 +3087,7 @@ func (s *Server) runWorldEvolutionAlertNotifications(ctx context.Context, tickID
 	for i, it := range alerts {
 		body += fmt.Sprintf("\nalert_%d=%s|%s|score=%d|threshold=%d|%s", i+1, it.Severity, it.Category, it.Score, it.Threshold, it.Message)
 	}
-	_, err = s.store.SendMail(ctx, store.MailSendInput{
+	_, err = s.sendMailWithNoisePolicy(ctx, store.MailSendInput{
 		From:    clawWorldSystemID,
 		To:      []string{clawWorldSystemID},
 		Subject: subject,
@@ -4296,37 +4302,47 @@ func (s *Server) handleMailSend(w http.ResponseWriter, r *http.Request) {
 	for i := range req.ToUserIDs {
 		req.ToUserIDs[i] = strings.TrimSpace(req.ToUserIDs[i])
 	}
-	totalTokens := economy.CalculateToken(req.Subject+req.Body) * int64(len(req.ToUserIDs))
-	chargePreview, chargeErr := s.previewCommunicationCharge(r.Context(), fromUserID, totalTokens)
-	if chargeErr != nil {
-		if errors.Is(chargeErr, store.ErrInsufficientBalance) {
-			writeError(w, http.StatusPaymentRequired, "insufficient token balance for communication overage")
-			return
-		}
-		writeError(w, http.StatusInternalServerError, chargeErr.Error())
-		return
-	}
-	item, err := s.store.SendMail(r.Context(), store.MailSendInput{
+	input := store.MailSendInput{
 		From:             fromUserID,
 		To:               req.ToUserIDs,
 		Subject:          req.Subject,
 		Body:             req.Body,
 		ReplyToMailboxID: req.ReplyToMailboxID,
-	})
+	}
+	plan, err := s.planMailSendWithNoisePolicy(r.Context(), input)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	var chargePreview commChargePreview
+	if len(plan.SentTo) > 0 {
+		totalTokens := economy.CalculateToken(req.Subject+req.Body) * int64(len(plan.SentTo))
+		chargePreview, err = s.previewCommunicationCharge(r.Context(), fromUserID, totalTokens)
+		if err != nil {
+			if errors.Is(err, store.ErrInsufficientBalance) {
+				writeError(w, http.StatusPaymentRequired, "insufficient token balance for communication overage")
+				return
+			}
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+	}
+	outcome, err := s.sendPlannedMailWithNoisePolicy(r.Context(), plan)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 	chargeErrText := ""
-	if err := s.commitCommunicationCharge(r.Context(), chargePreview, "comm.mail.send", map[string]any{
-		"to_count":    len(req.ToUserIDs),
-		"subject_len": utf8.RuneCountInString(req.Subject),
-		"body_len":    utf8.RuneCountInString(req.Body),
-	}); err != nil {
-		chargeErrText = err.Error()
+	if len(plan.SentTo) > 0 {
+		if err := s.commitCommunicationCharge(r.Context(), chargePreview, "comm.mail.send", map[string]any{
+			"to_count":    len(plan.SentTo),
+			"subject_len": utf8.RuneCountInString(req.Subject),
+			"body_len":    utf8.RuneCountInString(req.Body),
+		}); err != nil {
+			chargeErrText = err.Error()
+		}
 	}
-	s.pushUnreadMailHint(r.Context(), fromUserID, req.ToUserIDs, req.Subject)
-	resolvedReminders := s.autoResolvePinnedRemindersOnProgressMail(r.Context(), fromUserID, req.ToUserIDs, req.Subject, req.Body)
+	resolvedReminders := s.autoResolvePinnedRemindersOnProgressMail(r.Context(), fromUserID, outcome.Result.To, req.Subject, req.Body)
 	if req.ReplyToMailboxID > 0 && economy.CalculateToken(req.Body) > 100 {
 		if replyItem, ok, replyErr := s.mailboxItemForUser(r.Context(), fromUserID, req.ReplyToMailboxID); replyErr == nil && ok {
 			if strings.Contains(strings.ToUpper(replyItem.Subject), "[ACTION:HELP]") {
@@ -4346,7 +4362,7 @@ func (s *Server) handleMailSend(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	resp := map[string]any{
-		"item":                    publicMailSendResultFromStore(item),
+		"item":                    publicMailSendResultFromStore(outcome.Result),
 		"resolved_pinned_reminds": resolvedReminders,
 	}
 	if chargeErrText != "" {
@@ -4563,7 +4579,7 @@ func (s *Server) sendMailAndPushHint(ctx context.Context, fromUserID string, toU
 	if len(toUserIDs) == 0 {
 		return
 	}
-	_, err := s.store.SendMail(ctx, store.MailSendInput{
+	_, err := s.sendMailWithNoisePolicy(ctx, store.MailSendInput{
 		From:    fromUserID,
 		To:      toUserIDs,
 		Subject: subject,
@@ -4572,7 +4588,6 @@ func (s *Server) sendMailAndPushHint(ctx context.Context, fromUserID string, toU
 	if err != nil {
 		return
 	}
-	s.pushUnreadMailHint(ctx, fromUserID, toUserIDs, subject)
 }
 
 func (s *Server) mailboxItemForUser(ctx context.Context, userID string, mailboxID int64) (store.MailItem, bool, error) {
@@ -4642,6 +4657,7 @@ func (s *Server) autoResolveObsoleteInboxMail(ctx context.Context, userID string
 	if clearLowTokenState {
 		_ = s.store.DeleteNotificationDeliveryState(ctx, strings.TrimSpace(userID), notificationCategoryLowTokenAlert)
 	}
+	_, _ = s.resolveObsoleteMailForUser(ctx, userID, defaultMailNoiseCleanupClasses(), false, time.Now().UTC())
 }
 
 func (s *Server) autoReadReturnedKBUpdatedSummary(ctx context.Context, userID string, items []store.MailItem, requestTime time.Time) {
@@ -5977,6 +5993,48 @@ func (s *Server) handleMailSystemResolveObsoleteKB(w http.ResponseWriter, r *htt
 		req.Limit = 500
 	}
 	result, err := s.resolveObsoleteKBMailBatch(r.Context(), req)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if req.DryRun {
+		writeJSON(w, http.StatusOK, map[string]any{
+			"dry_run": true,
+			"result":  result,
+		})
+		return
+	}
+	writeJSON(w, http.StatusAccepted, map[string]any{
+		"ok":      true,
+		"dry_run": false,
+		"result":  result,
+	})
+}
+
+func (s *Server) handleMailSystemResolveObsoleteMail(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	if !s.allowAdminOrInternalRequest(r) {
+		writeError(w, http.StatusUnauthorized, "unauthorized")
+		return
+	}
+	var req mailSystemResolveObsoleteMailRequest
+	if err := decodeJSON(r, &req); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	classes, err := normalizeMailNoiseCleanupClasses(req.Classes)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	req.Classes = classes
+	if req.Limit <= 0 {
+		req.Limit = 500
+	}
+	result, err := s.resolveObsoleteMailBatch(r.Context(), req)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
@@ -8450,7 +8508,7 @@ func (s *Server) normalizeManagedKBPendingSummaryState(ctx context.Context, user
 }
 
 func (s *Server) sendManagedKBPendingSummary(ctx context.Context, userID, subject, body string) (int64, int64, error) {
-	result, err := s.store.SendMail(ctx, store.MailSendInput{
+	outcome, err := s.sendMailWithNoisePolicy(ctx, store.MailSendInput{
 		From:    clawWorldSystemID,
 		To:      []string{userID},
 		Subject: subject,
@@ -8459,19 +8517,24 @@ func (s *Server) sendManagedKBPendingSummary(ctx context.Context, userID, subjec
 	if err != nil {
 		return 0, 0, err
 	}
-	s.pushUnreadMailHint(ctx, clawWorldSystemID, []string{userID}, subject)
-	mailboxIDs, _, err := s.resolveInboxMailboxIDsByMessageIDs(ctx, userID, []int64{result.MessageID})
+	if len(outcome.SentTo) == 0 {
+		if messageID, mailboxID, ok := outcome.suppressedExistingForRecipient(userID); ok {
+			return messageID, mailboxID, nil
+		}
+		return 0, 0, fmt.Errorf("mail suppressed without existing unread reference for %s", userID)
+	}
+	mailboxIDs, _, err := s.resolveInboxMailboxIDsByMessageIDs(ctx, userID, []int64{outcome.Result.MessageID})
 	if err != nil {
-		return result.MessageID, 0, err
+		return outcome.Result.MessageID, 0, err
 	}
 	var mailboxID int64
 	if len(mailboxIDs) > 0 {
 		mailboxID = mailboxIDs[0]
 	}
 	if mailboxID <= 0 {
-		return result.MessageID, 0, fmt.Errorf("mailbox_id not found for message %d", result.MessageID)
+		return outcome.Result.MessageID, 0, fmt.Errorf("mailbox_id not found for message %d", outcome.Result.MessageID)
 	}
-	return result.MessageID, mailboxID, nil
+	return outcome.Result.MessageID, mailboxID, nil
 }
 
 func (s *Server) buildKBPendingSummaryByUser(ctx context.Context, targets []string, now time.Time) map[string]*kbPendingSummary {
@@ -8914,7 +8977,7 @@ func (s *Server) normalizeKBUpdatedSummaryState(ctx context.Context, userID stri
 }
 
 func (s *Server) sendManagedKBUpdatedSummary(ctx context.Context, userID string, subject, body string) (int64, int64, error) {
-	result, err := s.store.SendMail(ctx, store.MailSendInput{
+	outcome, err := s.sendMailWithNoisePolicy(ctx, store.MailSendInput{
 		From:    clawWorldSystemID,
 		To:      []string{userID},
 		Subject: subject,
@@ -8923,19 +8986,24 @@ func (s *Server) sendManagedKBUpdatedSummary(ctx context.Context, userID string,
 	if err != nil {
 		return 0, 0, err
 	}
-	s.pushUnreadMailHint(ctx, clawWorldSystemID, []string{userID}, subject)
-	mailboxIDs, _, err := s.resolveInboxMailboxIDsByMessageIDs(ctx, userID, []int64{result.MessageID})
+	if len(outcome.SentTo) == 0 {
+		if messageID, mailboxID, ok := outcome.suppressedExistingForRecipient(userID); ok {
+			return messageID, mailboxID, nil
+		}
+		return 0, 0, fmt.Errorf("mail suppressed without existing unread reference for %s", userID)
+	}
+	mailboxIDs, _, err := s.resolveInboxMailboxIDsByMessageIDs(ctx, userID, []int64{outcome.Result.MessageID})
 	if err != nil {
-		return result.MessageID, 0, err
+		return outcome.Result.MessageID, 0, err
 	}
 	var mailboxID int64
 	if len(mailboxIDs) > 0 {
 		mailboxID = mailboxIDs[0]
 	}
 	if mailboxID <= 0 {
-		return result.MessageID, 0, fmt.Errorf("mailbox_id not found for message %d", result.MessageID)
+		return outcome.Result.MessageID, 0, fmt.Errorf("mailbox_id not found for message %d", outcome.Result.MessageID)
 	}
-	return result.MessageID, mailboxID, nil
+	return outcome.Result.MessageID, mailboxID, nil
 }
 
 func (s *Server) listAppliedKBUpdatedSummaryItems(ctx context.Context) []kbUpdatedSummaryItem {
@@ -10009,6 +10077,7 @@ func agentFacingAPICatalog() []string {
 		"GET /api/v1/mail/contacts?user_id=<id>&keyword=<kw>&limit=<n>",
 		"POST /api/v1/mail/contacts/upsert",
 		"POST /api/v1/mail/system/archive (admin/internal only)",
+		"POST /api/v1/mail/system/resolve-obsolete-mail (admin/internal only)",
 		"POST /api/v1/mail/system/resolve-obsolete-kb (admin/internal only)",
 		"POST /api/v1/life/hibernate",
 		"POST /api/v1/life/wake",
@@ -10412,7 +10481,7 @@ func (s *Server) runLowEnergyAlertTick(ctx context.Context, tickID int64) error 
 		subject := fmt.Sprintf("[LOW-TOKEN][tick=%d] balance=%d threshold=%d"+refTag(skillGovernance), tickID, a.Balance, threshold)
 		body := fmt.Sprintf("你的 token 余额已低于阈值。\nuser_id=%s\nbalance=%d\nthreshold=%d\ntick_id=%d\n建议：优先处理可兑现价值的任务、减少无效通信、必要时进入休眠。",
 			userID, a.Balance, threshold, tickID)
-		if _, sendErr := s.store.SendMail(ctx, store.MailSendInput{
+		if _, sendErr := s.sendMailWithNoisePolicy(ctx, store.MailSendInput{
 			From:    clawWorldSystemID,
 			To:      []string{userID},
 			Subject: subject,

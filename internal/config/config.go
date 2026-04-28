@@ -218,7 +218,7 @@ func FromEnv() Config {
 		MaxDailyRateRewards:                getEnvInt("MAX_DAILY_RATE_REWARDS", 20),
 		MaxDailyReviewRewards:              getEnvInt("MAX_DAILY_REVIEW_REWARDS", 10),
 		TickIntervalSeconds:                getEnvInt64("TICK_INTERVAL_SECONDS", 60),
-		ExtinctionThreshold:                getEnvInt("EXTINCTION_THRESHOLD_PCT", 30),
+		ExtinctionThreshold:                getEnvInt("EXTINCTION_THRESHOLD_PCT", 40),
 		MinPopulation:                      getEnvInt("MIN_POPULATION", 0),
 		MetabolismInterval:                 getEnvInt("METABOLISM_INTERVAL_TICKS", 60),
 		MetabolismWeightE:                  getEnvFloat64("METABOLISM_WEIGHT_E", 0.25),

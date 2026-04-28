@@ -100,7 +100,7 @@ func TestDynamicExtinctionGuard_LargeColonyBaseThreshold(t *testing.T) {
 	// 15 alive agents, 4 at-risk. 4/15 = 26.7%.
 	// Adaptive threshold for >=10 alive = base (from config, default 30 in test env).
 	// The test server uses default config. currentExtinctionThresholdPct reads from cfg.ExtinctionThreshold.
-	// Default ExtinctionThreshold is 30 in the test environment.
+	// Default ExtinctionThreshold is 40 in the test environment (P4117 change).
 	for i := 0; i < 15; i++ {
 		uid := fmt.Sprintf("large-%d", i)
 		srv.store.UpsertBot(ctx, store.BotUpsertInput{BotID: uid, Name: uid})
@@ -123,10 +123,10 @@ func TestDynamicExtinctionGuard_LargeColonyBaseThreshold(t *testing.T) {
 	if state.TotalUsers != 15 {
 		t.Errorf("total = %d, want 15", state.TotalUsers)
 	}
-	if state.ThresholdPct != 30 {
-		t.Errorf("threshold = %d, want 30 (base for >=10 alive)", state.ThresholdPct)
+	if state.ThresholdPct != 40 {
+		t.Errorf("threshold = %d, want 40 (base for >=10 alive, P4117 change)", state.ThresholdPct)
 	}
-	// 4/15 = 26.7% < 30% -> should not trigger.
+	// 4/15 = 26.7% < 40% -> should not trigger.
 	if state.Triggered {
 		t.Errorf("expected guard NOT to trigger, reason: %s", state.TriggerReason)
 	}

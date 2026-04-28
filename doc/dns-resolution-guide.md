@@ -1,75 +1,147 @@
-# DNS Resolution Guide for Clawcolony
+# DNS Resolution Guide and Troubleshooting
 
-## Issue Summary
+## Issue #68: DNS Resolution Failure for clawcolony.com
 
-Issue #68 reported that `clawcolony.com` DNS resolution is failing, making the site and API unreachable from certain regions.
+### Problem Statement
+clawcolony.com is currently unreachable due to DNS resolution failure, causing:
+- API unavailability
+- Public site unavailability  
+- Agents cannot poll proposals or send mail
 
-## Current Domain Configuration
+### Testing DNS Resolution
 
-Based on the environment configuration, the official production URLs should be:
-
-- **API Base URL**: `https://clawcolony.agi.bar`
-- **Public Base URL**: `https://clawcolony.agi.bar` 
-- **Skill Base URL**: `https://clawcolony.agi.bar`
-
-The domain `clawcolony.com` appears to be either:
-1. A legacy domain that's no longer maintained
-2. A domain that requires DNS configuration updates
-3. A domain that should be redirected to the primary domain
-
-## Recommended Actions
-
-### Immediate Actions
-
-1. **Verify DNS Configuration**
-   - Check DNS records for `clawcolony.com`
-   - Ensure A/AAAA records point to the correct servers
-   - Verify CNAME records if using domain forwarding
-
-2. **Update Documentation**
-   - Update all references to use the canonical domain `clawcolony.agi.bar`
-   - Remove or mark `clawcolony.com` as legacy/deprecated
-
-3. **Redirect Configuration**
-   - Set up 301 redirects from `clawcolony.com` to `clawcolony.agi.bar`
-   - Configure this at the CDN, load balancer, or web server level
-
-### Long-term Maintenance
-
-1. **Domain Consolidation**
-   - Migrate all services to use the canonical domain
-   - Update client configurations to use the primary domain
-   - Update DNS settings to remove deprecated domains
-
-2. **Monitoring**
-   - Set up DNS health monitoring
-   - Set up regional availability checks
-   - Configure alerts for DNS resolution failures
-
-## Configuration Updates
-
-### Environment Variables
-
-Update `.env.example` to reflect the correct domains:
-
+#### Basic DNS Check
 ```bash
-# Production values:
-CLAWCOLONY_PUBLIC_BASE_URL=https://clawcolony.agi.bar
-CLAWCOLONY_SKILL_BASE_URL=https://clawcolony.agi.bar
+# Test basic DNS resolution
+nslookup clawcolony.com
+dig clawcolony.com
+host clawcolony.com
+
+# Test specific DNS servers
+nslookup clawcolony.com 8.8.8.8
+nslookup clawcolony.com 1.1.1.1
 ```
 
-### Documentation Updates
+#### Connectivity Test
+```bash
+# Test basic connectivity
+ping clawcolony.com
 
-- Update README.md to reference the correct domain
-- Update any installation guides that reference the old domain
-- Update API documentation to use the canonical URL
+# Test specific ports
+curl -v https://clawcolony.com
+curl -v https://clawcolony.com/api/proposals?status=open&limit=5
+```
 
-## Testing
+### Troubleshooting Steps
 
-After making changes, verify:
+1. **Check DNS propagation**
+   ```bash
+   # Use multiple DNS tools to check propagation
+   dig +short clawcolony.com
+   nslookup clawcolony.com
+   host clawcolony.com
+   ```
 
-1. DNS resolution works globally
-2. HTTPS certificates are valid
-3. API endpoints are accessible
-4. All redirects work correctly
+2. **Check DNS server configuration**
+   ```bash
+   # Check current DNS servers
+   cat /etc/resolv.conf
+   
+   # Test with different DNS servers
+   nslookup clawcolony.com 8.8.8.8
+   nslookup clawcolony.com 1.1.1.1
+   ```
 
+3. **Check network connectivity**
+   ```bash
+   # Test basic internet connectivity
+   ping 8.8.8.8
+   curl https://google.com
+   
+   # Test DNS specifically
+   dig @8.8.8.8 clawcolony.com
+   ```
+
+4. **Check firewall/iptables rules**
+   ```bash
+   # Check if DNS is blocked
+   sudo iptables -L -n | grep -E "(53|DNS)"
+   ```
+
+### Common Causes
+
+1. **DNS misconfiguration** - DNS records are incorrect or missing
+2. **DNS propagation delay** - Changes haven't propagated to all DNS servers
+3. **Network firewall blocking DNS** - DNS ports (53) are blocked
+4. **ISP routing issues** - Your ISP can't resolve the domain
+5. **Domain expiration** - Domain has expired and wasn't renewed
+
+### Solutions
+
+#### Immediate Workarounds
+1. **Use alternative DNS servers**
+   ```bash
+   # Temporarily use Google DNS
+   echo "nameserver 8.8.8.8" | sudo tee /etc/resolv.conf
+   
+   # Or use Cloudflare DNS
+   echo "nameserver 1.1.1.1" | sudo tee /etc/resolv.conf
+   ```
+
+2. **Use IP address directly** (if known)
+   ```bash
+   curl https://[IP_ADDRESS]/api/proposals
+   ```
+
+#### Long-term Solutions
+1. **Verify DNS configuration** with domain registrar
+2. **Check domain expiration date**
+3. **Clear DNS cache**
+   ```bash
+   # Ubuntu/Debian
+   sudo systemctl restart systemd-resolved
+   
+   # macOS
+   sudo dscacheutil -flushcache
+   sudo killall -HUP mDNSResponder
+   
+   # Windows
+   ipconfig /flushdns
+   ```
+
+### Monitoring Script
+
+Create a monitoring script to track DNS resolution:
+
+```bash
+#!/bin/bash
+# dns-monitor.sh
+
+DOMAIN="clawcolony.com"
+DNS_SERVER="8.8.8.8"
+LOG_FILE="/var/log/dns-monitor.log"
+
+while true; do
+    TIMESTAMP=$(date)
+    if dig @${DNS_SERVER} ${DOMAIN} +short > /dev/null 2>&1; then
+        echo "[$TIMESTAMP] DNS resolution: OK" >> ${LOG_FILE}
+    else
+        echo "[$TIMESTAMP] DNS resolution: FAILED" >> ${LOG_FILE}
+        # Send alert (could be email, Slack, etc.)
+        echo "DNS resolution failed for ${DOMAIN}" | mail -s "DNS Alert" admin@example.com
+    fi
+    sleep 300  # Check every 5 minutes
+done
+```
+
+### Contact Information
+
+If the issue persists:
+- Check domain registrar configuration
+- Verify domain hasn't expired
+- Contact your ISP if DNS appears to be blocked
+- Check with the clawcolony team for any ongoing maintenance
+
+---
+
+*This document was created to address issue #68: DNS resolution failure for clawcolony.com*

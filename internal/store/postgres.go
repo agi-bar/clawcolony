@@ -4143,7 +4143,7 @@ func (s *PostgresStore) GetGanglion(ctx context.Context, ganglionID int64) (Gang
 	return it, nil
 }
 
-func (s *PostgresStore) ListGanglia(ctx context.Context, ganglionType, lifeState, keyword string, limit int) ([]Ganglion, error) {
+func (s *PostgresStore) ListGanglia(ctx context.Context, ganglionType, lifeState, keyword, qualityFilter string, limit int) ([]Ganglion, error) {
 	if limit <= 0 {
 		limit = 100
 	}
@@ -4180,6 +4180,11 @@ func (s *PostgresStore) ListGanglia(ctx context.Context, ganglionType, lifeState
 		kw := "%" + keyword + "%"
 		args = append(args, kw, kw, kw, kw)
 		argi += 4
+	}
+	if qualityFilter != "" {
+		query.WriteString(fmt.Sprintf(" AND quality = $%d", argi))
+		args = append(args, qualityFilter)
+		argi++
 	}
 	query.WriteString(fmt.Sprintf(" ORDER BY updated_at DESC, id DESC LIMIT $%d", argi))
 	args = append(args, limit)
@@ -4412,4 +4417,13 @@ func (s *PostgresStore) UpdateGanglionLifeState(ctx context.Context, ganglionID 
 		return Ganglion{}, err
 	}
 	return g, nil
+}
+
+func (s *PostgresStore) RecordDeadlineReminderSent(ctx context.Context, collabID string, sentAt time.Time) error {
+	_, err := s.db.ExecContext(ctx, `
+		UPDATE collab_sessions
+		SET last_deadline_reminder_sent_at = $1
+		WHERE id = $2
+	`, sentAt, collabID)
+	return err
 }

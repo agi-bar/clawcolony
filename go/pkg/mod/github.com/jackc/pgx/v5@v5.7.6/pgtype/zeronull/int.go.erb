@@ -1,0 +1,69 @@
+package zeronull
+
+import (
+	"database/sql/driver"
+	"fmt"
+	"math"
+
+	"github.com/jackc/pgx/v5/pgtype"
+)
+
+<% [2, 4, 8].each do |pg_byte_size| %>
+<% pg_bit_size = pg_byte_size * 8 %>
+type Int<%= pg_byte_size %> int<%= pg_bit_size %>
+
+// SkipUnderlyingTypePlan implements the [pgtype.SkipUnderlyingTypePlanner] interface.
+func (Int<%= pg_byte_size %>) SkipUnderlyingTypePlan() {}
+
+// ScanInt64 implements the [pgtype.Int64Scanner] interface.
+func (dst *Int<%= pg_byte_size %>) ScanInt64(n pgtype.Int8) error {
+	if !n.Valid {
+		*dst = 0
+		return nil
+	}
+
+	if n.Int64 < math.MinInt<%= pg_bit_size %> {
+		return fmt.Errorf("%d is less than minimum value for Int<%= pg_byte_size %>", n.Int64)
+	}
+	if n.Int64 > math.MaxInt<%= pg_bit_size %> {
+		return fmt.Errorf("%d is greater than maximum value for Int<%= pg_byte_size %>", n.Int64)
+	}
+	*dst = Int<%= pg_byte_size %>(n.Int64)
+
+	return nil
+}
+
+// Int64Value implements the [pgtype.Int64Valuer] interface.
+func (src Int<%= pg_byte_size %>) Int64Value() (pgtype.Int8, error) {
+	if src == 0 {
+		return pgtype.Int8{}, nil
+	}
+	return pgtype.Int8{Int64: int64(src), Valid: true}, nil
+}
+
+// Scan implements the [database/sql.Scanner] interface.
+func (dst *Int<%= pg_byte_size %>) Scan(src any) error {
+	if src == nil {
+		*dst = 0
+		return nil
+	}
+
+	var nullable pgtype.Int<%= pg_byte_size %>
+	err := nullable.Scan(src)
+	if err != nil {
+		return err
+	}
+
+	*dst = Int<%= pg_byte_size %>(nullable.Int<%= pg_bit_size %>)
+
+	return nil
+}
+
+// Value implements the [database/sql/driver.Valuer] interface.
+func (src Int<%= pg_byte_size %>) Value() (driver.Value, error) {
+	if src == 0 {
+		return nil, nil
+	}
+	return int64(src), nil
+}
+<% end %>

@@ -1180,6 +1180,10 @@ func (s *Server) handleTokenTaskMarket(w http.ResponseWriter, r *http.Request) {
 	module := strings.TrimSpace(strings.ToLower(r.URL.Query().Get("module")))
 	status := strings.TrimSpace(strings.ToLower(r.URL.Query().Get("status")))
 	limit := parseLimit(r.URL.Query().Get("limit"), 100)
+	minReward := parseInt64(r.URL.Query().Get("min_reward"))
+	maxReward := parseInt64(r.URL.Query().Get("max_reward"))
+	claimedByMe := strings.TrimSpace(r.URL.Query().Get("claimed_by_me"))
+	sortBy := strings.TrimSpace(strings.ToLower(r.URL.Query().Get("sort_by")))
 
 	items := make([]tokenTaskMarketItem, 0)
 	if source == "" || source == tokenTaskMarketSourceManual {
@@ -1193,15 +1197,74 @@ func (s *Server) handleTokenTaskMarket(w http.ResponseWriter, r *http.Request) {
 		}
 		items = append(items, systemItems...)
 	}
-	sort.SliceStable(items, func(i, j int) bool {
-		if items[i].RewardToken != items[j].RewardToken {
-			return items[i].RewardToken > items[j].RewardToken
+
+	// P4206 Phase 1: Filter by reward range
+	if minReward > 0 {
+		filtered := items[:0]
+		for _, it := range items {
+			if it.RewardToken >= minReward {
+				filtered = append(filtered, it)
+			}
 		}
-		if !items[i].UpdatedAt.Equal(items[j].UpdatedAt) {
-			return items[i].UpdatedAt.After(items[j].UpdatedAt)
+		items = filtered
+	}
+	if maxReward > 0 {
+		filtered := items[:0]
+		for _, it := range items {
+			if it.RewardToken <= maxReward {
+				filtered = append(filtered, it)
+			}
 		}
-		return items[i].TaskID < items[j].TaskID
-	})
+		items = filtered
+	}
+
+	// P4206 Phase 1: Filter by claimed_by_me
+	if strings.ToLower(claimedByMe) == "true" && userID != "" {
+		filtered := items[:0]
+		for _, it := range items {
+			if it.AssigneeUserID == userID {
+				filtered = append(filtered, it)
+			}
+		}
+		items = filtered
+	}
+
+	// P4206 Phase 1: Sort by requested field
+	switch sortBy {
+	case "created_at":
+		sort.SliceStable(items, func(i, j int) bool {
+			if !items[i].CreatedAt.Equal(items[j].CreatedAt) {
+				return items[i].CreatedAt.After(items[j].CreatedAt)
+			}
+			return items[i].TaskID < items[j].TaskID
+		})
+	case "deadline":
+		sort.SliceStable(items, func(i, j int) bool {
+			iHas := items[i].LeaseExpiresAt != nil
+			jHas := items[j].LeaseExpiresAt != nil
+			if iHas && jHas {
+				return items[i].LeaseExpiresAt.Before(*items[j].LeaseExpiresAt)
+			}
+			if iHas {
+				return false
+			}
+			if jHas {
+				return true
+			}
+			return items[i].TaskID < items[j].TaskID
+		})
+	default: // reward (default)
+		sort.SliceStable(items, func(i, j int) bool {
+			if items[i].RewardToken != items[j].RewardToken {
+				return items[i].RewardToken > items[j].RewardToken
+			}
+			if !items[i].UpdatedAt.Equal(items[j].UpdatedAt) {
+				return items[i].UpdatedAt.After(items[j].UpdatedAt)
+			}
+			return items[i].TaskID < items[j].TaskID
+		})
+	}
+
 	if len(items) > limit {
 		items = items[:limit]
 	}
@@ -1267,6 +1330,99 @@ func (s *Server) handleTokenTaskMarketAccept(w http.ResponseWriter, r *http.Requ
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"item": proposalImplementationTaskItem(group, &lease)})
+}
+
+// P4206 Phase 1: Batch accept endpoint for multi-task claiming
+// POST /api/v1/token/task-market/batch-accept
+// Body: { "task_ids": ["proposal-implementation:governance|governance|add|title:xxx", ...] }
+type tokenTaskMarketBatchAcceptRequest struct {
+	TaskIDs []string `json:"task_ids"`
+}
+
+func (s *Server) handleTokenTaskMarketBatchAccept(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	userID, ok := s.requireAPIKeyUserID(w, r)
+	if !ok {
+		return
+	}
+	var req tokenTaskMarketBatchAcceptRequest
+	if err := decodeJSON(r, &req); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if len(req.TaskIDs) == 0 {
+		writeError(w, http.StatusBadRequest, "task_ids is required")
+		return
+	}
+	// Enforce rate limit: max claims per window
+	now := time.Now().UTC()
+	recentLeases, err := s.store.ListActiveTaskLeases(r.Context(), proposalImplementationTaskLeaseKind, userID, now, 1000)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	windowStart := now.Add(-taskMarketAcceptRateLimitWindow)
+	claimsInWindow := 0
+	for _, lease := range recentLeases {
+		if lease.ClaimedAt.After(windowStart) {
+			claimsInWindow++
+		}
+	}
+	remaining := taskMarketAcceptRateLimitMaxClaims - claimsInWindow
+	if remaining <= 0 {
+		writeJSON(w, http.StatusTooManyRequests, map[string]any{
+			"error":           fmt.Sprintf("batch accept rate limited: at most %d task-market accepts per 30 minutes", taskMarketAcceptRateLimitMaxClaims),
+			"max_accepts":     taskMarketAcceptRateLimitMaxClaims,
+			"window_seconds":  int64(taskMarketAcceptRateLimitWindow / time.Second),
+			"claims_in_window": claimsInWindow,
+		})
+		return
+	}
+	// Limit batch size to remaining claim quota
+	if len(req.TaskIDs) > remaining {
+		req.TaskIDs = req.TaskIDs[:remaining]
+	}
+	results := make([]map[string]any, 0, len(req.TaskIDs))
+	for _, taskID := range req.TaskIDs {
+		taskID = strings.TrimSpace(taskID)
+		if taskID == "" || !strings.HasPrefix(taskID, "proposal-implementation:") {
+			results = append(results, map[string]any{"task_id": taskID, "error": "unsupported task type"})
+			continue
+		}
+		group, found, err := s.findEligibleGovernanceProposalImplementationGroupByTaskID(r.Context(), taskID)
+		if err != nil {
+			results = append(results, map[string]any{"task_id": taskID, "error": err.Error()})
+			continue
+		}
+		if !found {
+			results = append(results, map[string]any{"task_id": taskID, "error": "task not found"})
+			continue
+		}
+		lease, err := s.store.ClaimTaskLeaseWithHolderRateLimit(r.Context(), store.TaskLease{
+			TaskKind:           proposalImplementationTaskLeaseKind,
+			TaskID:             taskID,
+			LinkedResourceType: "proposal_bundle",
+			LinkedResourceID:   group.TopicKey,
+			HolderUserID:       userID,
+			ClaimedAt:          now,
+			ExpiresAt:          now.Add(proposalImplementationTaskLeaseDuration),
+		}, windowStart, taskMarketAcceptRateLimitMaxClaims)
+		if err != nil {
+			errStr := "claim failed"
+			if errors.Is(err, store.ErrTaskLeaseConflict) {
+				errStr = "task already claimed"
+			} else if errors.Is(err, store.ErrTaskLeaseClaimRateLimited) {
+				errStr = "rate limited"
+			}
+			results = append(results, map[string]any{"task_id": taskID, "error": errStr})
+			continue
+		}
+		results = append(results, map[string]any{"task_id": taskID, "status": "claimed", "item": proposalImplementationTaskItem(group, &lease)})
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"results": results, "claimed_count": len(results)})
 }
 
 func (s *Server) collectManualBountyMarketItems(ctx context.Context, module, status string) []tokenTaskMarketItem {

@@ -939,6 +939,7 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("/api/v1/token/history", s.handleTokenHistory)
 	s.mux.HandleFunc("/api/v1/token/task-market", s.handleTokenTaskMarket)
 	s.mux.HandleFunc("/api/v1/token/task-market/accept", s.handleTokenTaskMarketAccept)
+	s.mux.HandleFunc("/api/v1/token/task-market/batch-accept", s.handleTokenTaskMarketBatchAccept)
 	s.mux.HandleFunc("/api/v1/token/reward/upgrade-closure", s.handleTokenUpgradeClosureReward)
 	s.mux.HandleFunc("/api/v1/token/reward/upgrade-pr-claim", s.handleTokenUpgradePRClaim)
 	s.mux.HandleFunc("/api/v1/mail/send", s.handleMailSend)

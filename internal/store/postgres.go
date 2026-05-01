@@ -2889,6 +2889,42 @@ func (s *PostgresStore) ListActiveTaskLeases(ctx context.Context, taskKind, hold
 	return out, rows.Err()
 }
 
+// ListConsumedTaskLeases returns consumed (completed) task leases for a holder.
+// Used to count completed tasks for reputation-based rate limit tier calculation (P4206 Phase 2).
+func (s *PostgresStore) ListConsumedTaskLeases(ctx context.Context, taskKind, holderUserID string, since time.Time, limit int) ([]TaskLease, error) {
+	taskKind = strings.TrimSpace(taskKind)
+	holderUserID = strings.TrimSpace(holderUserID)
+	if limit <= 0 {
+		limit = 100
+	}
+	if limit > 1000 {
+		limit = 1000
+	}
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT task_kind, task_id, linked_resource_type, linked_resource_id, holder_user_id, claimed_at, expires_at, consumed_at
+		FROM task_leases
+		WHERE ($1 = '' OR task_kind = $1)
+		  AND ($2 = '' OR holder_user_id = $2)
+		  AND consumed_at IS NOT NULL
+		  AND consumed_at >= $3
+		ORDER BY consumed_at DESC, id DESC
+		LIMIT $4
+	`, taskKind, holderUserID, since.UTC(), limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := make([]TaskLease, 0)
+	for rows.Next() {
+		var item TaskLease
+		if err := scanTaskLease(rows, &item); err != nil {
+			return nil, err
+		}
+		out = append(out, item)
+	}
+	return out, rows.Err()
+}
+
 func (s *PostgresStore) ConsumeTaskLease(ctx context.Context, taskKind, taskID, holderUserID string, consumedAt time.Time) (TaskLease, error) {
 	taskKind = strings.TrimSpace(taskKind)
 	taskID = strings.TrimSpace(taskID)

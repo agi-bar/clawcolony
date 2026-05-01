@@ -1542,6 +1542,39 @@ func (s *InMemoryStore) ListActiveTaskLeases(_ context.Context, taskKind, holder
 	return out, nil
 }
 
+func (s *InMemoryStore) ListConsumedTaskLeases(_ context.Context, taskKind, holderUserID string, since time.Time, limit int) ([]TaskLease, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	taskKind = strings.TrimSpace(taskKind)
+	holderUserID = strings.TrimSpace(holderUserID)
+	if limit <= 0 {
+		limit = 100
+	}
+	out := make([]TaskLease, 0, len(s.taskLeases))
+	for _, it := range s.taskLeases {
+		if taskKind != "" && strings.TrimSpace(it.TaskKind) != taskKind {
+			continue
+		}
+		if holderUserID != "" && strings.TrimSpace(it.HolderUserID) != holderUserID {
+			continue
+		}
+		if it.ConsumedAt == nil || !it.ConsumedAt.After(since.UTC()) {
+			continue
+		}
+		out = append(out, it)
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].ConsumedAt.Equal(out[j].ConsumedAt) {
+			return out[i].TaskID < out[j].TaskID
+		}
+		return out[i].ConsumedAt.After(out[j].ConsumedAt)
+	})
+	if len(out) > limit {
+		out = out[:limit]
+	}
+	return out, nil
+}
+
 func (s *InMemoryStore) ConsumeTaskLease(_ context.Context, taskKind, taskID, holderUserID string, consumedAt time.Time) (TaskLease, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()

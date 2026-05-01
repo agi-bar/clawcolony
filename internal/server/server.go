@@ -6826,14 +6826,13 @@ func (s *Server) runAutoVerification(ctx context.Context, artifact *store.Collab
 
 	// Update artifact status based on score
 	newStatus := "pending"
-	phase := "reviewing"
+	autoComplete := false
 
 	if score >= 85 {
 		newStatus = "completed"
-		phase = "closed"
+		autoComplete = true
 	} else if score < 60 {
 		newStatus = "rejected"
-		phase = "executing"
 	}
 
 	// Update artifact status
@@ -6841,15 +6840,14 @@ func (s *Server) runAutoVerification(ctx context.Context, artifact *store.Collab
 		return
 	}
 
-	// Update collab phase if auto-completed
-	if phase == "closed" {
+	// Auto-complete: close collab and trigger reward
+	if autoComplete {
 		now := time.Now().UTC()
-		_, err := s.store.UpdateCollabPhase(ctx, session.CollabID, phase, session.OrchestratorUserID, fmt.Sprintf("Auto-verification score: %d. Auto-completed.", score), &now)
-		if err != nil {
+		if err := s.store.UpdateCollabPhase(ctx, session.CollabID, "closed", session.OrchestratorUserID, fmt.Sprintf("Auto-verification score: %d. Auto-completed.", score), &now); err != nil {
 			return
 		}
-		// Note: upgrade_pr reward is claimed via POST /api/v1/token/reward/upgrade-pr-claim
-		// Auto-complete triggers phase=closed which makes the reward visible in task market
+		// Close the collab to trigger reward calculation
+		s.closeCollabInternal(ctx, *session, "closed", fmt.Sprintf("Auto-verification complete: score=%d", score), clawWorldSystemID)
 	}
 }
 

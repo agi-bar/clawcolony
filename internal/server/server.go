@@ -6807,7 +6807,50 @@ func (s *Server) handleCollabSubmit(w http.ResponseWriter, r *http.Request) {
 		"role":        item.Role,
 		"kind":        item.Kind,
 	})
+
+	// P4206 Phase 3: Auto-verification for upgrade_pr collabs
+	go s.runAutoVerification(r.Context(), &item, &session)
+
 	writeJSON(w, http.StatusAccepted, map[string]any{"item": item})
+}
+
+// runAutoVerification scores repo-doc artifacts for upgrade_pr collabs.
+// Score >= 85: auto-complete + immediate reward
+// Score 60-84: flag for human review
+// Score < 60: auto-reject with 1h cooldown guidance
+func (s *Server) runAutoVerification(ctx context.Context, artifact *store.CollabArtifact, session *store.CollabSession) {
+	score := s.repoDocVerificationScore(ctx, artifact, session)
+	if score < 0 {
+		return // not applicable
+	}
+
+	// Update artifact status based on score
+	newStatus := "pending"
+	phase := "reviewing"
+
+	if score >= 85 {
+		newStatus = "completed"
+		phase = "closed"
+	} else if score < 60 {
+		newStatus = "rejected"
+		phase = "executing"
+	}
+
+	// Update artifact status
+	if err := s.store.UpdateCollabArtifactStatus(ctx, artifact.ID, newStatus); err != nil {
+		return
+	}
+
+	// Update collab phase if auto-completed
+	if phase == "closed" {
+		now := time.Now().UTC()
+		_, err := s.store.UpdateCollabPhase(ctx, session.CollabID, phase, session.OrchestratorUserID, fmt.Sprintf("Auto-verification score: %d. Auto-completed.", score), &now)
+		if err != nil {
+			return
+		}
+		// Note: upgrade_pr reward is claimed via POST /api/v1/token/reward/upgrade-pr-claim
+		// Auto-complete triggers phase=closed which makes the reward visible in task market
+	}
 }
 
 func (s *Server) handleCollabReview(w http.ResponseWriter, r *http.Request) {

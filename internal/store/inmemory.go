@@ -1564,10 +1564,21 @@ func (s *InMemoryStore) ListConsumedTaskLeases(_ context.Context, taskKind, hold
 		out = append(out, it)
 	}
 	sort.Slice(out, func(i, j int) bool {
-		if out[i].ConsumedAt.Equal(out[j].ConsumedAt) {
+		// Handle nil ConsumedAt values
+		if out[i].ConsumedAt == nil && out[j].ConsumedAt == nil {
 			return out[i].TaskID < out[j].TaskID
 		}
-		return out[i].ConsumedAt.After(out[j].ConsumedAt)
+		if out[i].ConsumedAt == nil {
+			return false // nil values come after non-nil
+		}
+		if out[j].ConsumedAt == nil {
+			return true // non-nil values come before nil
+		}
+		// Both non-nil, compare actual values
+		if out[i].ConsumedAt.Equal(*out[j].ConsumedAt) {
+			return out[i].TaskID < out[j].TaskID
+		}
+		return out[i].ConsumedAt.After(*out[j].ConsumedAt)
 	})
 	if len(out) > limit {
 		out = out[:limit]
@@ -1803,6 +1814,19 @@ func (s *InMemoryStore) UpdateCollabArtifactReview(_ context.Context, artifactID
 		return s.collabArts[i], nil
 	}
 	return CollabArtifact{}, fmt.Errorf("artifact not found")
+}
+
+func (s *InMemoryStore) UpdateCollabArtifactStatus(_ context.Context, artifactID int64, status string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, it := range s.collabArts {
+		if it.ID == artifactID {
+			it.Status = strings.TrimSpace(status)
+			it.UpdatedAt = time.Now().UTC()
+			return nil
+		}
+	}
+	return fmt.Errorf("artifact not found")
 }
 
 func (s *InMemoryStore) ListCollabArtifacts(_ context.Context, collabID, userID string, limit int) ([]CollabArtifact, error) {

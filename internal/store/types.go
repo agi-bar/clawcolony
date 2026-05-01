@@ -702,6 +702,7 @@ type Store interface {
 	ClaimTaskLeaseWithHolderRateLimit(ctx context.Context, item TaskLease, claimedSince time.Time, maxClaims int) (TaskLease, error)
 	GetActiveTaskLease(ctx context.Context, taskKind, taskID string, now time.Time) (TaskLease, bool, error)
 	ListActiveTaskLeases(ctx context.Context, taskKind, holderUserID string, now time.Time, limit int) ([]TaskLease, error)
+	ListConsumedTaskLeases(ctx context.Context, taskKind, holderUserID string, since time.Time, limit int) ([]TaskLease, error)
 	ConsumeTaskLease(ctx context.Context, taskKind, taskID, holderUserID string, consumedAt time.Time) (TaskLease, error)
 	CreateCollabSession(ctx context.Context, item CollabSession) (CollabSession, error)
 	GetCollabSession(ctx context.Context, collabID string) (CollabSession, error)

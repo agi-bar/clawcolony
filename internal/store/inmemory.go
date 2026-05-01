@@ -1805,6 +1805,19 @@ func (s *InMemoryStore) UpdateCollabArtifactReview(_ context.Context, artifactID
 	return CollabArtifact{}, fmt.Errorf("artifact not found")
 }
 
+func (s *InMemoryStore) UpdateCollabArtifactStatus(_ context.Context, artifactID int64, status string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, it := range s.collabArts {
+		if it.ID == artifactID {
+			it.Status = strings.TrimSpace(status)
+			it.UpdatedAt = time.Now().UTC()
+			return nil
+		}
+	}
+	return fmt.Errorf("artifact not found")
+}
+
 func (s *InMemoryStore) ListCollabArtifacts(_ context.Context, collabID, userID string, limit int) ([]CollabArtifact, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()

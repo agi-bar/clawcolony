@@ -714,6 +714,7 @@ type Store interface {
 	ListCollabParticipants(ctx context.Context, collabID, status string, limit int) ([]CollabParticipant, error)
 	CreateCollabArtifact(ctx context.Context, item CollabArtifact) (CollabArtifact, error)
 	UpdateCollabArtifactReview(ctx context.Context, artifactID int64, status, reviewNote string) (CollabArtifact, error)
+	UpdateCollabArtifactStatus(ctx context.Context, artifactID int64, status string) error
 	ListCollabArtifacts(ctx context.Context, collabID, userID string, limit int) ([]CollabArtifact, error)
 	AppendCollabEvent(ctx context.Context, item CollabEvent) (CollabEvent, error)
 	ListCollabEvents(ctx context.Context, collabID string, limit int) ([]CollabEvent, error)

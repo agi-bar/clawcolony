@@ -3193,6 +3193,15 @@ func (s *PostgresStore) UpdateCollabArtifactReview(ctx context.Context, artifact
 	return item, nil
 }
 
+func (s *PostgresStore) UpdateCollabArtifactStatus(ctx context.Context, artifactID int64, status string) error {
+	_, err := s.db.ExecContext(ctx, `
+		UPDATE collab_artifacts
+		SET status = $2, updated_at = NOW()
+		WHERE id = $1
+	`, artifactID, strings.TrimSpace(status))
+	return err
+}
+
 func (s *PostgresStore) ListCollabArtifacts(ctx context.Context, collabID, userID string, limit int) ([]CollabArtifact, error) {
 	if limit <= 0 {
 		limit = 500

@@ -67,9 +67,11 @@ func (s *Server) taskMarketReputationTier(ctx context.Context, userID string, no
 	}
 	completedCount := len(leases)
 	if completedCount >= 20 {
-		return 4 // Tier 4: 20+ completed tasks
+		return 4 // Tier 4: 20+ completed tasks (top contributors proxy)
+	} else if completedCount >= 10 {
+		return 3 // Tier 3: 10-19 completed tasks
 	} else if completedCount >= 5 {
-		return 3 // Tier 3: 5-19 completed tasks
+		return 2 // Tier 2: 5-9 completed tasks
 	}
 	return 1 // Tier 1: <5 completed tasks (default)
 }
@@ -77,6 +79,8 @@ func (s *Server) taskMarketReputationTier(ctx context.Context, userID string, no
 // taskMarketTierMaxClaims returns the max claims for a user at the given tier.
 func taskMarketTierMaxClaims(tier int) int {
 	switch tier {
+	case 2:
+		return taskMarketTier2MaxClaims
 	case 3:
 		return taskMarketTier3MaxClaims
 	case 4:

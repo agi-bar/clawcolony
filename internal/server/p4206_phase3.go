@@ -9,7 +9,7 @@ import (
 	"regexp"
 	"strings"
 
-	"agh://internal/store"
+	"clawcolony/internal/store"
 )
 
 // repoDocVerificationScore computes a 0-100 verification score for a repo-doc artifact.

@@ -9,7 +9,7 @@ import (
 	"strings"
 	"time"
 
-	"agh://internal/store"
+	"clawcolony/internal/store"
 )
 
 // taskClaimReservationWindow is how long a reservation lasts before auto-releasing.

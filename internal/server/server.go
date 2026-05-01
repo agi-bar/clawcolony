@@ -6827,12 +6827,10 @@ func (s *Server) runAutoVerification(ctx context.Context, artifact *store.Collab
 	// Update artifact status based on score
 	newStatus := "pending"
 	phase := "reviewing"
-	autoComplete := false
 
 	if score >= 85 {
 		newStatus = "completed"
 		phase = "closed"
-		autoComplete = true
 	} else if score < 60 {
 		newStatus = "rejected"
 		phase = "executing"
@@ -6846,7 +6844,8 @@ func (s *Server) runAutoVerification(ctx context.Context, artifact *store.Collab
 	// Update collab phase if auto-completed
 	if phase == "closed" {
 		now := time.Now().UTC()
-		if err := s.store.UpdateCollabPhase(ctx, session.CollabID, phase, session.OrchestratorUserID, fmt.Sprintf("Auto-verification score: %d. Auto-completed.", score), &now); err != nil {
+		_, err := s.store.UpdateCollabPhase(ctx, session.CollabID, phase, session.OrchestratorUserID, fmt.Sprintf("Auto-verification score: %d. Auto-completed.", score), &now)
+		if err != nil {
 			return
 		}
 		// Note: upgrade_pr reward is claimed via POST /api/v1/token/reward/upgrade-pr-claim

@@ -47,6 +47,53 @@ const proposalImplementationTaskLeaseDuration = 6 * time.Hour
 const taskMarketAcceptRateLimitWindow = 30 * time.Minute
 const proposalImplementationTaskOpenDelay = time.Hour
 
+// P4206 Phase 2: Reputation-based rate limit tiers
+// Tier determined by completed task count (acceptance rate requirements planned for future)
+const (
+	taskMarketTier1MaxClaims = 2  // New agents (< 5 completed tasks)
+	taskMarketTier2MaxClaims = 4  // 5-9 completed tasks
+	taskMarketTier3MaxClaims = 8  // 10-19 completed tasks
+	taskMarketTier4MaxClaims = 12 // 20+ completed tasks (top contributors proxy)
+)
+
+// taskMarketReputationTier returns the user's rate limit tier based on completed task count.
+// Tier assignments:
+// Tier 1: < 5 completed tasks (default for new agents)
+// Tier 2: 5-9 completed tasks  
+// Tier 3: 10-19 completed tasks
+// Tier 4: 20+ completed tasks (top contributors proxy)
+func (s *Server) taskMarketReputationTier(ctx context.Context, userID string, now time.Time) int {
+	// Count completed tasks in the last 30 days
+	since := now.Add(-30 * 24 * time.Hour)
+	leases, err := s.store.ListConsumedTaskLeases(ctx, proposalImplementationTaskLeaseKind, userID, since, 1000)
+	if err != nil {
+		return 1 // safe default on error
+	}
+	completedCount := len(leases)
+	if completedCount >= 20 {
+		return 4 // Tier 4: 20+ completed tasks (top contributors proxy)
+	} else if completedCount >= 10 {
+		return 3 // Tier 3: 10-19 completed tasks
+	} else if completedCount >= 5 {
+		return 2 // Tier 2: 5-9 completed tasks
+	}
+	return 1 // Tier 1: <5 completed tasks (default)
+}
+
+// taskMarketTierMaxClaims returns the max claims for a user at the given tier.
+func taskMarketTierMaxClaims(tier int) int {
+	switch tier {
+	case 2:
+		return taskMarketTier2MaxClaims
+	case 3:
+		return taskMarketTier3MaxClaims
+	case 4:
+		return taskMarketTier4MaxClaims
+	default:
+		return taskMarketTier1MaxClaims
+	}
+}
+
 type communityRewardGrant struct {
 	GrantKey      string         `json:"grant_key"`
 	RuleKey       string         `json:"rule_key"`
@@ -1304,6 +1351,10 @@ func (s *Server) handleTokenTaskMarketAccept(w http.ResponseWriter, r *http.Requ
 		return
 	}
 	now := time.Now().UTC()
+	// P4206 Phase 2: Use tier-based rate limit
+	tier := s.taskMarketReputationTier(r.Context(), userID, now)
+	maxClaims := taskMarketTierMaxClaims(tier)
+
 	lease, err := s.store.ClaimTaskLeaseWithHolderRateLimit(r.Context(), store.TaskLease{
 		TaskKind:           proposalImplementationTaskLeaseKind,
 		TaskID:             req.TaskID,
@@ -1312,16 +1363,19 @@ func (s *Server) handleTokenTaskMarketAccept(w http.ResponseWriter, r *http.Requ
 		HolderUserID:       userID,
 		ClaimedAt:          now,
 		ExpiresAt:          now.Add(proposalImplementationTaskLeaseDuration),
-	}, now.Add(-taskMarketAcceptRateLimitWindow), taskMarketAcceptRateLimitMaxClaims)
+	}, now.Add(-taskMarketAcceptRateLimitWindow), maxClaims)
 	if err != nil {
 		if errors.Is(err, store.ErrTaskLeaseConflict) {
 			writeError(w, http.StatusConflict, "task is already claimed")
 			return
 		}
 		if errors.Is(err, store.ErrTaskLeaseClaimRateLimited) {
+			tier := s.taskMarketReputationTier(r.Context(), userID, time.Now().UTC())
+			maxClaims := taskMarketTierMaxClaims(tier)
 			writeJSON(w, http.StatusTooManyRequests, map[string]any{
-				"error":          fmt.Sprintf("task accept rate limited: at most %d task-market accepts per 30 minutes", taskMarketAcceptRateLimitMaxClaims),
-				"max_accepts":    taskMarketAcceptRateLimitMaxClaims,
+				"error":          fmt.Sprintf("task accept rate limited: at most %d task-market accepts per 30 minutes (your tier: %d)", maxClaims, tier),
+				"max_accepts":    maxClaims,
+				"tier":           tier,
 				"window_seconds": int64(taskMarketAcceptRateLimitWindow / time.Second),
 			})
 			return
@@ -1364,6 +1418,9 @@ func (s *Server) handleTokenTaskMarketBatchAccept(w http.ResponseWriter, r *http
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
+	// P4206 Phase 2: Use tier-based rate limit
+	tier := s.taskMarketReputationTier(r.Context(), userID, now)
+	maxClaims := taskMarketTierMaxClaims(tier)
 	windowStart := now.Add(-taskMarketAcceptRateLimitWindow)
 	claimsInWindow := 0
 	for _, lease := range recentLeases {
@@ -1371,12 +1428,13 @@ func (s *Server) handleTokenTaskMarketBatchAccept(w http.ResponseWriter, r *http
 			claimsInWindow++
 		}
 	}
-	remaining := taskMarketAcceptRateLimitMaxClaims - claimsInWindow
+	remaining := maxClaims - claimsInWindow
 	if remaining <= 0 {
 		writeJSON(w, http.StatusTooManyRequests, map[string]any{
-			"error":           fmt.Sprintf("batch accept rate limited: at most %d task-market accepts per 30 minutes", taskMarketAcceptRateLimitMaxClaims),
-			"max_accepts":     taskMarketAcceptRateLimitMaxClaims,
-			"window_seconds":  int64(taskMarketAcceptRateLimitWindow / time.Second),
+			"error":            fmt.Sprintf("batch accept rate limited: at most %d task-market accepts per 30 minutes (your tier: %d)", maxClaims, tier),
+			"max_accepts":      maxClaims,
+			"tier":             tier,
+			"window_seconds":   int64(taskMarketAcceptRateLimitWindow / time.Second),
 			"claims_in_window": claimsInWindow,
 		})
 		return
@@ -1409,7 +1467,7 @@ func (s *Server) handleTokenTaskMarketBatchAccept(w http.ResponseWriter, r *http
 			HolderUserID:       userID,
 			ClaimedAt:          now,
 			ExpiresAt:          now.Add(proposalImplementationTaskLeaseDuration),
-		}, windowStart, taskMarketAcceptRateLimitMaxClaims)
+		}, windowStart, maxClaims)
 		if err != nil {
 			errStr := "claim failed"
 			if errors.Is(err, store.ErrTaskLeaseConflict) {
@@ -1420,6 +1478,7 @@ func (s *Server) handleTokenTaskMarketBatchAccept(w http.ResponseWriter, r *http
 			results = append(results, map[string]any{"task_id": taskID, "error": errStr})
 			continue
 		}
+		claimsInWindow++
 		results = append(results, map[string]any{"task_id": taskID, "status": "claimed", "item": proposalImplementationTaskItem(group, &lease)})
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"results": results, "claimed_count": len(results)})

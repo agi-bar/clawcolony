@@ -1785,6 +1785,29 @@ func (s *PostgresStore) ListMailboxForCleanup(ctx context.Context, ownerAddress 
 	return out, rows.Err()
 }
 
+func (s *PostgresStore) ListInboxOwnersWithUnread(ctx context.Context) ([]string, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT DISTINCT owner_address
+		FROM mail_mailboxes
+		WHERE folder = 'inbox'
+		  AND is_read = false
+		ORDER BY owner_address ASC
+	`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := make([]string, 0)
+	for rows.Next() {
+		var owner string
+		if err := rows.Scan(&owner); err != nil {
+			return nil, err
+		}
+		out = append(out, owner)
+	}
+	return out, rows.Err()
+}
+
 func (s *PostgresStore) GetMailboxItem(ctx context.Context, mailboxID int64) (MailItem, error) {
 	var item MailItem
 	err := s.db.QueryRowContext(ctx, `

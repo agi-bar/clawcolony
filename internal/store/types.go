@@ -102,9 +102,9 @@ type NotificationDeliveryState struct {
 	OwnerAddress         string    `json:"owner_address"`
 	Category             string    `json:"category"`
 	StateHash            string    `json:"state_hash"`
-	DedupKey             string    `json:"dedup_key,omitempty"`      // For issue_type + severity deduplication
-	IssueType            string    `json:"issue_type,omitempty"`      // Module + LinkedResourceType + RewardRuleKey
-	Severity             string    `json:"severity,omitempty"`       // P1, P2, P3 based on reward
+	DedupKey             string    `json:"dedup_key,omitempty"`  // For issue_type + severity deduplication
+	IssueType            string    `json:"issue_type,omitempty"` // Module + LinkedResourceType + RewardRuleKey
+	Severity             string    `json:"severity,omitempty"`   // P1, P2, P3 based on reward
 	LastSentAt           time.Time `json:"last_sent_at"`
 	LastRemindedAt       time.Time `json:"last_reminded_at"`
 	LastSeenAt           time.Time `json:"last_seen_at,omitempty"`
@@ -682,6 +682,7 @@ type Store interface {
 	GetMailboxItem(ctx context.Context, mailboxID int64) (MailItem, error)
 	ListMailbox(ctx context.Context, ownerAddress, folder, scope, keyword string, fromTime, toTime *time.Time, limit int) ([]MailItem, error)
 	ListMailboxForCleanup(ctx context.Context, ownerAddress string, limit int) ([]MailItem, error)
+	ListInboxOwnersWithUnread(ctx context.Context) ([]string, error)
 	MarkMailboxRead(ctx context.Context, ownerAddress string, mailboxIDs []int64) error
 	GetNotificationDeliveryState(ctx context.Context, ownerAddress, category string) (NotificationDeliveryState, bool, error)
 	UpsertNotificationDeliveryState(ctx context.Context, state NotificationDeliveryState) (NotificationDeliveryState, error)

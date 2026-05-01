@@ -127,6 +127,30 @@ func TestMailNoiseFamilyDedupeSuppressesSystemReminderButNotGenericHumanMail(t *
 	}
 }
 
+func TestMailNoiseAutonomyLoopSlashSuppressesDuplicateReportsForAdminInbox(t *testing.T) {
+	srv := newTestServer()
+	sender := newAuthUser(t, srv)
+	ctx := context.Background()
+
+	srv.sendMailAndPushHint(ctx, sender.id, []string{clawWorldSystemID}, "autonomy-loop/12/"+sender.id, "result=evidence/next\nartifact_id=harbor-1")
+	srv.sendMailAndPushHint(ctx, sender.id, []string{clawWorldSystemID}, "autonomy-loop/13/"+sender.id, "result=evidence/next\nartifact_id=harbor-2")
+
+	unread, err := srv.store.ListMailbox(ctx, clawWorldSystemID, "inbox", "unread", "autonomy-loop/", nil, nil, 20)
+	if err != nil {
+		t.Fatalf("list admin autonomy unread: %v", err)
+	}
+	if len(unread) != 1 {
+		t.Fatalf("expected one unread autonomy-loop/ report in admin inbox, got=%d", len(unread))
+	}
+	outbox, err := srv.store.ListMailbox(ctx, sender.id, "outbox", "", "autonomy-loop/", nil, nil, 20)
+	if err != nil {
+		t.Fatalf("list sender outbox autonomy reports: %v", err)
+	}
+	if len(outbox) != 1 {
+		t.Fatalf("expected suppressed admin duplicate to avoid second outbox entry, got=%d", len(outbox))
+	}
+}
+
 func TestMailInboxFetchAutoReadsOnlyStaleSystemNoise(t *testing.T) {
 	srv := newTestServer()
 	recipient := newAuthUser(t, srv)
@@ -174,6 +198,121 @@ func TestMailInboxFetchAutoReadsOnlyStaleSystemNoise(t *testing.T) {
 	}
 	if got := len(unreadMailSubjects(t, srv, recipient.id, "old-non-noise-system")); got != 1 {
 		t.Fatalf("expected old non-noise system mail to remain unread, got=%d", got)
+	}
+}
+
+func TestMailSystemResolveObsoleteMailIncludesUnreadSystemOwnersAndNewNoiseFamilies(t *testing.T) {
+	srv := newTestServer()
+	srv.cfg.InternalSyncToken = "sync-token"
+	oldTaskMarket := time.Now().UTC().Add(-25 * time.Hour)
+	oldReview := time.Now().UTC().Add(-8 * 24 * time.Hour)
+
+	seedMailForNoisePolicyTest(t, srv, store.MailSendInput{
+		From:    clawWorldSystemID,
+		To:      []string{clawWorldSystemID},
+		Subject: "[TASK-MARKET][PRIORITY:P1] tick=1413 open_tasks=8 reward_token_max=20000",
+		Body:    "old-task-market",
+	}, oldTaskMarket)
+	seedMailForNoisePolicyTest(t, srv, store.MailSendInput{
+		From:    clawWorldSystemID,
+		To:      []string{clawWorldSystemID},
+		Subject: "[COMMUNITY-COLLAB][PINNED][PRIORITY:P1][ACTION:PROPOSAL] collab_id=collab-100 title=Harbor Revival [REF:collab-mode.md]",
+		Body:    "proposal_id=100",
+	}, oldReview)
+	seedMailForNoisePolicyTest(t, srv, store.MailSendInput{
+		From:    clawWorldSystemID,
+		To:      []string{"clawcolony-assistant"},
+		Subject: "[UPGRADE-PR][REVIEW-OPEN] collab_id=collab-200 [REF:upgrade-clawcolony.md]",
+		Body:    "upgrade-pr-open",
+	}, oldReview)
+
+	dryRunResp := doJSONRequestWithHeaders(t, srv.mux, http.MethodPost, "/api/v1/mail/system/resolve-obsolete-mail", map[string]any{
+		"dry_run": true,
+	}, map[string]string{
+		"X-Clawcolony-Internal-Token": "sync-token",
+	})
+	if dryRunResp.Code != http.StatusOK {
+		t.Fatalf("dry run system-owner cleanup status=%d body=%s", dryRunResp.Code, dryRunResp.Body.String())
+	}
+	dryRunBody := parseJSONBody(t, dryRunResp)
+	dryRunResult := dryRunBody["result"].(map[string]any)
+	if got := int(dryRunResult["affected_user_count"].(float64)); got != 2 {
+		t.Fatalf("expected system-owner cleanup to affect admin+assistant, got=%d body=%s", got, dryRunResp.Body.String())
+	}
+	if got := int(dryRunResult["resolved_mailbox_count"].(float64)); got != 3 {
+		t.Fatalf("expected task-market/community-collab/upgrade-pr cleanup to resolve 3 items, got=%d body=%s", got, dryRunResp.Body.String())
+	}
+
+	applyResp := doJSONRequestWithHeaders(t, srv.mux, http.MethodPost, "/api/v1/mail/system/resolve-obsolete-mail", map[string]any{
+		"dry_run": false,
+	}, map[string]string{
+		"X-Clawcolony-Internal-Token": "sync-token",
+	})
+	if applyResp.Code != http.StatusAccepted {
+		t.Fatalf("apply system-owner cleanup status=%d body=%s", applyResp.Code, applyResp.Body.String())
+	}
+
+	if got := len(unreadMailSubjects(t, srv, clawWorldSystemID, "old-task-market")); got != 0 {
+		t.Fatalf("expected stale task-market admin mail to auto-read, got=%d", got)
+	}
+	if got := len(unreadMailSubjects(t, srv, clawWorldSystemID, "Harbor Revival")); got != 0 {
+		t.Fatalf("expected stale community-collab admin mail to auto-read, got=%d", got)
+	}
+	if got := len(unreadMailSubjects(t, srv, "clawcolony-assistant", "upgrade-pr-open")); got != 0 {
+		t.Fatalf("expected stale upgrade-pr assistant mail to auto-read, got=%d", got)
+	}
+}
+
+func TestMailSystemResolveObsoleteMailAutoReadsReportInboxesOnly(t *testing.T) {
+	srv := newTestServer()
+	srv.cfg.InternalSyncToken = "sync-token"
+	human := newAuthUser(t, srv)
+	regular := newAuthUser(t, srv)
+	old := time.Now().UTC().Add(-8 * 24 * time.Hour)
+
+	seedMailForNoisePolicyTest(t, srv, store.MailSendInput{
+		From:    human.id,
+		To:      []string{clawWorldSystemID},
+		Subject: "autonomy-loop/50/" + human.id,
+		Body:    "result/evidence/next\nartifact_id=admin-report",
+	}, old)
+	seedMailForNoisePolicyTest(t, srv, store.MailSendInput{
+		From:    human.id,
+		To:      []string{"clawcolony-assistant"},
+		Subject: "[COLLAB] Governance Participation",
+		Body:    "governance-report",
+	}, old)
+	seedMailForNoisePolicyTest(t, srv, store.MailSendInput{
+		From:    human.id,
+		To:      []string{regular.id},
+		Subject: "autonomy-loop/51/" + human.id,
+		Body:    "result/evidence/next\nartifact_id=peer-report",
+	}, old)
+
+	applyResp := doJSONRequestWithHeaders(t, srv.mux, http.MethodPost, "/api/v1/mail/system/resolve-obsolete-mail", map[string]any{
+		"dry_run":  false,
+		"user_ids": []string{clawWorldSystemID, "clawcolony-assistant", regular.id},
+		"classes":  []string{"system_stale_72h"},
+	}, map[string]string{
+		"X-Clawcolony-Internal-Token": "sync-token",
+	})
+	if applyResp.Code != http.StatusAccepted {
+		t.Fatalf("apply report inbox cleanup status=%d body=%s", applyResp.Code, applyResp.Body.String())
+	}
+	applyBody := parseJSONBody(t, applyResp)
+	applyResult := applyBody["result"].(map[string]any)
+	if got := int(applyResult["resolved_mailbox_count"].(float64)); got != 2 {
+		t.Fatalf("expected only admin/assistant report inboxes to auto-read, got=%d body=%s", got, applyResp.Body.String())
+	}
+
+	if got := len(unreadMailSubjects(t, srv, clawWorldSystemID, "admin-report")); got != 0 {
+		t.Fatalf("expected stale admin report to auto-read, got=%d", got)
+	}
+	if got := len(unreadMailSubjects(t, srv, "clawcolony-assistant", "governance-report")); got != 0 {
+		t.Fatalf("expected stale assistant governance report to auto-read, got=%d", got)
+	}
+	if got := len(unreadMailSubjects(t, srv, regular.id, "peer-report")); got != 1 {
+		t.Fatalf("expected regular recipient report mail to remain unread, got=%d", got)
 	}
 }
 

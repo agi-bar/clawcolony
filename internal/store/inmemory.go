@@ -826,6 +826,29 @@ func (s *InMemoryStore) ListMailboxForCleanup(_ context.Context, ownerAddress st
 	return out, nil
 }
 
+func (s *InMemoryStore) ListInboxOwnersWithUnread(_ context.Context) ([]string, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	seen := make(map[string]struct{})
+	out := make([]string, 0)
+	for _, it := range s.mailbox {
+		if it.Folder != "inbox" || it.IsRead {
+			continue
+		}
+		owner := strings.TrimSpace(it.OwnerAddress)
+		if owner == "" {
+			continue
+		}
+		if _, ok := seen[owner]; ok {
+			continue
+		}
+		seen[owner] = struct{}{}
+		out = append(out, owner)
+	}
+	sort.Strings(out)
+	return out, nil
+}
+
 func (s *InMemoryStore) GetMailboxItem(_ context.Context, mailboxID int64) (MailItem, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -2493,9 +2516,9 @@ func (s *InMemoryStore) ListGanglia(_ context.Context, ganglionType, lifeState, 
 
 	// quality threshold: minimum char length for each tier
 	qualityThresholds := map[string]int{
-		"canonical":       3000,
-		"validated":        1500,
-		"minimum-viable":   500,
+		"canonical":      3000,
+		"validated":      1500,
+		"minimum-viable": 500,
 	}
 	minLen := 0
 	if thresh, ok := qualityThresholds[qualityFilter]; ok {

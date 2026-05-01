@@ -19,8 +19,10 @@ const (
 	obsoleteMailClassFamilyDuplicates = "family_duplicates"
 	obsoleteMailClassSystemStale72h   = "system_stale_72h"
 
-	mailNoiseCleanupStateKey = "mail_noise_cleanup_state"
-	mailNoiseAutoReadWindow  = 72 * time.Hour
+	mailNoiseCleanupStateKey  = "mail_noise_cleanup_state"
+	mailNoiseAutoReadWindow   = 72 * time.Hour
+	mailNoiseReviewWindow     = 7 * 24 * time.Hour
+	mailNoiseTaskMarketWindow = 24 * time.Hour
 )
 
 const (
@@ -28,6 +30,9 @@ const (
 	mailNoiseFamilyWorldEvolutionAlert     = "world_evolution_alert"
 	mailNoiseFamilyCollabDeadlineReminder  = "collab_deadline_reminder"
 	mailNoiseFamilyCollabApply             = "collab_apply"
+	mailNoiseFamilyTaskMarket              = "task_market"
+	mailNoiseFamilyUpgradePR               = "upgrade_pr"
+	mailNoiseFamilyCommunityCollabPinned   = "community_collab_pinned"
 	mailNoiseFamilyAutonomyReport          = "autonomy_report_family"
 	mailNoiseFamilyGovernanceParticipation = "governance_participation_report"
 )
@@ -44,6 +49,7 @@ var (
 	sosHibernatingSubjectPattern = regexp.MustCompile(`^\[SOS\]\[HIBERNATING\]\s+([^\s]+)\s+needs revival\b`)
 	collabIDBodyPattern          = regexp.MustCompile(`(?m)^collab_id=([^\s]+)\s*$`)
 	collabApplySubjectPattern    = regexp.MustCompile(`^\[COLLAB-APPLY\]\s+([^\s]+)\s+applied to\s+([^\s]+)\s+\(`)
+	collabIDTextPattern          = regexp.MustCompile(`\bcollab_id=([^\s\]]+)`)
 )
 
 type mailSystemResolveObsoleteMailRequest = mailSystemResolveObsoleteKBRequest
@@ -56,10 +62,10 @@ type mailNoiseCleanupState struct {
 }
 
 type mailNoiseDescriptor struct {
-	ExactKey            string
-	FamilyClass         string
-	FamilyKey           string
-	SystemNoiseAutoRead bool
+	ExactKey       string
+	FamilyClass    string
+	FamilyKey      string
+	AutoReadWindow time.Duration
 }
 
 type mailSendSuppression struct {
@@ -150,11 +156,22 @@ func isMailSystemSender(userID string) bool {
 }
 
 func hasAutonomyReportPrefix(subject string) bool {
+	trimmed := strings.TrimSpace(subject)
 	upper := strings.ToUpper(strings.TrimSpace(subject))
 	return strings.HasPrefix(upper, "[AUTONOMY-LOOP]") ||
 		strings.HasPrefix(upper, "[AUTONOMY-LOOP-REPORT]") ||
 		strings.HasPrefix(upper, "[AUTONOMY-REPORT]") ||
-		strings.HasPrefix(upper, "[AUTO-REPORT]")
+		strings.HasPrefix(upper, "[AUTO-REPORT]") ||
+		strings.HasPrefix(strings.ToLower(trimmed), "autonomy-loop/")
+}
+
+func isMailReportInboxOwner(owner string) bool {
+	switch strings.ToLower(strings.TrimSpace(owner)) {
+	case strings.ToLower(clawWorldSystemID), "clawcolony-assistant":
+		return true
+	default:
+		return false
+	}
 }
 
 func parseMailCollabID(body string) string {
@@ -179,6 +196,48 @@ func parseSOSHibernatingUserID(subject string) string {
 		return ""
 	}
 	return strings.TrimSpace(m[1])
+}
+
+func parseMailCollabIDFromText(text string) string {
+	m := collabIDTextPattern.FindStringSubmatch(strings.TrimSpace(text))
+	if len(m) != 2 {
+		return ""
+	}
+	return strings.TrimSpace(m[1])
+}
+
+func mailFamilyKey(recipient string, parts ...string) string {
+	all := make([]string, 0, len(parts)+1)
+	all = append(all, recipient)
+	for _, part := range parts {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+		all = append(all, part)
+	}
+	return strings.Join(all, "|")
+}
+
+func normalizeMailboxOwnerIDs(items []string) []string {
+	if len(items) == 0 {
+		return nil
+	}
+	seen := make(map[string]struct{}, len(items))
+	out := make([]string, 0, len(items))
+	for _, raw := range items {
+		owner := strings.TrimSpace(raw)
+		if owner == "" || strings.EqualFold(owner, clawTreasurySystemID) {
+			continue
+		}
+		if _, ok := seen[owner]; ok {
+			continue
+		}
+		seen[owner] = struct{}{}
+		out = append(out, owner)
+	}
+	sort.Strings(out)
+	return out
 }
 
 func buildMailExactKey(recipient, sender, subject, body string) string {
@@ -207,21 +266,21 @@ func classifyMailNoise(recipient, sender, subject, body string) mailNoiseDescrip
 	case isSystem:
 		if userID := parseSOSHibernatingUserID(subject); userID != "" {
 			desc.FamilyClass = mailNoiseFamilySOSHibernating
-			desc.FamilyKey = recipient + "|" + userID
-			desc.SystemNoiseAutoRead = true
+			desc.FamilyKey = mailFamilyKey(recipient, userID)
+			desc.AutoReadWindow = mailNoiseAutoReadWindow
 			return desc
 		}
 		if strings.HasPrefix(upperSubject, "[WORLD-EVOLUTION-ALERT]") {
 			desc.FamilyClass = mailNoiseFamilyWorldEvolutionAlert
-			desc.FamilyKey = recipient + "|world_evolution_alert"
-			desc.SystemNoiseAutoRead = true
+			desc.FamilyKey = mailFamilyKey(recipient, "world_evolution_alert")
+			desc.AutoReadWindow = mailNoiseAutoReadWindow
 			return desc
 		}
 		if strings.HasPrefix(upperSubject, "[COLLAB][DEADLINE-REMINDER]") {
 			if collabID := parseMailCollabID(body); collabID != "" {
 				desc.FamilyClass = mailNoiseFamilyCollabDeadlineReminder
-				desc.FamilyKey = recipient + "|" + collabID
-				desc.SystemNoiseAutoRead = true
+				desc.FamilyKey = mailFamilyKey(recipient, collabID)
+				desc.AutoReadWindow = mailNoiseAutoReadWindow
 				return desc
 			}
 		}
@@ -229,20 +288,48 @@ func classifyMailNoise(recipient, sender, subject, body string) mailNoiseDescrip
 			applicantUserID, collabID := parseMailCollabApply(subject)
 			if applicantUserID != "" && collabID != "" {
 				desc.FamilyClass = mailNoiseFamilyCollabApply
-				desc.FamilyKey = recipient + "|" + applicantUserID + "|" + collabID
-				desc.SystemNoiseAutoRead = true
+				desc.FamilyKey = mailFamilyKey(recipient, applicantUserID, collabID)
+				desc.AutoReadWindow = mailNoiseAutoReadWindow
+				return desc
+			}
+		}
+		if strings.HasPrefix(upperSubject, "[TASK-MARKET]") {
+			desc.FamilyClass = mailNoiseFamilyTaskMarket
+			desc.FamilyKey = mailFamilyKey(recipient, "task_market")
+			desc.AutoReadWindow = mailNoiseTaskMarketWindow
+			return desc
+		}
+		if strings.HasPrefix(upperSubject, "[UPGRADE-PR]") {
+			if collabID := parseMailCollabIDFromText(subject); collabID != "" {
+				desc.FamilyClass = mailNoiseFamilyUpgradePR
+				desc.FamilyKey = mailFamilyKey(recipient, collabID)
+				desc.AutoReadWindow = mailNoiseReviewWindow
+				return desc
+			}
+		}
+		if strings.HasPrefix(upperSubject, "[COMMUNITY-COLLAB]") && strings.Contains(upperSubject, "[PINNED]") {
+			if collabID := parseMailCollabIDFromText(subject); collabID != "" {
+				desc.FamilyClass = mailNoiseFamilyCommunityCollabPinned
+				desc.FamilyKey = mailFamilyKey(recipient, collabID)
+				desc.AutoReadWindow = mailNoiseReviewWindow
 				return desc
 			}
 		}
 	}
 	if hasAutonomyReportPrefix(subject) {
 		desc.FamilyClass = mailNoiseFamilyAutonomyReport
-		desc.FamilyKey = recipient + "|" + strings.ToLower(sender) + "|autonomy_report_family"
+		desc.FamilyKey = mailFamilyKey(recipient, strings.ToLower(sender), "autonomy_report_family")
+		if isMailReportInboxOwner(recipient) {
+			desc.AutoReadWindow = mailNoiseReviewWindow
+		}
 		return desc
 	}
 	if strings.EqualFold(subject, "[COLLAB] Governance Participation") {
 		desc.FamilyClass = mailNoiseFamilyGovernanceParticipation
-		desc.FamilyKey = recipient + "|" + strings.ToLower(sender) + "|governance_participation"
+		desc.FamilyKey = mailFamilyKey(recipient, strings.ToLower(sender), "governance_participation")
+		if isMailReportInboxOwner(recipient) {
+			desc.AutoReadWindow = mailNoiseReviewWindow
+		}
 		return desc
 	}
 	return desc
@@ -372,7 +459,7 @@ func (o mailSendOutcome) suppressedExistingForRecipient(recipient string) (int64
 }
 
 func (s *Server) obsoleteMailCleanupTargets(ctx context.Context, explicitUserIDs []string, startAfterUserID string, limit int) ([]string, bool, string, error) {
-	targets := normalizeUserIDs(explicitUserIDs)
+	targets := normalizeMailboxOwnerIDs(explicitUserIDs)
 	if len(targets) == 0 {
 		registrations, err := s.store.ListAgentRegistrations(ctx)
 		if err != nil {
@@ -382,7 +469,12 @@ func (s *Server) obsoleteMailCleanupTargets(ctx context.Context, explicitUserIDs
 		for _, reg := range registrations {
 			derived = append(derived, reg.UserID)
 		}
-		targets = normalizeUserIDs(derived)
+		unreadOwners, err := s.store.ListInboxOwnersWithUnread(ctx)
+		if err != nil {
+			return nil, false, "", err
+		}
+		derived = append(derived, unreadOwners...)
+		targets = normalizeMailboxOwnerIDs(derived)
 	}
 	if len(targets) == 0 {
 		return nil, false, "", nil
@@ -444,10 +536,10 @@ func obsoleteMailboxIDsBySystemStale(items []store.MailItem, now time.Time) []in
 	ids := make([]int64, 0)
 	for _, item := range items {
 		desc := classifyMailNoise(item.OwnerAddress, item.FromAddress, item.Subject, item.Body)
-		if !desc.SystemNoiseAutoRead {
+		if desc.AutoReadWindow <= 0 {
 			continue
 		}
-		if item.SentAt.IsZero() || now.Sub(item.SentAt) < mailNoiseAutoReadWindow {
+		if item.SentAt.IsZero() || now.Sub(item.SentAt) < desc.AutoReadWindow {
 			continue
 		}
 		ids = append(ids, item.MailboxID)

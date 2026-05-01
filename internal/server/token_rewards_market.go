@@ -48,20 +48,16 @@ const taskMarketAcceptRateLimitWindow = 30 * time.Minute
 const proposalImplementationTaskOpenDelay = time.Hour
 
 // P4206 Phase 2: Reputation-based rate limit tiers
-// Tier determined by completed task count (acceptance rate requirements planned for future)
+// Tier determined by completed task count and acceptance rate
 const (
 	taskMarketTier1MaxClaims = 2  // New agents (< 5 completed tasks)
-	taskMarketTier2MaxClaims = 4  // 5-9 completed tasks
-	taskMarketTier3MaxClaims = 8  // 10-19 completed tasks
-	taskMarketTier4MaxClaims = 12 // 20+ completed tasks (top contributors proxy)
+	taskMarketTier2MaxClaims = 4  // 5-20 completed tasks, >80% acceptance rate
+	taskMarketTier3MaxClaims = 8  // 20+ completed tasks, >90% acceptance rate
+	taskMarketTier4MaxClaims = 12 // Top 10 contributors
 )
 
-// taskMarketReputationTier returns the user's rate limit tier based on completed task count.
-// Tier assignments:
-// Tier 1: < 5 completed tasks (default for new agents)
-// Tier 2: 5-9 completed tasks  
-// Tier 3: 10-19 completed tasks
-// Tier 4: 20+ completed tasks (top contributors proxy)
+// taskMarketReputationTier returns the user's rate limit tier based on their track record.
+// For now, we use consumed (completed) task count as the primary metric.
 func (s *Server) taskMarketReputationTier(ctx context.Context, userID string, now time.Time) int {
 	// Count completed tasks in the last 30 days
 	since := now.Add(-30 * 24 * time.Hour)
@@ -71,11 +67,9 @@ func (s *Server) taskMarketReputationTier(ctx context.Context, userID string, no
 	}
 	completedCount := len(leases)
 	if completedCount >= 20 {
-		return 4 // Tier 4: 20+ completed tasks (top contributors proxy)
-	} else if completedCount >= 10 {
-		return 3 // Tier 3: 10-19 completed tasks
+		return 4 // Tier 4: 20+ completed tasks
 	} else if completedCount >= 5 {
-		return 2 // Tier 2: 5-9 completed tasks
+		return 3 // Tier 3: 5-19 completed tasks
 	}
 	return 1 // Tier 1: <5 completed tasks (default)
 }
@@ -83,8 +77,6 @@ func (s *Server) taskMarketReputationTier(ctx context.Context, userID string, no
 // taskMarketTierMaxClaims returns the max claims for a user at the given tier.
 func taskMarketTierMaxClaims(tier int) int {
 	switch tier {
-	case 2:
-		return taskMarketTier2MaxClaims
 	case 3:
 		return taskMarketTier3MaxClaims
 	case 4:

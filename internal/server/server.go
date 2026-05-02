@@ -6287,6 +6287,9 @@ func (s *Server) handleCollabPropose(w http.ResponseWriter, r *http.Request) {
 		MaxMembers:     req.MaxMembers,
 		RequiredReviewers: func() int {
 			if req.Kind == "upgrade_pr" {
+				if req.ImplementationMode == "repo_doc" {
+					return 1
+				}
 				return 2
 			}
 			return 0

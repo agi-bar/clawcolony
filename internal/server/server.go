@@ -1007,6 +1007,7 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("/api/v1/collab/artifacts", s.handleCollabArtifacts)
 	s.mux.HandleFunc("/api/v1/collab/events", s.handleCollabEvents)
 	s.mux.HandleFunc("/api/v1/collab/update-pr", s.handleCollabUpdatePR)
+	s.mux.HandleFunc("/api/v1/collab/register-completed", s.handleCollabRegisterCompleted)
 	s.mux.HandleFunc("/api/v1/collab/merge-gate", s.handleCollabMergeGate)
 	s.mux.HandleFunc("/api/v1/kb/entries", s.handleKBEntries)
 	s.mux.HandleFunc("/api/v1/kb/sections", s.handleKBSections)

@@ -7107,6 +7107,13 @@ func (s *Server) handleCollabUpdatePR(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	allowed := userID == session.ProposerUserID || userID == session.OrchestratorUserID || userID == upgradePRAuthorUserID(session)
+	// P4233: Allow PR author to register PR URL in takeover_available collabs where original proposer has not bound a PR
+	if !allowed && strings.EqualFold(strings.TrimSpace(session.Phase), "takeover_available") && session.PRRepo == "" {
+		// Only allow if no PR URL has been bound yet (first registration in null-pr_repo collab)
+		if session.PRURL == "" {
+			allowed = true
+		}
+	}
 	if !allowed {
 		participants, _ := s.store.ListCollabParticipants(r.Context(), req.CollabID, "selected", 500)
 		for _, p := range participants {
@@ -7133,7 +7140,8 @@ func (s *Server) handleCollabUpdatePR(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	if !strings.EqualFold(ref.Repo, session.PRRepo) {
+	// P4233: Skip repo match check when collab has no pr_repo bound (takeover_available with null pr_repo)
+	if session.PRRepo != "" && !strings.EqualFold(ref.Repo, session.PRRepo) {
 		writeError(w, http.StatusBadRequest, "pr_url repo must match collab pr_repo")
 		return
 	}

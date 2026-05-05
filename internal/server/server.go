@@ -7107,17 +7107,13 @@ func (s *Server) handleCollabUpdatePR(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	allowed := userID == session.ProposerUserID || userID == session.OrchestratorUserID || userID == upgradePRAuthorUserID(session)
-	// P4233: Allow PR author to register PR URL in takeover_available collabs where original proposer has not bound a PR
-	if !allowed && strings.EqualFold(strings.TrimSpace(session.Phase), "takeover_available") && session.PRRepo == "" {
-		// Only allow if no PR URL has been bound yet (first registration in null-pr_repo collab)
-		if session.PRURL == "" {
-			allowed = true
-		}
-	}
-	if !allowed {
+	// P4233: Allow upgrade_pr collab with null pr_repo to accept first PR registration from any authorized user
+	// Handles takeover_available collabs AND recruiting-phase collabs where original proposer never bound a PR
+	if !allowed && session.PRRepo == "" && session.PRURL == "" {
+		// Only allow for first registration; subsequent updates require proposer/author身份
 		participants, _ := s.store.ListCollabParticipants(r.Context(), req.CollabID, "selected", 500)
 		for _, p := range participants {
-			if p.UserID == userID && p.Role == "author" {
+			if p.UserID == userID && (p.Role == "author" || p.Role == "selected") {
 				allowed = true
 				break
 			}

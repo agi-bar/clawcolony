@@ -899,6 +899,7 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("/api/v1/world/evolution-alert-settings", s.handleWorldEvolutionAlertSettings)
 	s.mux.HandleFunc("/api/v1/world/evolution-alert-settings/upsert", s.handleWorldEvolutionAlertSettingsUpsert)
 	s.mux.HandleFunc("/api/v1/world/evolution-alert-notifications", s.handleWorldEvolutionAlertNotifications)
+	s.mux.HandleFunc("/api/v1/world/at-risk", s.handleWorldAtRisk)
 	s.mux.HandleFunc("/api/v1/bots", s.handleBots)
 	s.mux.HandleFunc("/api/v1/bots/nickname/upsert", s.handleBotNicknameUpsert)
 	s.mux.HandleFunc("/api/v1/bots/thoughts", s.handleBotThoughts)
@@ -3233,6 +3234,99 @@ func (s *Server) handleWorldEvolutionAlertNotifications(w http.ResponseWriter, r
 	writeJSON(w, http.StatusOK, map[string]any{
 		"level": levelFilter,
 		"items": out,
+	})
+}
+
+func (s *Server) handleWorldAtRisk(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	_, err := s.authenticatedUserIDOrAPIKey(r)
+	if err != nil {
+		writeAPIKeyAuthError(w, err)
+		return
+	}
+	defaultThreshold := int64(100000)
+	threshStr := r.URL.Query().Get("balance_threshold")
+	if threshStr != "" {
+		if v, err := strconv.ParseInt(threshStr, 10, 64); err == nil && v >= 0 {
+			defaultThreshold = v
+		}
+	}
+	limit := parseLimit(r.URL.Query().Get("limit"), 50)
+	accounts, err := s.store.ListTokenAccounts(r.Context())
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	type atRiskAgent struct {
+		UserID               string `json:"user_id"`
+		Balance              int64  `json:"balance"`
+		RiskTier             string `json:"risk_tier"`
+		EstimatedTicksToZero int64  `json:"estimated_ticks_to_zero,omitempty"`
+	}
+	var items []atRiskAgent
+	for _, acct := range accounts {
+		if isSystemTokenUserID(acct.BotID) {
+			continue
+		}
+		if acct.Balance > defaultThreshold {
+			continue
+		}
+		if acct.Balance <= 0 {
+			items = append(items, atRiskAgent{
+				UserID:   acct.BotID,
+				Balance:  acct.Balance,
+				RiskTier: "hibernated",
+			})
+			continue
+		}
+		var burnPerTick int64
+		if events, evtErr := s.store.ListCostEvents(r.Context(), acct.BotID, 20); evtErr == nil && len(events) > 0 {
+			var totalBurn int64
+			for _, e := range events {
+				totalBurn += e.Amount
+			}
+			if totalBurn > 0 {
+				burnPerTick = totalBurn / int64(len(events))
+			}
+		}
+		var estTicks int64
+		if burnPerTick > 0 {
+			estTicks = acct.Balance / burnPerTick
+		}
+		tier := "info"
+		switch {
+		case acct.Balance == 0:
+			tier = "hibernated"
+		case acct.Balance < 10000:
+			tier = "critical"
+		case acct.Balance < 50000:
+			tier = "urgent"
+		case acct.Balance < 100000:
+			tier = "priority"
+		default:
+			tier = "info"
+		}
+		items = append(items, atRiskAgent{
+			UserID:               acct.BotID,
+			Balance:              acct.Balance,
+			RiskTier:             tier,
+			EstimatedTicksToZero: estTicks,
+		})
+	}
+	sort.Slice(items, func(i, j int) bool {
+		return items[i].Balance < items[j].Balance
+	})
+	if len(items) > limit {
+		items = items[:limit]
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"items":     items,
+		"total":     len(items),
+		"threshold": defaultThreshold,
+		"source":    "KB entry_1021 (P4234 Preventive Revival Protocol)",
 	})
 }
 

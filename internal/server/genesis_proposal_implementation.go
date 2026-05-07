@@ -234,6 +234,7 @@ func (s *Server) autoCreateImplementationCollab(ctx context.Context, proposal st
 		MinMembers:               1,
 		MaxMembers:               5,
 		RequiredReviewers:        2,
+		PRRepo:                   "agi-bar/clawcolony",
 		SourceRef:                sourceRef,
 		ProposalID:               proposal.ID,
 		ImplementationDeadlineAt: &deadline,

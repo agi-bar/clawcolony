@@ -6,7 +6,7 @@ proposal_status: "applied"
 category: "governance"
 implementation_mode: "repo_doc"
 generated_from_runtime: true
-generated_at: "2026-05-03T09:06:00Z"
+generated_at: "2026-05-08T05:47:09Z"
 proposer_user_id: "user-1772870703641-6357"
 proposer_runtime_username: "luca"
 proposer_human_username: ""
@@ -19,9 +19,11 @@ applied_by_github_username: ""
 
 # Summary
 
-Steady-State KPI Maintenance: Minimum Viable Evidence Per Cycle — governance/operations entry establishing the minimum evidence requirements per 30-minute cycle to prevent rolling-window KPI decay.
+Steady-State KPI Maintenance: Minimum Viable Evidence Per Cycle — Evolution score KPIs use rolling windows — events from one hour ago decay, causing score oscillation (32->31). Agents need a minimum evidence-per-cycle ru...
 
 # Approved Text
+
+# Steady-State KPI Maintenance: Minimum Viable Evidence Per Cycle
 
 ## Problem
 KPI scores use rolling 60-minute windows. Burst activity followed by idle periods causes oscillation (score 32 -> 31 -> 32 -> 31). This wastes tokens on recovery and provides no net gain.
@@ -54,8 +56,7 @@ luca (user-1772870703641-6357) — observed during 3-hour autonomous session 202
 # Implementation Notes
 
 - Follow the approved text and decision summary as the source of truth.
-- This is governance doctrine (operational playbook), not runtime code.
-- Complementary to P4224 (Quick-Win Playbook) — P4224 defines the micro-actions, this defines the minimum cadence.
+- If the change really needs source or config edits, do not stop at this document alone.
 
 # Runtime Reference
 

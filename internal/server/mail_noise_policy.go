@@ -33,6 +33,7 @@ const (
 	mailNoiseFamilyTaskMarket              = "task_market"
 	mailNoiseFamilyUpgradePR               = "upgrade_pr"
 	mailNoiseFamilyCommunityCollabPinned   = "community_collab_pinned"
+        mailNoiseFamilyCommunityCollabVoluntary = "community_collab_voluntary"
 	mailNoiseFamilyAutonomyReport          = "autonomy_report_family"
 	mailNoiseFamilyGovernanceParticipation = "governance_participation_report"
 )
@@ -40,6 +41,10 @@ const (
 const (
 	mailSuppressionReasonExactDuplicate  = "exact_duplicate"
 	mailSuppressionReasonFamilyDuplicate = "family_duplicate"
+	mailSuppressionReasonAdaptiveCommunityCollab = "adaptive_community_collab"
+
+const communityCollabBaseCooldown = 30 * time.Minute
+
 )
 
 var (
@@ -66,6 +71,63 @@ type mailNoiseDescriptor struct {
 	FamilyClass    string
 	FamilyKey      string
 	AutoReadWindow time.Duration
+}
+
+type communityCollabAdaptiveState struct {
+	LastTriggeredAt time.Time
+	QualityScore    float64
+	QuietUntil      time.Time
+	OutboundCount   int
+}
+
+var communityCollabAdaptiveCache = make(map[string]communityCollabAdaptiveState)
+
+func communityCollabQualityScore(sender, subject, body string) float64 {
+	score := 0.0
+	if strings.Contains(strings.ToUpper(subject), "[COLLAB]") && strings.Contains(strings.ToLower(body), "proposal_id") {
+		score += 0.3
+	}
+	if strings.Contains(strings.ToLower(body), "evidence") || strings.Contains(strings.ToLower(body), "ganglion_id") {
+		score += 0.2
+	}
+	if strings.Contains(strings.ToLower(body), "deadline") && strings.Contains(strings.ToLower(body), "role") {
+		score += 0.3
+	}
+	if strings.Contains(strings.ToLower(body), "collab_id") || strings.Contains(strings.ToLower(body), "proposal") {
+		score += 0.2
+	}
+	return score
+}
+
+func communityCollabShouldSuppress(recipient, sender, subject, body string) (bool, string) {
+	stateKey := mailFamilyKey(recipient, "community_collab_adaptive")
+	state, ok := communityCollabAdaptiveCache[stateKey]
+	now := time.Now()
+	if !ok {
+		return false, ""
+	}
+	if now.Before(state.QuietUntil) {
+		return true, stateKey
+	}
+	return false, ""
+}
+
+func communityCollabUpdateState(recipient, sender, subject, body string) {
+	stateKey := mailFamilyKey(recipient, "community_collab_adaptive")
+	state := communityCollabAdaptiveCache[stateKey]
+	now := time.Now()
+	qs := communityCollabQualityScore(sender, subject, body)
+	baseCooldown := 30 * time.Minute
+	highQualityCooldown := 2 * time.Hour
+	if qs >= 0.5 {
+		state.QuietUntil = now.Add(highQualityCooldown)
+	} else {
+		state.QuietUntil = now.Add(baseCooldown)
+	}
+	state.QualityScore = qs
+	state.LastTriggeredAt = now
+	state.OutboundCount++
+	communityCollabAdaptiveCache[stateKey] = state
 }
 
 type mailSendSuppression struct {
@@ -315,6 +377,14 @@ func classifyMailNoise(recipient, sender, subject, body string) mailNoiseDescrip
 				return desc
 			}
 		}
+		if strings.HasPrefix(upperSubject, "[COMMUNITY-COLLAB]") && strings.Contains(upperSubject, "[VOLUNTARY]") {
+			if collabID := parseMailCollabIDFromText(subject); collabID != "" {
+				desc.FamilyClass = mailNoiseFamilyCommunityCollabVoluntary
+				desc.FamilyKey = mailFamilyKey(recipient, collabID)
+				desc.AutoReadWindow = mailNoiseReviewWindow
+				return desc
+			}
+		}
 	}
 	if hasAutonomyReportPrefix(subject) {
 		desc.FamilyClass = mailNoiseFamilyAutonomyReport
@@ -400,6 +470,31 @@ func (s *Server) planMailSendWithNoisePolicy(ctx context.Context, input store.Ma
 		suppression, err := s.findMailSuppression(ctx, recipient, input)
 		if err != nil {
 			return plannedMailSend{}, err
+		}
+		// Adaptive COMMUNITY-COLLAB suppression: check quality score and cooldown
+		if suppression == nil {
+			qs := communityCollabQualityScore(input.From, input.Subject, input.Body)
+			stateKey := mailFamilyKey(recipient, "community_collab_adaptive")
+			state, ok := communityCollabAdaptiveCache[stateKey]
+			now := time.Now()
+			if ok && now.Before(state.QuietUntil) && qs < 0.5 {
+				// Suppress low-quality COMMUNITY-COLLAB during cooldown
+				logMailSuppression(input.From, mailSendSuppression{
+					Recipient:   recipient,
+					Reason:      mailSuppressionReasonAdaptiveCommunityCollab,
+					FamilyClass: mailNoiseFamilyCommunityCollabAdaptive,
+					FamilyKey:   stateKey,
+				}, input.Subject)
+				plan.Suppressed = append(plan.Suppressed, mailSendSuppression{
+					Recipient:   recipient,
+					Reason:      mailSuppressionReasonAdaptiveCommunityCollab,
+					FamilyClass: mailNoiseFamilyCommunityCollabAdaptive,
+					FamilyKey:   stateKey,
+				})
+				continue
+			}
+			// Update adaptive state for sent mail
+			communityCollabUpdateState(recipient, input.From, input.Subject, input.Body)
 		}
 		if suppression != nil {
 			logMailSuppression(input.From, *suppression, input.Subject)
@@ -657,3 +752,4 @@ func (s *Server) runMailNoiseCleanupTick(ctx context.Context, tickID int64) erro
 	_, err = s.putSettingJSON(ctx, mailNoiseCleanupStateKey, nextState)
 	return err
 }
+

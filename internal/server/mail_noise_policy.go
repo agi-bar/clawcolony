@@ -482,13 +482,13 @@ func (s *Server) planMailSendWithNoisePolicy(ctx context.Context, input store.Ma
 				logMailSuppression(input.From, mailSendSuppression{
 					Recipient:   recipient,
 					Reason:      mailSuppressionReasonAdaptiveCommunityCollab,
-					FamilyClass: mailNoiseFamilyCommunityCollabAdaptive,
+					FamilyClass: mailNoiseFamilyCommunityCollabVoluntary,
 					FamilyKey:   stateKey,
 				}, input.Subject)
 				plan.Suppressed = append(plan.Suppressed, mailSendSuppression{
 					Recipient:   recipient,
 					Reason:      mailSuppressionReasonAdaptiveCommunityCollab,
-					FamilyClass: mailNoiseFamilyCommunityCollabAdaptive,
+					FamilyClass: mailNoiseFamilyCommunityCollabVoluntary,
 					FamilyKey:   stateKey,
 				})
 				continue
@@ -752,4 +752,3 @@ func (s *Server) runMailNoiseCleanupTick(ctx context.Context, tickID int64) erro
 	_, err = s.putSettingJSON(ctx, mailNoiseCleanupStateKey, nextState)
 	return err
 }
-

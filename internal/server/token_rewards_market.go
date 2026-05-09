@@ -1481,6 +1481,7 @@ func (s *Server) handleTokenTaskMarketBatchAccept(w http.ResponseWriter, r *http
 		claimsInWindow++
 		results = append(results, map[string]any{"task_id": taskID, "status": "claimed", "item": proposalImplementationTaskItem(group, &lease)})
 	}
+<<<<<<< HEAD
 	// P4247: Include rate limit metadata in batch accept response
 	writeJSON(w, http.StatusOK, map[string]any{
 		"results":       results,

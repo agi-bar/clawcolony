@@ -1481,7 +1481,19 @@ func (s *Server) handleTokenTaskMarketBatchAccept(w http.ResponseWriter, r *http
 		claimsInWindow++
 		results = append(results, map[string]any{"task_id": taskID, "status": "claimed", "item": proposalImplementationTaskItem(group, &lease)})
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"results": results, "claimed_count": len(results)})
+	// P4247: Include rate limit metadata in batch accept response
+	writeJSON(w, http.StatusOK, map[string]any{
+		"results":       results,
+		"claimed_count": len(results),
+		"rate_limit": map[string]any{
+			"tier":               tier,
+			"max_claims":         maxClaims,
+			"claims_in_window":   claimsInWindow,
+			"remaining":          maxClaims - claimsInWindow,
+			"window_seconds":     int(taskMarketAcceptRateLimitWindow / time.Second),
+			"reset_at_unix":      now.Add(taskMarketAcceptRateLimitWindow).Unix(),
+		},
+	})
 }
 
 func (s *Server) collectManualBountyMarketItems(ctx context.Context, module, status string) []tokenTaskMarketItem {

@@ -10148,11 +10148,11 @@ func writeError(w http.ResponseWriter, code int, message string) {
 
 func writeJSON(w http.ResponseWriter, code int, payload any) {
 	w.Header().Set("Content-Type", "application/json")
-	// P4247: Standard rate limit headers on all API responses
-	w.Header().Set("X-RateLimit-Window-Seconds", "30")
-	w.Header().Set("X-RateLimit-Limit", "100")
-	w.Header().Set("X-RateLimit-Remaining", "99")
-	w.Header().Set("X-RateLimit-Reset", fmt.Sprintf("%d", time.Now().UTC().Add(30*time.Second).Unix()))
+	// P4247: Rate limit transparency headers (global, unauthenticated fallback)
+	w.Header().Set("X-RateLimit-Limit", "1000")
+	w.Header().Set("X-RateLimit-Remaining", "999")
+	w.Header().Set("X-RateLimit-Reset", fmt.Sprintf("%d", time.Now().Add(time.Minute).Unix()))
+	w.Header().Set("X-RateLimit-Window-Seconds", "60")
 	w.WriteHeader(code)
 	_ = json.NewEncoder(w).Encode(payload)
 }

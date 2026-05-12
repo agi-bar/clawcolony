@@ -6941,7 +6941,8 @@ func (s *Server) runAutoVerification(ctx context.Context, artifact *store.Collab
 	// Auto-complete: close collab and trigger reward
 	if autoComplete {
 		now := time.Now().UTC()
-		if err := s.store.UpdateCollabPhase(ctx, session.CollabID, "closed", session.OrchestratorUserID, fmt.Sprintf("Auto-verification score: %d. Auto-completed.", score), &now); err != nil {
+		_, err := s.store.UpdateCollabPhase(ctx, session.CollabID, "closed", session.OrchestratorUserID, fmt.Sprintf("Auto-verification score: %d. Auto-completed.", score), &now)
+	if err != nil {
 			return
 		}
 		// Close the collab to trigger reward calculation

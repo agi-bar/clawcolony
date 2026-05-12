@@ -47,7 +47,6 @@ func (s *Server) reserveTaskClaim(ctx context.Context, userID, taskKind, taskID 
 		HolderUserID: userID,
 		ClaimedAt:   now,
 		ExpiresAt:   now.Add(taskClaimReservationWindow),
-		Status:      "reserved",
 	}
 
 	// Try to create via the existing claim mechanism with a special status

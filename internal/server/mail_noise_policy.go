@@ -42,10 +42,9 @@ const (
 	mailSuppressionReasonExactDuplicate  = "exact_duplicate"
 	mailSuppressionReasonFamilyDuplicate = "family_duplicate"
 	mailSuppressionReasonAdaptiveCommunityCollab = "adaptive_community_collab"
+)
 
 const communityCollabBaseCooldown = 30 * time.Minute
-
-)
 
 var (
 	mailNoiseCleanupUserBatchLimit = 100

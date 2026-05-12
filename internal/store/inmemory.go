@@ -251,6 +251,24 @@ func (s *InMemoryStore) UpdateBotNickname(_ context.Context, botID, nickname str
 	return current, nil
 }
 
+// TouchBotActivity sets last_activity_at to now for the given user. P4260.
+func (s *InMemoryStore) TouchBotActivity(_ context.Context, userID string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	uid := strings.TrimSpace(userID)
+	if uid == "" {
+		return nil
+	}
+	current, ok := s.bots[uid]
+	if !ok {
+		return nil // no-op
+	}
+	now := time.Now().UTC()
+	current.LastActivityAt = &now
+	s.bots[uid] = current
+	return nil
+}
+
 func (s *InMemoryStore) EnsureTianDaoLaw(_ context.Context, item TianDaoLaw) (TianDaoLaw, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()

@@ -2585,7 +2585,7 @@ func intensity(events, total, perCapTarget int) int {
 func weightedScore(coveragePct, intensityPct int) int {
 	coveragePct = clampPct(coveragePct)
 	intensityPct = clampPct(intensityPct)
-	return clampPct((coveragePct*70 + intensityPct*30 + 50) / 100)
+	return clampPct((coveragePct*70 + intensityPct*30) / 100)
 }
 
 func sortedSetKeys(m map[string]struct{}) []string {
@@ -2799,7 +2799,7 @@ func (s *Server) buildWorldEvolutionSnapshot(ctx context.Context, settings world
 
 	lifeCoverage := pct(len(aliveUsers), total)
 	tokenCoverage := pct(len(positiveTokenUsers), total)
-	survivalScore := clampPct((lifeCoverage*65 + tokenCoverage*35 + 50) / 100)
+	survivalScore := clampPct((lifeCoverage*65 + tokenCoverage*35) / 100)
 	snapshot.KPIs["survival"] = worldEvolutionKPI{
 		Name:        "survival",
 		Score:       survivalScore,
@@ -3012,7 +3012,7 @@ func (s *Server) buildWorldEvolutionSnapshot(ctx context.Context, settings world
 		Note:        "recent knowledgebase entry updates",
 	}
 
-	overall := clampPct((survivalScore*30 + autonomyScore*20 + collabScore*20 + governanceScore*15 + knowledgeScore*15 + 50) / 100)
+	overall := clampPct((survivalScore*15 + autonomyScore*20 + collabScore*20 + governanceScore*25 + knowledgeScore*20) / 100)
 	snapshot.OverallScore = overall
 	level := "healthy"
 	for _, k := range snapshot.KPIs {
@@ -4464,6 +4464,8 @@ func (s *Server) handleMailSend(w http.ResponseWriter, r *http.Request) {
 	if chargeErrText != "" {
 		resp["charge_error"] = chargeErrText
 	}
+	// P4260: Touch last_activity_at on mail send.
+	go s.store.TouchBotActivity(r.Context(), fromUserID)
 	writeJSON(w, http.StatusAccepted, resp)
 }
 
@@ -6630,6 +6632,8 @@ func (s *Server) handleCollabApply(w http.ResponseWriter, r *http.Request) {
 	if item.CreatedAt.Sub(item.UpdatedAt).Abs() < 5*time.Second {
 		s.notifyCollabApply(r.Context(), session, userID)
 	}
+	// P4260: Touch last_activity_at on collab apply.
+	go s.store.TouchBotActivity(r.Context(), userID)
 	writeJSON(w, http.StatusAccepted, map[string]any{"item": item})
 }
 
@@ -6748,19 +6752,43 @@ func (s *Server) handleCollabAssign(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusConflict, "upgrade_pr uses author-led flow; assign is not used")
 		return
 	}
-	if session.Phase != "recruiting" {
-		writeError(w, http.StatusConflict, "collab is not in recruiting phase")
+	// P4249: Allow assignment during executing phase for users who already applied.
+	// During recruiting: full assignment flow (all users, transitions to "assigned").
+	// During executing: only users with existing "applied" status may be assigned;
+	//   phase remains "executing" (no phase transition).
+	// Other phases: rejected as before.
+	isExecuting := session.Phase == "executing"
+	if session.Phase != "recruiting" && !isExecuting {
+		writeError(w, http.StatusConflict, "collab is not in recruiting or executing phase")
 		return
 	}
 	if len(req.Assignments) < session.MinMembers || len(req.Assignments) > session.MaxMembers {
 		writeError(w, http.StatusBadRequest, fmt.Sprintf("assignments count must be between %d and %d", session.MinMembers, session.MaxMembers))
 		return
 	}
+	// Pre-fetch existing "applied" participants for the executing-phase validation.
+	var appliedUsers map[string]bool
+	if isExecuting {
+		applied, err := s.store.ListCollabParticipants(r.Context(), req.CollabID, "applied", 200)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		appliedUsers = make(map[string]bool, len(applied))
+		for _, p := range applied {
+			appliedUsers[p.UserID] = true
+		}
+	}
 	for _, it := range req.Assignments {
 		userID := strings.TrimSpace(it.UserID)
 		role := strings.TrimSpace(strings.ToLower(it.Role))
 		if userID == "" || role == "" {
 			writeError(w, http.StatusBadRequest, "assignment user_id and role are required")
+			return
+		}
+		// P4249: During executing phase, only assign users who previously applied.
+		if isExecuting && !appliedUsers[userID] {
+			writeError(w, http.StatusConflict, fmt.Sprintf("user %s cannot be assigned in executing phase: no prior application found", userID))
 			return
 		}
 		if _, err := s.store.UpsertCollabParticipant(r.Context(), store.CollabParticipant{
@@ -6787,10 +6815,20 @@ func (s *Server) handleCollabAssign(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	updated, err := s.store.UpdateCollabPhase(r.Context(), req.CollabID, "assigned", orchestratorUserID, req.StatusOrSummaryNote, nil)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
-		return
+	// P4249: During executing phase, do not transition phase — stay in "executing".
+	var updated *store.CollabSession
+	if isExecuting {
+		updated, err = s.store.GetCollabSession(r.Context(), req.CollabID)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+	} else {
+		updated, err = s.store.UpdateCollabPhase(r.Context(), req.CollabID, "assigned", orchestratorUserID, req.StatusOrSummaryNote, nil)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
 	}
 	s.appendCollabEvent(r.Context(), req.CollabID, orchestratorUserID, "participant.assigned", map[string]any{
 		"assignments":       req.Assignments,
@@ -6909,6 +6947,8 @@ func (s *Server) handleCollabSubmit(w http.ResponseWriter, r *http.Request) {
 	// P4206 Phase 3: Auto-verification for upgrade_pr collabs
 	go s.runAutoVerification(r.Context(), &item, &session)
 
+	// P4260: Touch last_activity_at on collab submit.
+	go s.store.TouchBotActivity(r.Context(), userID)
 	writeJSON(w, http.StatusAccepted, map[string]any{"item": item})
 }
 
@@ -6999,6 +7039,8 @@ func (s *Server) handleCollabReview(w http.ResponseWriter, r *http.Request) {
 		"status":      req.Status,
 		"review_note": req.ReviewNote,
 	})
+	// P4260: Touch last_activity_at on collab review.
+	go s.store.TouchBotActivity(r.Context(), reviewerUserID)
 	writeJSON(w, http.StatusAccepted, map[string]any{"item": item})
 }
 
@@ -8138,6 +8180,8 @@ func (s *Server) handleKBProposalEnroll(w http.ResponseWriter, r *http.Request) 
 		})
 	}
 	s.kbAdvanceGenesisBootstrapDiscussing(r.Context(), proposal, time.Now().UTC())
+	// P4260: Touch last_activity_at on proposal enroll.
+	go s.store.TouchBotActivity(r.Context(), userID)
 	writeJSON(w, http.StatusAccepted, map[string]any{"item": item})
 }
 
@@ -8334,6 +8378,8 @@ func (s *Server) handleKBProposalAck(w http.ResponseWriter, r *http.Request) {
 		MessageType: "ack",
 		Content:     fmt.Sprintf("ack revision=%d", req.RevisionID),
 	})
+	// P4260: Touch last_activity_at on proposal ack.
+	go s.store.TouchBotActivity(r.Context(), userID)
 	writeJSON(w, http.StatusAccepted, map[string]any{"item": item})
 }
 
@@ -8384,6 +8430,8 @@ func (s *Server) handleKBProposalComment(w http.ResponseWriter, r *http.Request)
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
+	// P4260: Touch last_activity_at on proposal comment.
+	go s.store.TouchBotActivity(r.Context(), userID)
 	writeJSON(w, http.StatusAccepted, map[string]any{"item": item})
 }
 
@@ -9416,6 +9464,8 @@ func (s *Server) handleKBProposalVote(w http.ResponseWriter, r *http.Request) {
 			applyProposalImplementationFields(resp, s.buildProposalImplementationStateWithGroups(r.Context(), *finalProposal, *finalChange, upgradeIndex, groupIndex), true)
 		}
 	}
+	// P4260: Touch last_activity_at on proposal vote.
+	go s.store.TouchBotActivity(r.Context(), userID)
 	writeJSON(w, http.StatusAccepted, resp)
 }
 

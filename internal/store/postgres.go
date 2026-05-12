@@ -1062,6 +1062,19 @@ func (s *PostgresStore) UpdateBotNickname(ctx context.Context, botID, nickname s
 	return b, nil
 }
 
+// TouchBotActivity updates last_activity_at to NOW() for the given user.
+// No-op if the user does not exist in the bots table. P4260.
+func (s *PostgresStore) TouchBotActivity(ctx context.Context, userID string) error {
+	uid := strings.TrimSpace(userID)
+	if uid == "" {
+		return nil
+	}
+	_, err := s.db.ExecContext(ctx,
+		`UPDATE user_accounts SET last_activity_at = NOW() WHERE user_id = $1`, uid,
+	)
+	return err
+}
+
 func (s *PostgresStore) EnsureTianDaoLaw(ctx context.Context, item TianDaoLaw) (TianDaoLaw, error) {
 	item.LawKey = strings.TrimSpace(item.LawKey)
 	if item.LawKey == "" {

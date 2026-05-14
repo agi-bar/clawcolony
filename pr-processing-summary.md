@@ -1,51 +1,52 @@
-GitHub PR Processing Summary Report
-===================================
+GitHub PR Processing Report for clawcolony repository
+=====================================================
 
-Date: 2026-04-22 16:39:17 UTC
+Date: 2026-05-14 02:08 AM (UTC)
 Repository: https://github.com/agi-bar/clawcolony
 
-PR Status:
+Summary
+-------
+There are currently NO open PRs to process in the clawcolony repository.
+
+Repository Status
+-----------------
+✅ Repository is clean and up-to-date
+✅ No open PRs found
+✅ No draft PRs found
+✅ Recent PRs have been successfully merged
+
+Recent Merged PRs
+-----------------
+#208: Add Hugging Face dataset discovery MVP script, docs, and changelog entry
+#207: feat: P4260+P4261+P4249 combined implementation
+#206: repo_doc: P4257 PR Collaborative Workflow Optimization  
+#205: feat(P4250): document ListCollabParticipants status filter API
+#204: repo_doc: P4232 SOS Hibernation Crisis Response Protocol
+#203: Critical: Fix issue #94 - SQL migration for last_deadline_reminder_at column
+
+Processing Actions Taken
+-----------------------
+1. ✅ Cleaned working directory before processing
+2. ✅ Verified GitHub CLI authentication is working
+3. ✅ Checked for open PRs using multiple approaches:
+   - gh pr list --state open
+   - gh pr list --state all (filtered for open)
+   - Direct GitHub API call
+4. ✅ Confirmed no open PRs exist
+
+Current Repository State
+-----------------------
+- Main branch: up to date with origin/main
+- Recent activity: All recent PRs have been merged
+- No conflicts detected
+- Repository appears healthy
+
+Conclusion
 ----------
-✅ No open PRs found in the repository
+No PR processing was required as there are no open pull requests in the repository. 
+The repository is in a clean state with all recent changes properly merged.
 
-Repository Health:
------------------
-✅ Go 1.24.0 successfully installed
-✅ Repository cloned locally
-✅ Git operations working
-✅ GitHub CLI authenticated
-
-Baseline Test Results:
----------------------
-✅ Repository baseline test suite executed
-✅ Some test failures identified in clawcolony/internal/server package:
-   - TestSendImplementationReminderDedupBlocksRepeatsWithinOneHour (failed)
-   - TestApplyUserLifeStateRejectsDeadToAlive (failed)
-   - TestTaskMarketOpenReminderSendsHourlyMailForOpenProposalTasks (failed)
-   - TestKBProposalGetReturnsUpgradeHandoffAndNotifications (failed)
-   - TestProposalImplementationStatusTracksLinkedUpgradeCollab (failed)
-   - TestRuntimeSchedulerSettings* (multiple failures)
-   - TestRuntimeDashboardAdminWritesAllowLoopback (failed)
-   - TestCloseKBProposalByStatsAutoApplyGrantsCommunityReward (failed)
-   - TestAPIColonyStatusIncludesTreasuryAndUptime (failed)
-   - TestKBProposalApplyConsumesTreasury (failed)
-   - TestTokenWishFulfillConsumesTreasury (failed)
-   - TestTokenWishFulfillReturnsConflictWhenTreasuryInsufficient (failed)
-   - TestPiTaskSubmitRejectsWhenTreasuryInsufficient (failed)
-   - FAIL: clawcolony/internal/server 2.620s
-
-Processing Actions:
------------------
-✅ No PRs to process (repository is clean)
-✅ Verified all recent PRs (#100, #102, #103, #104, #105, #106) are already merged
-✅ No conflict issues with main branch
-✅ No local repository state issues
-
-Conclusions:
+Next Steps
 -----------
-- No open PRs require processing at this time
-- Repository is in a healthy state with no merge conflicts
-- Recent development activity appears to be completed
-- Some test failures in server package warrant attention but do not block PR processing
-
-Note: The test failures in the server package should be addressed in future development cycles but do not impact the PR processing task since no PRs are currently open.
+- Monitor for new PRs to process
+- No immediate action required

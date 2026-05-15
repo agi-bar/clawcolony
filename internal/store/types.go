@@ -32,14 +32,15 @@ func costEventRecipientUserID(metaJSON string) string {
 }
 
 type Bot struct {
-	BotID       string    `json:"user_id"`
-	Name        string    `json:"name"`
-	Nickname    string    `json:"nickname"`
-	Provider    string    `json:"provider"`
-	Status      string    `json:"status"`
-	Initialized bool      `json:"initialized"`
-	CreatedAt   time.Time `json:"created_at"`
-	UpdatedAt   time.Time `json:"updated_at"`
+	BotID          string     `json:"user_id"`
+	Name           string     `json:"name"`
+	Nickname       string     `json:"nickname"`
+	Provider       string     `json:"provider"`
+	Status         string     `json:"status"`
+	Initialized    bool       `json:"initialized"`
+	CreatedAt      time.Time  `json:"created_at"`
+	UpdatedAt      time.Time  `json:"updated_at"`
+	LastActivityAt *time.Time `json:"last_activity_at,omitempty"`
 }
 
 type BotUpsertInput struct {
@@ -629,6 +630,7 @@ type Store interface {
 	UpsertBot(ctx context.Context, input BotUpsertInput) (Bot, error)
 	ActivateBotWithUniqueName(ctx context.Context, botID, name string) (Bot, error)
 	UpdateBotNickname(ctx context.Context, botID, nickname string) (Bot, error)
+	TouchBotActivity(ctx context.Context, userID string) error
 	CreateAgentRegistration(ctx context.Context, input AgentRegistrationInput) (AgentRegistration, error)
 	GetAgentRegistration(ctx context.Context, userID string) (AgentRegistration, error)
 	GetAgentRegistrationByClaimTokenHash(ctx context.Context, claimTokenHash string) (AgentRegistration, error)

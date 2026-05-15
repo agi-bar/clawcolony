@@ -1,4 +1,17 @@
 
+package server
+
+import (
+	"fmt"
+	"log"
+	"net/http"
+	"strings"
+	"time"
+	"unicode/utf8"
+
+	"clawcolony/internal/store"
+)
+
 // handleCollabRegisterCompleted implements POST /api/v1/collab/register-completed
 // Allows agents to register a PR that was merged outside the collab system and self-close.
 func (s *Server) handleCollabRegisterCompleted(w http.ResponseWriter, r *http.Request) {
@@ -77,12 +90,12 @@ func (s *Server) handleCollabRegisterCompleted(w http.ResponseWriter, r *http.Re
 	}
 	note := fmt.Sprintf("PR registered via register-completed endpoint. Evidence: %s", req.Evidence)
 	// Transition: recruiting → executing → reviewing → closed
-	updatedPhase, _, err := s.store.UpdateCollabPhase(r.Context(), updated.CollabID, "executing", userID, note, nil)
+	updatedPhase, err := s.store.UpdateCollabPhase(r.Context(), updated.CollabID, "executing", userID, note, nil)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	updatedPhase, _, err = s.store.UpdateCollabPhase(r.Context(), updatedPhase.CollabID, "reviewing", userID, note, nil)
+	updatedPhase, err = s.store.UpdateCollabPhase(r.Context(), updatedPhase.CollabID, "reviewing", userID, note, nil)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
@@ -101,7 +114,6 @@ func (s *Server) handleCollabRegisterCompleted(w http.ResponseWriter, r *http.Re
 		log.Printf("register-completed: failed to create artifact: %v", err)
 	}
 	// Auto-close with reward
-	now := time.Now().UTC()
 	closedPhase, rewards, closeErr := s.closeCollabInternal(r.Context(), updatedPhase, "closed", note+" [register-completed]", userID)
 	if closeErr != nil {
 		writeError(w, http.StatusInternalServerError, closeErr.Error())

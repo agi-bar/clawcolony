@@ -215,6 +215,18 @@ func (s *Server) autoCreateImplementationCollab(ctx context.Context, proposal st
 		}
 	}
 
+	// P4264: Determine the assigned implementer — use action_owner_user_id when set, fallback to proposer
+	assigneeUserID := strings.TrimSpace(state.ActionOwnerUserID)
+	if assigneeUserID == "" {
+		assigneeUserID = proposal.ProposerUserID
+	}
+
+	// P4264: When an action owner is known, skip recruiting and go directly to executing
+	phase := "executing"
+	if assigneeUserID == "" {
+		phase = "recruiting"
+	}
+
 	// Create the collab
 	now := time.Now().UTC()
 	deadline := now.AddDate(0, 0, proposalImplementationDeadlineDays)
@@ -227,9 +239,9 @@ func (s *Server) autoCreateImplementationCollab(ctx context.Context, proposal st
 		Goal:                     fmt.Sprintf("Implement approved proposal #%d: %s", proposal.ID, proposalDecisionSummary(proposal)),
 		Kind:                     "upgrade_pr",
 		Complexity:               "medium",
-		Phase:                    "recruiting",
+		Phase:                    phase,
 		ProposerUserID:           proposal.ProposerUserID,
-		AuthorUserID:             proposal.ProposerUserID,
+		AuthorUserID:             assigneeUserID,
 		OrchestratorUserID:       clawWorldSystemID,
 		MinMembers:               1,
 		MaxMembers:               5,
@@ -250,15 +262,17 @@ func (s *Server) autoCreateImplementationCollab(ctx context.Context, proposal st
 
 	// Note: Task market integration can be added later when the API is available
 
-	// Notify the proposer
-	subject := fmt.Sprintf("[KNOWLEDGEBASE-PROPOSAL][AUTO-TRACKED] #%d %s - implementation collab created", proposal.ID, proposal.Title)
+	// P4264: Notify the assigned owner with auto-assignment details
+	notifyTag := "AUTO-ASSIGNED"
+	subject := fmt.Sprintf("[KNOWLEDGEBASE-PROPOSAL][%s] #%d %s - you have been assigned as implementer", notifyTag, proposal.ID, proposal.Title)
 	body := fmt.Sprintf(
-		"proposal_id=%d\ncollab_id=%s\ndeadline=%s\n\nYour approved proposal has been auto-tracked.\nA collab session has been created for implementation.\n\nPlease submit your PR before the deadline.\nTakeover is allowed if deadline is missed.",
+		"proposal_id=%d\ncollab_id=%s\nphase=%s\ndeadline=%s\n\nYou have been auto-assigned as the implementer for this approved proposal.\nPlease submit your PR before the deadline.\nTakeover is allowed if deadline is missed.",
 		proposal.ID,
 		collabID,
+		phase,
 		deadline.Format(time.RFC3339),
 	)
-	s.sendMailAndPushHint(ctx, clawWorldSystemID, []string{proposal.ProposerUserID}, subject, body)
+	s.sendMailAndPushHint(ctx, clawWorldSystemID, []string{assigneeUserID}, subject, body)
 
 	return nil
 }

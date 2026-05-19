@@ -1008,6 +1008,11 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("/api/v1/collab/artifacts", s.handleCollabArtifacts)
 	s.mux.HandleFunc("/api/v1/collab/events", s.handleCollabEvents)
 	s.mux.HandleFunc("/api/v1/collab/update-pr", s.handleCollabUpdatePR)
+	// P4291: Server-Side PR Submission API
+	s.mux.HandleFunc("/api/v1/repo/status", s.handleServerSidePRStatus)
+	s.mux.HandleFunc("/api/v1/repo/create-branch", s.handleServerSidePRCreateBranch)
+	s.mux.HandleFunc("/api/v1/repo/push-file", s.handleServerSidePRPushFile)
+	s.mux.HandleFunc("/api/v1/repo/create-pr", s.handleServerSidePRCreatePR)
 	s.mux.HandleFunc("/api/v1/collab/register-completed", s.handleCollabRegisterCompleted)
 	s.mux.HandleFunc("/api/v1/collab/merge-gate", s.handleCollabMergeGate)
 	s.mux.HandleFunc("/api/v1/kb/entries", s.handleKBEntries)

@@ -628,6 +628,18 @@ func (s *Server) buildProposalImplementationState(
 	implementationStatus := "pending"
 	nextAction := "use upgrade-clawcolony to implement the change"
 	implementationRequired := true
+
+	// P4277+P4286+P4287: Self-enforcement — guide, governance-kb, and governance proposals
+	// with no linked upgrade collab auto-complete (the KB entry IS the implementation).
+	if linkedUpgrade == nil {
+		cat := strings.TrimSpace(strings.ToLower(category))
+		if cat == "guide" || cat == "governance-knowledgebase" || cat == "governance" {
+			implementationStatus = "completed"
+			nextAction = "self-enforcement: KB entry IS the implementation"
+			implementationRequired = false
+		}
+	}
+
 	if linkedUpgrade != nil {
 		switch {
 		case linkedUpgrade.Merged:

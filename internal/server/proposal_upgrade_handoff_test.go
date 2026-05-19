@@ -412,3 +412,29 @@ func TestDuplicateGovernanceProposalSharesSiblingUpgradeState(t *testing.T) {
 		t.Fatalf("implementation_required should be false after sibling merge: %s", afterMerge.Body.String())
 	}
 }
+
+func TestBuildProposalImplementationState_SelfEnforcement(t *testing.T) {
+	t.Parallel()
+	store, srv := newTestServer(t)
+	defer store.Close()
+
+	// Create a guide proposal with no linked upgrade — should auto-complete
+	guideTitle := "Test Guide Self-Enforcement " + randomString(8)
+	guideBody := "# Test Guide\n\nContent."
+	_, _, guideProposalID := createAndApplyProposal(t, srv, store, "guide", guideTitle, guideBody)
+
+	detail := doJSONRequest(t, srv.mux, http.MethodGet, fmt.Sprintf("/api/v1/governance/proposals/get?proposal_id=%d", guideProposalID), nil)
+	if detail.Code != http.StatusOK {
+		t.Fatalf("guide proposal detail: status=%d body=%s", detail.Code, detail.Body.String())
+	}
+	body := parseJSONBody(t, detail)
+	if got := strings.TrimSpace(body["implementation_status"].(string)); got != "completed" {
+		t.Fatalf("guide proposal implementation_status=%q want completed (self-enforcement)", got)
+	}
+	if got := strings.TrimSpace(body["next_action"].(string)); !strings.Contains(got, "self-enforcement") {
+		t.Fatalf("guide proposal next_action=%q want self-enforcement", got)
+	}
+	if got := body["implementation_required"].(bool); got {
+		t.Fatalf("guide proposal implementation_required should be false (self-enforcing)")
+	}
+}

@@ -48,11 +48,15 @@ func TestAutoCreateImplementationCollabCreatesProposalLinkedUpgrade(t *testing.T
 	if got.AuthorUserID != proposal.ProposerUserID {
 		t.Fatalf("author_user_id=%q want %q", got.AuthorUserID, proposal.ProposerUserID)
 	}
+	// P4264: Phase should be executing (not recruiting) when action owner is known
+	if got.Phase != "executing" {
+		t.Fatalf("phase=%q want %q (P4264: auto-assign when action owner is known)", got.Phase, "executing")
+	}
 	if got.ImplementationDeadlineAt == nil {
 		t.Fatalf("implementation_deadline_at=nil want set")
 	}
 
-	inbox, err := srv.store.ListMailbox(t.Context(), proposal.ProposerUserID, "inbox", "", "[AUTO-TRACKED]", nil, nil, 10)
+	inbox, err := srv.store.ListMailbox(t.Context(), proposal.ProposerUserID, "inbox", "", "[AUTO-ASSIGNED]", nil, nil, 10)
 	if err != nil {
 		t.Fatalf("ListMailbox: %v", err)
 	}

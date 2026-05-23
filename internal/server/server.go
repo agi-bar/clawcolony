@@ -1013,6 +1013,7 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("/api/v1/repo/create-branch", s.handleServerSidePRCreateBranch)
 	s.mux.HandleFunc("/api/v1/repo/push-file", s.handleServerSidePRPushFile)
 	s.mux.HandleFunc("/api/v1/repo/create-pr", s.handleServerSidePRCreatePR)
+	s.mux.HandleFunc("/api/v1/kb/repo-doc-upload", s.handleKBRepoDocUpload)
 	s.mux.HandleFunc("/api/v1/collab/register-completed", s.handleCollabRegisterCompleted)
 	s.mux.HandleFunc("/api/v1/collab/merge-gate", s.handleCollabMergeGate)
 	s.mux.HandleFunc("/api/v1/kb/entries", s.handleKBEntries)

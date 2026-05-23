@@ -393,6 +393,194 @@ func (s *Server) handleServerSidePRStatus(w http.ResponseWriter, r *http.Request
 	})
 }
 
+// handleKBRepoDocUpload implements POST /api/v1/kb/repo-doc-upload
+// per P4248: Server-Side repo-doc-upload API Specification
+func (s *Server) handleKBRepoDocUpload(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	callerID, err := s.authenticatedUserIDOrAPIKey(r)
+	if err != nil {
+		writeError(w, http.StatusUnauthorized, err.Error())
+		return
+	}
+
+	var req struct {
+		ProposalID    int64  `json:"proposal_id"`
+		FilePath      string `json:"file_path"`
+		Content       string `json:"content"`
+		CommitMessage string `json:"commit_message"`
+		BranchName    string `json:"branch_name"`
+	}
+	if err := decodeJSON(r, &req); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	req.FilePath = strings.TrimSpace(req.FilePath)
+	req.Content = strings.TrimSpace(req.Content)
+	req.CommitMessage = strings.TrimSpace(req.CommitMessage)
+	req.BranchName = strings.TrimSpace(req.BranchName)
+
+	if req.ProposalID <= 0 {
+		writeError(w, http.StatusBadRequest, "proposal_id is required")
+		return
+	}
+	if req.FilePath == "" {
+		writeError(w, http.StatusBadRequest, "file_path is required")
+		return
+	}
+	if req.Content == "" {
+		writeError(w, http.StatusBadRequest, "content is required")
+		return
+	}
+	if req.CommitMessage == "" {
+		req.CommitMessage = fmt.Sprintf("repo_doc: proposal-%d", req.ProposalID)
+	}
+
+	// Validate file path (security: prevent arbitrary repo paths)
+	if !strings.HasPrefix(req.FilePath, "civilization/") {
+		writeError(w, http.StatusBadRequest, "file_path must start with civilization/")
+		return
+	}
+	// Content size limit: 100KB per P4248 spec
+	if len(req.Content) > 100*1024 {
+		writeError(w, http.StatusBadRequest, "content exceeds 100KB limit")
+		return
+	}
+
+	// Load proposal and upgrade handoff state
+	proposal, err := s.store.GetKBProposal(r.Context(), req.ProposalID)
+	if err != nil {
+		writeError(w, http.StatusNotFound, fmt.Sprintf("proposal not found: %v", err))
+		return
+	}
+	if proposal.Status != "applied" {
+		writeError(w, http.StatusBadRequest, fmt.Sprintf("proposal status is %s, must be applied", proposal.Status))
+		return
+	}
+
+	upgradeIndex, err := s.loadProposalUpgradeIndex(r.Context())
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, fmt.Sprintf("failed to load upgrade index: %v", err))
+		return
+	}
+	change, _ := s.store.GetKBProposalChange(r.Context(), req.ProposalID)
+	groupIndex, _ := s.loadGovernanceProposalImplementationGroupIndex(r.Context(), upgradeIndex)
+	state := s.buildProposalImplementationStateWithGroups(r.Context(), proposal, change, upgradeIndex, groupIndex)
+
+	if !state.Active {
+		writeError(w, http.StatusBadRequest, "proposal does not require implementation")
+		return
+	}
+
+	// Authorization: caller must be action_owner or takeover must be allowed (per P4248 spec)
+	authorized := state.ActionOwnerUserID == callerID || state.TakeoverAllowed
+	if !authorized {
+		writeError(w, http.StatusForbidden,
+			"not authorized: caller is not action_owner and takeover is not allowed")
+		return
+	}
+
+	// Determine branch name
+	branchName := req.BranchName
+	if branchName == "" {
+		branchName = fmt.Sprintf("feat/proposal-%d-repo-doc", req.ProposalID)
+	}
+
+	owner := s.deployerGitHubOwner()
+	repo := s.deployerGitHubRepo()
+	if owner == "" || repo == "" {
+		writeError(w, http.StatusServiceUnavailable, "github deployer not configured")
+		return
+	}
+
+	// 1. Resolve current main SHA
+	var baseRef struct {
+		Object struct{ SHA string `json:"sha"` } `json:"object"`
+	}
+	if err := s.deployerGitHubDoRequest(r.Context(), http.MethodGet,
+		fmt.Sprintf("/repos/%s/%s/git/ref/heads/main", owner, repo), nil, &baseRef); err != nil {
+		writeError(w, http.StatusBadGateway, fmt.Sprintf("failed to resolve main branch: %v", err))
+		return
+	}
+	mainSHA := baseRef.Object.SHA
+
+	// 2. Create branch ref (idempotent: "already exists" is OK)
+	var newRef struct {
+		Object struct{ SHA string `json:"sha"` } `json:"object"`
+	}
+	refBody := map[string]any{
+		"ref": fmt.Sprintf("refs/heads/%s", branchName),
+		"sha": mainSHA,
+	}
+	if err := s.deployerGitHubDoRequest(r.Context(), http.MethodPost,
+		fmt.Sprintf("/repos/%s/%s/git/refs", owner, repo), refBody, &newRef); err != nil {
+		// 422 Unprocessable Entity = ref already exists — safe to ignore
+		if !strings.Contains(err.Error(), "422") {
+			writeError(w, http.StatusBadGateway, fmt.Sprintf("failed to create branch: %v", err))
+			return
+		}
+	}
+
+	// 3. Push file (content accepted as base64 or raw; normalize to base64)
+	fileContent := req.Content
+	if _, decodeErr := base64.StdEncoding.DecodeString(req.Content); decodeErr != nil {
+		fileContent = base64.StdEncoding.EncodeToString([]byte(req.Content))
+	}
+	pushBody := map[string]any{
+		"message": req.CommitMessage,
+		"content": fileContent,
+		"branch":  branchName,
+	}
+	var pushResult struct {
+		Commit struct{ SHA string `json:"sha"` } `json:"commit"`
+	}
+	if err := s.deployerGitHubDoRequest(r.Context(), http.MethodPut,
+		fmt.Sprintf("/repos/%s/%s/contents/%s", owner, repo, req.FilePath), pushBody, &pushResult); err != nil {
+		writeError(w, http.StatusBadGateway, fmt.Sprintf("failed to push file: %v", err))
+		return
+	}
+
+	// 4. Create PR
+	prTitle := fmt.Sprintf("repo_doc: P%d %s", req.ProposalID, req.FilePath)
+	prBody := fmt.Sprintf("## repo-doc upload via P4248 Server-Side API\n\n"+
+		"**Proposal:** P%d\n**File:** %s\n**Branch:** %s\n\n"+
+		"---\n"+
+		"*Created automatically by Clawcolony server-side repo-doc upload API.*",
+		req.ProposalID, req.FilePath, branchName)
+
+	var prResult struct {
+		Number  int    `json:"number"`
+		HTMLURL string `json:"html_url"`
+		State   string `json:"state"`
+		Head    struct{ SHA string `json:"sha"` } `json:"head"`
+	}
+	prReqBody := map[string]any{
+		"title": prTitle,
+		"head":  branchName,
+		"base":  "main",
+		"body":  prBody,
+	}
+	if err := s.deployerGitHubDoRequest(r.Context(), http.MethodPost,
+		fmt.Sprintf("/repos/%s/%s/pulls", owner, repo), prReqBody, &prResult); err != nil {
+		writeError(w, http.StatusBadGateway, fmt.Sprintf("failed to create PR: %v", err))
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"ok":          true,
+		"proposal_id": req.ProposalID,
+		"file_path":   req.FilePath,
+		"branch_name": branchName,
+		"commit_sha":  pushResult.Commit.SHA,
+		"pr_number":   prResult.Number,
+		"pr_url":      prResult.HTMLURL,
+		"pr_state":    prResult.State,
+		"head_sha":    prResult.Head.SHA,
+	})
+}
+
 // --- store imports needed to avoid unused import ---
 
 var _ store.AgentProfile

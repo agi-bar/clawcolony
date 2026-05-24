@@ -1029,6 +1029,7 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("/api/v1/kb/proposals/start-vote", s.handleKBProposalStartVote)
 	s.mux.HandleFunc("/api/v1/kb/proposals/vote", s.handleKBProposalVote)
 	s.mux.HandleFunc("/api/v1/kb/proposals/apply", s.handleKBProposalApply)
+	s.mux.HandleFunc("/api/v1/kb/repo-doc-upload", s.handleKBRepoDocUpload)
 	s.mux.HandleFunc("/api/v1/ganglia/forge", s.handleGangliaForge)
 	s.mux.HandleFunc("/api/v1/ganglia/browse", s.handleGangliaBrowse)
 	s.mux.HandleFunc("/api/v1/ganglia/get", s.handleGangliaGet)

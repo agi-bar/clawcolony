@@ -38,20 +38,20 @@ func (s *Server) handleKBRepoDocUpload(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	
+
 	// Parse request body
 	var req KBRepoDocUploadRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		s.respondError(w, "Invalid request body", http.StatusBadRequest)
 		return
 	}
-	
+
 	// Validate request
 	if err := s.validateKBRepoDocUploadRequest(r, &req); err != nil {
 		s.respondError(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	
+
 	// Check if GitHub write token is available
 	if s.githubWriteToken == "" {
 		resp := KBRepoDocUploadResponse{
@@ -63,7 +63,7 @@ func (s *Server) handleKBRepoDocUpload(w http.ResponseWriter, r *http.Request) {
 		s.respondJSON(w, resp, http.StatusServiceUnavailable)
 		return
 	}
-	
+
 	// Basic validation passed - prepare for actual GitHub operations
 	// For now, return success with configuration status
 	resp := KBRepoDocUploadResponse{
@@ -71,12 +71,12 @@ func (s *Server) handleKBRepoDocUpload(w http.ResponseWriter, r *http.Request) {
 		Message:   "Repository document upload endpoint validated successfully. GitHub integration requires token configuration.",
 		Timestamp: time.Now().UTC().Format(time.RFC3339),
 	}
-	
+
 	// TODO: Implement actual GitHub operations:
 	// 1. Create branch from default branch
 	// 2. Create blob with content
 	// 3. Create tree with blob reference
-	// 4. Create commit with tree reference  
+	// 4. Create commit with tree reference
 	// 5. Create pull request from branch
 	// 6. Return PR URL in response
 	
@@ -97,7 +97,7 @@ func (s *Server) validateKBRepoDocUploadRequest(r *http.Request, req *KBRepoDocU
 	if req.ProposalID <= 0 {
 		return fmt.Errorf("proposal_id is required and must be positive")
 	}
-	
+
 	// Authentication check - validate Bearer token
 	authHeader := r.Header.Get("Authorization")
 	if authHeader == "" {
@@ -110,60 +110,60 @@ func (s *Server) validateKBRepoDocUploadRequest(r *http.Request, req *KBRepoDocU
 	if token == "" {
 		return fmt.Errorf("Bearer token is required")
 	}
-	
+
 	// Validate API key against store
 	if s.store == nil {
 		return fmt.Errorf("store not available")
 	}
-	
+
 	// TODO: Add more specific authorization checks
 	// - Check if token is valid API key
 	// - Check if user is action_owner of the proposal
 	// - Check if takeover_allowed on linked collab
-	
+
 	// For now, basic token validation
 	if len(token) < 10 {
 		return fmt.Errorf("invalid token format")
 	}
-	
+
 	// Check file path
 	if req.FilePath == "" {
 		return fmt.Errorf("file_path is required")
 	}
-	
+
 	// File path must start with civilization/
 	if !strings.HasPrefix(req.FilePath, "civilization/") {
 		return fmt.Errorf("file_path must start with 'civilization/'")
 	}
-	
+
 	// Check content
 	if req.Content == "" {
 		return fmt.Errorf("content is required")
 	}
-	
+
 	// Content size limit: 100KB
 	if len(req.Content) > 100*1024 {
 		return fmt.Errorf("content size exceeds 100KB limit")
 	}
-	
+
 	// Default commit message if not provided
 	if req.CommitMessage == "" {
 		req.CommitMessage = fmt.Sprintf("Add document for proposal %d", req.ProposalID)
 	}
-	
+
 	// Default branch name if not provided
 	if req.BranchName == "" {
 		req.BranchName = fmt.Sprintf("proposal-%d-doc-upload-%d", req.ProposalID, time.Now().Unix())
 	}
-	
+
 	// TODO: Add proposal status check
 	// Proposal must have status = applied and implementation_required = true
-	
+
 	// TODO: Add rate limiting
 	// Rate limit: 5 uploads/hour/agent
-	
+
 	// Basic authentication implemented - TODO: complete with authorization and proposal status checks
-	
+
 	return nil
 }
 

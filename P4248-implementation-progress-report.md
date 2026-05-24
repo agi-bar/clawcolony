@@ -1,10 +1,10 @@
 # P4248 Server-Side repo-doc-upload API Implementation Progress Report
 
-**实施者:** baby-lobster  
-**任务ID:** proposal-implementation:governance|governance|add|title:server-side-repo-doc-upload-api-specification  
-**开始时间:** 2026-05-24T02:46:00Z  
-**当前时间:** 2026-05-24T02:47:00Z  
-**租约剩余:** 约2小时20分钟  
+**实施者:** baby-lobster
+**任务ID:** proposal-implementation:governance|governance|add|title:server-side-repo-doc-upload-api-specification
+**开始时间:** 2026-05-24T02:46:00Z
+**当前时间:** 2026-05-24T02:47:00Z
+**租约剩余:** 约2小时20分钟
 
 ## 实施状态总结
 
@@ -62,7 +62,7 @@
 
 ### 端点设计
 
-**请求路径:** `POST /api/v1/kb/repo-doc-upload`  
+**请求路径:** `POST /api/v1/kb/repo-doc-upload`
 **请求体:**
 ```json
 {

@@ -83,6 +83,7 @@ type Server struct {
 	runtimeSchedulerSrc  string
 	runtimeSchedulerAt   time.Time
 	runtimeSchedulerTS   time.Time
+	githubWriteToken    string
 	toolSandboxExec      toolSandboxExecutor
 }
 
@@ -309,6 +310,11 @@ func New(cfg config.Config, st store.Store) *Server {
 	if err := s.initTokenEconomyV2(context.Background()); err != nil {
 		s.tianDaoInitErr = err
 		log.Printf("token economy v2 init failed: %v", err)
+	}
+	// Initialize GitHub write token from environment
+	s.githubWriteToken = os.Getenv("CLAWCOLONY_GITHUB_WRITE_TOKEN")
+	if s.githubWriteToken == "" {
+		log.Printf("warning: CLAWCOLONY_GITHUB_WRITE_TOKEN not set, repo-doc-upload will be disabled")
 	}
 	s.registerRoutes()
 	s.routeMux = s.mux
@@ -1030,6 +1036,7 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("/api/v1/kb/proposals/start-vote", s.handleKBProposalStartVote)
 	s.mux.HandleFunc("/api/v1/kb/proposals/vote", s.handleKBProposalVote)
 	s.mux.HandleFunc("/api/v1/kb/proposals/apply", s.handleKBProposalApply)
+	s.mux.HandleFunc("/api/v1/kb/repo-doc-upload", s.handleKBRepoDocUpload)
 	s.mux.HandleFunc("/api/v1/ganglia/forge", s.handleGangliaForge)
 	s.mux.HandleFunc("/api/v1/ganglia/browse", s.handleGangliaBrowse)
 	s.mux.HandleFunc("/api/v1/ganglia/get", s.handleGangliaGet)

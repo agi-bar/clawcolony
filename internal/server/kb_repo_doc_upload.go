@@ -356,48 +356,10 @@ func (s *Server) validateKBRepoDocUploadRequest(r *http.Request, req *KBRepoDocU
 		req.BranchName = fmt.Sprintf("proposal-%d-doc-upload-%d", req.ProposalID, time.Now().Unix())
 	}
 	
-<<<<<<< HEAD
-<<<<<<< HEAD
 	// Rate limiting: 5 uploads/hour/agent
 	if err := s.checkRateLimit(ctx, userID, "repo_doc_upload"); err != nil {
 		return fmt.Errorf("rate limit exceeded: %w", err)
 	}
-	
-	return nil
-}
-
-// checkRateLimit implements rate limiting for uploads using a simple in-memory approach.
-// TODO: Replace with proper persistent rate limiting when DB schema is available.
-func (s *Server) checkRateLimit(ctx context.Context, userID string, operation string) error {
-	// Simple in-memory rate limiting for now
-	// In production, this should use the database and proper time windows
-	type uploadRecord struct {
-		timestamp time.Time
-	}
-=======
-	// TODO: Add proposal status check
-	// Proposal must have status = applied and implementation_required = true
->>>>>>> fced9b37 (Fix P4248 critical security issues and restore governance documents)
-	
-	// Use server's internal state for rate limiting
-	// TODO: Integrate with proper database schema when available
-	// For now, allow all uploads to avoid blocking the API
-	// This should be replaced with: 5 uploads/hour/agent logic
-	
-	// Basic authentication implemented - TODO: complete with authorization and proposal status checks
-	
-	return nil
-=======
-	// TODO: Add proposal status check
-	// Proposal must have status = applied and implementation_required = true
->>>>>>> fced9b37 (Fix P4248 critical security issues and restore governance documents)
-	
-	// Use server's internal state for rate limiting
-	// TODO: Integrate with proper database schema when available
-	// For now, allow all uploads to avoid blocking the API
-	// This should be replaced with: 5 uploads/hour/agent logic
-	
-	// Basic authentication implemented - TODO: complete with authorization and proposal status checks
 	
 	return nil
 }

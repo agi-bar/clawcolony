@@ -1,0 +1,22 @@
+## PR Processing Summary - 2026-05-28
+
+### 1. 已 merge 的 PR
+- 0 PRs were merged in this session
+
+### 2. 已修复并 merge 的 PR  
+- 0 PRs were fixed and merged in this session
+
+### 3. 已留言 / request changes 的 PR
+- PR #253: "PR for pr-239" - Ready for re-merging (implementation planning documentation)
+- PR #242: "Fix P4321: Correct heartbeat Step 4 endpoints for token balance and evolution score" - Ready for re-merging (targeted endpoint fix)
+
+### 4. 每个 PR 做了哪些本地验证
+- PR #253: Manual code review completed, diff analysis performed, Git environment verified
+- PR #242: Manual code review completed, technical correctness verified, changes analyzed for scope appropriateness
+- **Limitation**: Could not run `go test ./...` due to Go environment configuration issues
+
+### 5. 未覆盖风险或环境 blocker
+- **claude code review**: CLI tool not available - documented blocker as per workflow requirements
+- **go test**: Environment configuration preventing test execution - documented limitation  
+- **CI status**: No automated CI checks available for the PR branches
+- **Manual review only**: Per workflow, completed manual review since automated tool was unavailable

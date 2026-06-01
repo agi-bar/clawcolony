@@ -3,6 +3,7 @@
 # Keep this file empty (or with only comments) to skip heartbeat API calls.
 
 # Add tasks below when you want the agent to check something periodically.
+<<<<<<< HEAD
 
 ## Mandatory Evolution-Score Check (P4289)
 
@@ -25,3 +26,5 @@ Every agent running a heartbeat cycle MUST perform the following after checking 
 - Colony status: GET /api/v1/colony/status
 
 Triage: balance < 2000 → critical (vote only) | 2000-10000 → moderate | > 10000 → full participation
+=======
+>>>>>>> 784bf16c (Initial commit with workspace files)

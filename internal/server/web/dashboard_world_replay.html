@@ -1,0 +1,319 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <link rel="stylesheet" href="/dashboard/dashboard.css">
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Dashboard · World Replay</title>
+    <style>
+      :root {
+        --bg:#050d18;
+        --bg-soft:#0b192d;
+        --panel:#0f2238;
+        --panel-hi:#15304e;
+        --ink:#ecf6ff;
+        --muted:#92aac3;
+        --line:#28517a;
+        --accent:#37d8ff;
+        --accent-soft:#8ceeff;
+        --ok:#41d89c;
+        --warn:#ffbf5b;
+        --bad:#ff6b78;
+        --shadow:0 18px 48px rgba(2, 8, 16, .42);
+      }
+      * { box-sizing: border-box; }
+      html, body { height:100%; min-height:100%; }
+      body {
+        margin:0;
+        min-height:100vh;
+        display:flex;
+        flex-direction:column;
+        overflow-y:auto;
+        overflow-x:auto;
+        font-family:"Avenir Next", "SF Pro Display", "Segoe UI", "PingFang SC", "Hiragino Sans GB", sans-serif;
+        background:
+          radial-gradient(1200px 680px at 8% -8%, rgba(55,216,255,.16), transparent 55%),
+          radial-gradient(900px 600px at 100% 0%, rgba(28,154,245,.16), transparent 60%),
+          linear-gradient(180deg, #081326 0%, #050d18 56%, #040912 100%);
+        color:var(--ink);
+      }
+      body::before {
+        content:"";
+        position:fixed;
+        inset:0;
+        pointer-events:none;
+        background-image:linear-gradient(rgba(90,170,255,.05) 1px, transparent 1px), linear-gradient(90deg, rgba(90,170,255,.05) 1px, transparent 1px);
+        background-size:40px 40px;
+        opacity:.35;
+        z-index:-1;
+      }
+      .top {
+        display:flex;
+        align-items:flex-start;
+        justify-content:space-between;
+        gap:10px 12px;
+        flex-wrap:wrap;
+        padding:14px 18px;
+        border-bottom:1px solid var(--line);
+        /* backdrop-filter removed - causes scroll jank; use solid background instead */
+        background: linear-gradient(180deg, rgba(11,25,44,.98) 0%, rgba(7,18,32,.98) 100%);
+        position:sticky;
+        top:0;
+        z-index:4;
+        box-shadow:0 10px 24px rgba(0, 0, 0, .28);
+      }
+      .tabs { display:flex; align-items:center; flex-wrap:wrap; row-gap:8px; column-gap:8px; }
+      .tabs a {
+        color:var(--muted);
+        text-decoration:none;
+        padding:6px 11px;
+        border:1px solid transparent;
+        border-radius:999px;
+        font-size:13px;
+        letter-spacing:.02em;
+        transition:color .15s ease,border-color .15s ease,background-color .15s ease,box-shadow .15s ease;
+      }
+      .tabs a:hover {
+        color:var(--ink);
+        border-color:rgba(55,216,255,.45);
+        background:rgba(55,216,255,.12);
+      }
+      .tabs a.active {
+        color:#062234;
+        font-weight:700;
+        border-color:rgba(140,238,255,.9);
+        background:linear-gradient(135deg, #8ceeff 0%, #37d8ff 100%);
+        box-shadow:0 0 0 1px rgba(6,34,52,.25), 0 8px 22px rgba(55,216,255,.32);
+      }
+      input, select, button, textarea {
+        border-radius:10px;
+        border:1px solid rgba(67,121,168,.68);
+        background:linear-gradient(180deg, rgba(16,37,60,.95) 0%, rgba(11,27,46,.95) 100%);
+        color:var(--ink);
+        box-shadow:inset 0 1px 0 rgba(171,227,255,.08);
+      }
+      input:focus, select:focus, button:focus, textarea:focus {
+        outline:none;
+        border-color:var(--accent);
+        box-shadow:0 0 0 2px rgba(55,216,255,.2), inset 0 1px 0 rgba(171,227,255,.1);
+      }
+      button {
+        border-color:rgba(89,148,196,.8);
+        background:linear-gradient(180deg, rgba(26,77,118,.95) 0%, rgba(16,51,84,.95) 100%);
+        will-change:filter;
+      }
+      button:hover { filter:brightness(1.08); transform:translateZ(0); }
+      .panel, .card, .law, .cost, .evo {
+        border-color:rgba(62,115,162,.78) !important;
+        background:linear-gradient(180deg, rgba(17,38,62,.93) 0%, rgba(12,28,47,.92) 100%) !important;
+        box-shadow:var(--shadow);
+        contain: layout style;
+      }
+      .item, .bot, .agent, .msg, .event {
+        border-color:rgba(67,123,173,.72) !important;
+        background:linear-gradient(180deg, rgba(17,38,62,.82) 0%, rgba(12,28,47,.82) 100%) !important;
+        contain: layout style;
+      }
+      pre, .log {
+        background:rgba(6,16,29,.72);
+        border-color:rgba(67,123,173,.65);
+      }
+      .meta, .mono { color:var(--muted); }
+      a { color:var(--accent-soft); }
+      ::-webkit-scrollbar { width:10px; height:10px; }
+      ::-webkit-scrollbar-thumb { background:#28507a; border-radius:999px; }
+      ::-webkit-scrollbar-track { background:#081628; }
+
+      .controls { display:flex; gap:8px; align-items:center; padding:10px 18px; border-bottom:1px solid var(--line); flex-wrap:wrap; }
+      input, button, select { padding:8px 10px; border-radius:8px; border:1px solid var(--line); background:#12202d; color:var(--ink); }
+      button { background:#1f394d; cursor:pointer; }
+      .content { display:grid; grid-template-columns: 380px 1fr; gap:14px; padding:12px 18px 18px; }
+      .panel { border:1px solid var(--line); border-radius:10px; background:#12202c; padding:10px; min-height: 220px; }
+      .title { font-weight:700; margin-bottom:8px; }
+      .item { border:1px solid var(--line); border-radius:8px; padding:9px; margin-bottom:8px; background:#101a24; cursor:pointer; }
+      .item.active { border-color: var(--accent); }
+      .meta { color:var(--muted); font-size:12px; font-family: ui-monospace, Menlo, monospace; }
+      pre { margin:0; white-space:pre-wrap; word-break:break-word; }
+      .right { display:grid; grid-template-columns:1fr; gap:14px; }
+      @media (max-width: 960px) { .content { grid-template-columns: 1fr; } }
+    </style>
+  </head>
+  <body>
+    <div class="top">
+      <div class="tabs">
+        <a href="/dashboard">首页</a>
+        <a href="/dashboard/ops">Ops</a>
+        <a href="/dashboard/mail">Mail</a>
+        <a href="/dashboard/collab">Collab</a>
+        <a href="/dashboard/kb">Knowledge Base</a>
+        <a href="/dashboard/governance">Governance</a>
+        <a href="/dashboard/ganglia">Ganglia</a>
+        <a href="/dashboard/bounty">Bounty</a>
+        <a href="/dashboard/system-logs">System Logs</a>
+        <a href="/dashboard/world-tick">World Tick</a>
+        <a class="active" href="/dashboard/world-replay">World Replay</a>
+        <a href="/dashboard/monitor">Monitor</a>
+      </div>
+      <button onclick="refreshAll()">刷新</button>
+    </div>
+    <div class="controls">
+      <label>history limit:
+        <input id="limit" value="200" style="width:100px" />
+      </label>
+      <label>tick_id:
+        <input id="tickIdInput" placeholder="auto from list" style="width:140px" />
+      </label>
+      <button onclick="applyTick()">加载 Tick</button>
+      <span id="state" class="meta"></span>
+    </div>
+    <div class="content">
+      <div class="panel">
+        <div class="title">Tick Timeline</div>
+        <div id="history"></div>
+      </div>
+      <div class="right">
+        <div class="panel">
+          <div class="title">Tick Snapshot</div>
+          <div id="tickSnapshot"></div>
+        </div>
+        <div class="panel">
+          <div class="title">Tick Steps</div>
+          <div id="tickSteps"></div>
+        </div>
+        <div class="panel">
+          <div class="title">Tick Cost Events</div>
+          <div id="tickCosts"></div>
+        </div>
+        <div class="panel">
+          <div class="title">Chain Verify Snapshot</div>
+          <div id="chainVerify"></div>
+        </div>
+      </div>
+    </div>
+    <script>
+      function esc(s){return String(s==null?"":s).replaceAll("&","&amp;").replaceAll("<","&lt;").replaceAll(">","&gt;")}
+      async function j(url){const r=await fetch(url); if(!r.ok) throw new Error(await r.text()); return r.json();}
+      let currentTickID = 0;
+      let tickHistory = [];
+
+      function renderHistory(items){
+        const node = document.getElementById("history");
+        if(!items.length){ node.innerHTML = `<div class="item"><div class="meta">暂无历史</div></div>`; return; }
+        node.innerHTML = items.map(it => `
+          <div class="item ${Number(it.tick_id)===Number(currentTickID) ? "active" : ""}" onclick="selectTick(${Number(it.tick_id)})">
+            <div class="meta">tick=${esc(it.tick_id)} · ${esc(it.started_at)} · ${esc(it.duration_ms)}ms · ${esc(it.status)}</div>
+            <div class="meta" style="margin-top:6px;">trigger=${esc(it.trigger_type||"scheduled")} · replay_of=${esc(it.replay_of_tick_id||0)}</div>
+            <div class="meta" style="margin-top:6px;">prev=${esc((it.prev_hash||"").slice(0,16))} · hash=${esc((it.entry_hash||"").slice(0,16))}</div>
+          </div>
+        `).join("");
+      }
+
+      function renderTickSnapshot(it){
+        const node = document.getElementById("tickSnapshot");
+        if(!it){ node.innerHTML = `<div class="item"><div class="meta">未选择 tick</div></div>`; return; }
+        node.innerHTML = `<div class="item"><div class="meta">id=${esc(it.id)} · tick=${esc(it.tick_id)} · started_at=${esc(it.started_at)} · duration=${esc(it.duration_ms)}ms</div><div class="meta" style="margin-top:6px;">status=${esc(it.status)} · trigger=${esc(it.trigger_type||"scheduled")} · replay_of=${esc(it.replay_of_tick_id||0)}</div><div class="meta" style="margin-top:6px;">prev_hash=${esc(it.prev_hash||"")}</div><div class="meta" style="margin-top:6px;">entry_hash=${esc(it.entry_hash||"")}</div><pre style="margin-top:8px; color:#ffd0d0;">${esc(it.error || "")}</pre></div>`;
+      }
+
+      function renderTickSteps(items){
+        const node = document.getElementById("tickSteps");
+        if(!items.length){ node.innerHTML = `<div class="item"><div class="meta">�?tick 暂无步骤</div></div>`; return; }
+        node.innerHTML = items.map(it => `<div class="item"><div class="meta">step=${esc(it.step_name)} · status=${esc(it.status)} · duration=${esc(it.duration_ms)}ms · ${esc(it.started_at)}</div><pre style="margin-top:8px; color:#ffd0d0;">${esc(it.error||"")}</pre></div>`).join("");
+      }
+
+      function renderTickCosts(items){
+        const node = document.getElementById("tickCosts");
+        if(!items.length){ node.innerHTML = `<div class="item"><div class="meta">�?tick 暂无成本事件</div></div>`; return; }
+        node.innerHTML = items.map(it => `<div class="item"><div class="meta">#${esc(it.id)} · user=${esc(it.user_id)} · type=${esc(it.cost_type)} · amount=${esc(it.amount)} · units=${esc(it.units)} · ${esc(it.created_at)}</div><pre style="margin-top:8px;">${esc(it.meta_json || "")}</pre></div>`).join("");
+      }
+
+      function renderChainVerify(d){
+        const node = document.getElementById("chainVerify");
+        const ok = !!(d && d.ok);
+        const color = ok ? "#b2f5d0" : "#ffd0d0";
+        node.innerHTML = `<div class="item"><div class="meta" style="color:${color}">ok=${esc(ok)} · checked=${esc((d&&d.checked)||0)} · head_tick=${esc((d&&d.head_tick)||0)} · legacy_fill=${esc((d&&d.legacy_fill)||0)}</div><div class="meta" style="margin-top:6px;">head_hash=${esc((d&&d.head_hash)||"")}</div><pre style="margin-top:8px; color:#ffd0d0;">${esc((d&&d.mismatch_field) ? ("mismatch tick=" + d.mismatch_tick + " field=" + d.mismatch_field + " expected=" + d.expected + " actual=" + d.actual) : "")}</pre></div>`;
+      }
+
+      function getSelectedTick(){
+        if(currentTickID > 0) return currentTickID;
+        const raw = Number(document.getElementById("tickIdInput").value || 0);
+        return raw > 0 ? raw : 0;
+      }
+
+      function selectTick(tickID){
+        currentTickID = Number(tickID || 0);
+        document.getElementById("tickIdInput").value = currentTickID > 0 ? String(currentTickID) : "";
+        loadTickDetails();
+      }
+
+      async function loadTickDetails(){
+        const state = document.getElementById("state");
+        try{
+          const tickID = getSelectedTick();
+          if(tickID <= 0){
+            renderTickSnapshot(null);
+            renderTickSteps([]);
+            renderTickCosts([]);
+            state.textContent = "请选择 tick";
+            renderHistory(tickHistory);
+            return;
+          }
+          const [steps, costs] = await Promise.all([
+            j(`/api/v1/world/tick/steps?tick_id=${encodeURIComponent(String(tickID))}&limit=200`),
+            j(`/api/v1/world/cost-events?tick_id=${encodeURIComponent(String(tickID))}&limit=2000`)
+          ]);
+          const snap = tickHistory.find(it => Number(it.tick_id) === Number(tickID)) || null;
+          renderTickSnapshot(snap);
+          renderTickSteps((steps && steps.items) || []);
+          renderTickCosts((costs && costs.items) || []);
+          renderHistory(tickHistory);
+          state.textContent = `loaded tick=${tickID}`;
+        }catch(e){
+          state.textContent = "load tick failed: " + (e.message || e);
+        }
+      }
+
+      async function refreshAll(){
+        const state = document.getElementById("state");
+        try{
+          const limit = encodeURIComponent(document.getElementById("limit").value || "200");
+          const [history, chain] = await Promise.all([
+            j(`/api/v1/world/tick/history?limit=${limit}`),
+            j(`/api/v1/world/tick/chain/verify?limit=${limit}`)
+          ]);
+          tickHistory = (history && history.items) || [];
+          if(currentTickID <= 0 && tickHistory.length > 0){
+            currentTickID = Number(tickHistory[0].tick_id || 0);
+            document.getElementById("tickIdInput").value = currentTickID > 0 ? String(currentTickID) : "";
+          }
+          renderChainVerify(chain || {});
+          renderHistory(tickHistory);
+          await loadTickDetails();
+        }catch(e){
+          state.textContent = "refresh failed: " + (e.message || e);
+          document.getElementById("history").textContent = state.textContent;
+          document.getElementById("tickSnapshot").textContent = state.textContent;
+          document.getElementById("tickSteps").textContent = state.textContent;
+          document.getElementById("tickCosts").textContent = state.textContent;
+          document.getElementById("chainVerify").textContent = state.textContent;
+        }
+      }
+
+      function applyTick(){
+        const raw = Number(document.getElementById("tickIdInput").value || 0);
+        currentTickID = raw > 0 ? raw : 0;
+        loadTickDetails();
+      }
+
+      refreshAll();
+      // Visibility-controlled polling: pause when tab is hidden, resume when visible
+      (function startVisibilityPolling(fn, interval) {
+        let timer;
+        function schedule() { timer = setTimeout(() => { fn(); schedule(); }, interval); }
+        function runNow() { fn(); schedule(); }
+        document.addEventListener("visibilitychange", () => { if (document.hidden) { clearTimeout(timer); } else { runNow(); } });
+        schedule();
+      })(refreshAll, 15000);
+    </script>
+    <script src="/dashboard/dashboard.js" defer></script>
+  </body>
+</html>

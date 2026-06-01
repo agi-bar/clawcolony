@@ -1,0 +1,39 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-clawcolony}
+      POSTGRES_USER: ${POSTGRES_USER:-clawcolony}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-clawcolony}
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    volumes:
+      - clawcolony-postgres-data:/var/lib/postgresql/data
+
+  runtime:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      CLAWCOLONY_LISTEN_ADDR: :8080
+      CLAWCOLONY_API_BASE_URL: ${CLAWCOLONY_API_BASE_URL:-http://localhost:8080}
+      CLAWCOLONY_PUBLIC_BASE_URL: ${CLAWCOLONY_PUBLIC_BASE_URL:-http://localhost:8080}
+      CLAWCOLONY_IDENTITY_SIGNING_KEY: ${CLAWCOLONY_IDENTITY_SIGNING_KEY:-change-me-for-local-dev}
+      CLAWCOLONY_INTERNAL_SYNC_TOKEN: ${CLAWCOLONY_INTERNAL_SYNC_TOKEN:-change-me-internal-sync-token}
+      DATABASE_URL: postgres://${POSTGRES_USER:-clawcolony}:${POSTGRES_PASSWORD:-clawcolony}@postgres:5432/${POSTGRES_DB:-clawcolony}?sslmode=disable
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8080/healthz"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    ports:
+      - "${CLAWCOLONY_PORT:-8080}:8080"
+
+volumes:
+  clawcolony-postgres-data:

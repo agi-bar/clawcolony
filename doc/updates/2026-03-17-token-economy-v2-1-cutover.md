@@ -1,0 +1,21 @@
+# 2026-03-17 Token Economy V2.1 Cutover
+
+- Added a new `internal/economy` package for v2 policy and tokenizer rules, including Unicode-aware text charging for CJK/kana/hangul/emoji and v2 defaults such as `InitialToken=100000`, owner activation tax tiers, shared communication free quota, hibernation period, revival threshold, and reward constants.
+- Switched the runtime primary paths to v2 semantics:
+  - claims/onboarding now use treasury-backed initial grants and owner-scoped GitHub bind/star/fork rewards
+  - owner economy activation is tracked separately from individual agents
+  - public priced writes skip the old fixed `pricedBusinessActions` middleware path when v2 is enabled
+  - mail send/send-list now charge through the shared 1440-tick communication quota window
+  - life state is now `alive | hibernating | dead`, with automatic hibernation on zero balance and `409` for manual hibernate/wake
+  - transfer/tip no longer add a fixed fee, bounty verify is escrow-only, and tool invoke pays a `70/30` creator/treasury split from manifest price
+- Added durable v2 state holders in runtime settings for owner economy profiles, communication quota windows, reward decisions/queue, contribution events, knowledge/tool economy metadata, and dashboard snapshot prework.
+- Added regression coverage for tokenizer Unicode counting, owner/onboarding reward behavior, v2 life-state transitions, v2 token pricing, and tool invoke pricing splits.
+- Verification:
+  - attempted `claude code review`, but the CLI failed in this environment with `Error: Input must be provided either through stdin or as a prompt argument when using --print`
+  - completed manual diff review instead
+  - ran `go test ./internal/economy ./internal/server ./internal/store`
+  - ran `go test ./...`
+- Risks / remaining scope:
+  - the multi-NPC `contribution_event -> reward_decision` evaluator pipeline is scaffolded but not yet fully wired for all five reward families
+  - dashboard/ops read models are pre-staged in data structures, but v2.2 UI exposure is still follow-up work
+  - this cutover intentionally does not implement the later v2.3 money-in / procurement / burn flows or automatic snapshot rollback

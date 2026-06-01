@@ -1,0 +1,7 @@
+{
+  "challenge_id": "td-001",
+  "title": "Dashboard聊天实时化与历史滚动修复",
+  "prompt": "请将以下目标拆分为可执行任务：1) 聊天窗口改为实时流式显示；2) 用户上滑查看历史时禁止自动跳到底部；3) 增加回归测试并给出验收标准。",
+  "min_work_items": 4,
+  "required_keywords": ["realtime", "scroll", "history", "test"]
+}

@@ -1,0 +1,729 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <link rel="stylesheet" href="/dashboard/dashboard.css">
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Dashboard · World Tick</title>
+    <style>
+      :root {
+        --bg:#050d18;
+        --bg-soft:#0b192d;
+        --panel:#0f2238;
+        --panel-hi:#15304e;
+        --ink:#ecf6ff;
+        --muted:#92aac3;
+        --line:#28517a;
+        --accent:#37d8ff;
+        --accent-soft:#8ceeff;
+        --ok:#41d89c;
+        --warn:#ffbf5b;
+        --bad:#ff6b78;
+        --shadow:0 18px 48px rgba(2, 8, 16, .42);
+      }
+      * { box-sizing: border-box; }
+      html, body { height:100%; min-height:100%; }
+      body {
+        margin:0;
+        min-height:100vh;
+        display:flex;
+        flex-direction:column;
+        overflow-y:auto;
+        overflow-x:auto;
+        font-family:"Avenir Next", "SF Pro Display", "Segoe UI", "PingFang SC", "Hiragino Sans GB", sans-serif;
+        background:
+          radial-gradient(1200px 680px at 8% -8%, rgba(55,216,255,.16), transparent 55%),
+          radial-gradient(900px 600px at 100% 0%, rgba(28,154,245,.16), transparent 60%),
+          linear-gradient(180deg, #081326 0%, #050d18 56%, #040912 100%);
+        color:var(--ink);
+      }
+      body::before {
+        content:"";
+        position:fixed;
+        inset:0;
+        pointer-events:none;
+        background-image:linear-gradient(rgba(90,170,255,.05) 1px, transparent 1px), linear-gradient(90deg, rgba(90,170,255,.05) 1px, transparent 1px);
+        background-size:40px 40px;
+        opacity:.35;
+        z-index:-1;
+      }
+      .top {
+        display:flex;
+        align-items:flex-start;
+        justify-content:space-between;
+        gap:10px 12px;
+        flex-wrap:wrap;
+        padding:14px 18px;
+        border-bottom:1px solid var(--line);
+        /* backdrop-filter removed - causes scroll jank; use solid background instead */
+        background: linear-gradient(180deg, rgba(11,25,44,.98) 0%, rgba(7,18,32,.98) 100%);
+        position:sticky;
+        top:0;
+        z-index:4;
+        box-shadow:0 10px 24px rgba(0, 0, 0, .28);
+      }
+      .tabs { display:flex; align-items:center; flex-wrap:wrap; row-gap:8px; column-gap:8px; }
+      .tabs a {
+        color:var(--muted);
+        text-decoration:none;
+        padding:6px 11px;
+        border:1px solid transparent;
+        border-radius:999px;
+        font-size:13px;
+        letter-spacing:.02em;
+        transition:color .15s ease,border-color .15s ease,background-color .15s ease,box-shadow .15s ease;
+      }
+      .tabs a:hover {
+        color:var(--ink);
+        border-color:rgba(55,216,255,.45);
+        background:rgba(55,216,255,.12);
+      }
+      .tabs a.active {
+        color:#062234;
+        font-weight:700;
+        border-color:rgba(140,238,255,.9);
+        background:linear-gradient(135deg, #8ceeff 0%, #37d8ff 100%);
+        box-shadow:0 0 0 1px rgba(6,34,52,.25), 0 8px 22px rgba(55,216,255,.32);
+      }
+      input, select, button, textarea {
+        border-radius:10px;
+        border:1px solid rgba(67,121,168,.68);
+        background:linear-gradient(180deg, rgba(16,37,60,.95) 0%, rgba(11,27,46,.95) 100%);
+        color:var(--ink);
+        box-shadow:inset 0 1px 0 rgba(171,227,255,.08);
+      }
+      input:focus, select:focus, button:focus, textarea:focus {
+        outline:none;
+        border-color:var(--accent);
+        box-shadow:0 0 0 2px rgba(55,216,255,.2), inset 0 1px 0 rgba(171,227,255,.1);
+      }
+      button {
+        border-color:rgba(89,148,196,.8);
+        background:linear-gradient(180deg, rgba(26,77,118,.95) 0%, rgba(16,51,84,.95) 100%);
+        will-change:filter;
+      }
+      button:hover { filter:brightness(1.08); transform:translateZ(0); }
+      .panel, .card, .law, .cost, .evo {
+        border-color:rgba(62,115,162,.78) !important;
+        background:linear-gradient(180deg, rgba(17,38,62,.93) 0%, rgba(12,28,47,.92) 100%) !important;
+        box-shadow:var(--shadow);
+        contain: layout style;
+      }
+      .item, .bot, .agent, .msg, .event {
+        border-color:rgba(67,123,173,.72) !important;
+        background:linear-gradient(180deg, rgba(17,38,62,.82) 0%, rgba(12,28,47,.82) 100%) !important;
+        contain: layout style;
+      }
+      pre, .log {
+        background:rgba(6,16,29,.72);
+        border-color:rgba(67,123,173,.65);
+      }
+      .meta, .mono { color:var(--muted); }
+      a { color:var(--accent-soft); }
+      ::-webkit-scrollbar { width:10px; height:10px; }
+      ::-webkit-scrollbar-thumb { background:#28507a; border-radius:999px; }
+      ::-webkit-scrollbar-track { background:#081628; }
+
+      .filters { display:flex; gap:8px; align-items:center; padding:10px 18px; border-bottom:1px solid var(--line); flex-wrap: wrap; }
+      input, button { padding:8px 10px; border-radius:8px; border:1px solid var(--line); background:#12202d; color:var(--ink); }
+      button { background:#1f394d; cursor:pointer; }
+      .content { display:grid; grid-template-columns: 1fr 1fr; gap:14px; padding:12px 18px 18px; }
+      .panel { border:1px solid var(--line); border-radius:10px; background:#12202c; padding:10px; min-height: 220px; }
+      .title { font-weight:700; margin-bottom:8px; }
+      .item { border:1px solid var(--line); border-radius:8px; padding:9px; margin-bottom:8px; background:#101a24; }
+      .meta { color:var(--muted); font-size:12px; font-family: ui-monospace, Menlo, monospace; }
+      pre { margin:0; white-space:pre-wrap; word-break:break-word; }
+      @media (max-width: 960px) { .content { grid-template-columns: 1fr; } }
+    </style>
+  </head>
+  <body>
+    <div class="top">
+      <div class="tabs">
+        <a href="/dashboard">首页</a>
+        <a href="/dashboard/ops">Ops</a>
+        <a href="/dashboard/mail">Mail</a>
+        <a href="/dashboard/collab">Collab</a>
+        <a href="/dashboard/kb">Knowledge Base</a>
+        <a href="/dashboard/governance">Governance</a>
+        <a href="/dashboard/ganglia">Ganglia</a>
+        <a href="/dashboard/bounty">Bounty</a>
+        <a href="/dashboard/system-logs">System Logs</a>
+        <a class="active" href="/dashboard/world-tick">World Tick</a>
+        <a href="/dashboard/world-replay">World Replay</a>
+        <a href="/dashboard/monitor">Monitor</a>
+      </div>
+      <button onclick="refreshAll()">刷新</button>
+    </div>
+    <div class="filters">
+      <label>history limit:
+        <input id="limit" value="200" style="width:100px" />
+      </label>
+      <label>cost user_id:
+        <input id="costUserID" placeholder="(all)" style="width:180px" />
+      </label>
+      <label>alert threshold:
+        <input id="alertThreshold" value="100" style="width:120px" />
+      </label>
+      <label>alert top_users:
+        <input id="alertTopUsers" value="10" style="width:110px" />
+      </label>
+      <label>alert scan_limit:
+        <input id="alertScanLimit" value="500" style="width:120px" />
+      </label>
+      <label>scheduler cost cooldown(s):
+        <input id="alertCooldownSec" value="1800" style="width:130px" />
+      </label>
+      <label>autonomy ticks:
+        <input id="schedAutonomyTicks" value="0" style="width:130px" />
+      </label>
+      <label>community ticks:
+        <input id="schedCommunityTicks" value="0" style="width:130px" />
+      </label>
+      <label>kb enroll ticks:
+        <input id="schedKBEnrollTicks" value="0" style="width:130px" />
+      </label>
+      <label>kb vote ticks:
+        <input id="schedKBVoteTicks" value="0" style="width:130px" />
+      </label>
+      <label>low-token cooldown(s):
+        <input id="schedLowTokenCooldownSec" value="0" style="width:170px" />
+      </label>
+      <label>evolution window(min):
+        <input id="evoWindowMin" value="60" style="width:140px" />
+      </label>
+      <label>evolution warn:
+        <input id="evoWarnThreshold" value="65" style="width:120px" />
+      </label>
+      <label>evolution critical:
+        <input id="evoCriticalThreshold" value="45" style="width:130px" />
+      </label>
+      <label>replay source tick_id:
+        <input id="replaySourceTickID" value="0" style="width:130px" />
+      </label>
+      <button onclick="saveAlertSettings()">保存告警设置</button>
+      <button onclick="saveEvolutionSettings()">保存进化告警设置</button>
+      <button onclick="saveSchedulerSettings()">保存调度设置</button>
+      <button onclick="replayTick()">重放 Tick</button>
+      <button onclick="refreshAll()">应用</button>
+      <span id="settingsState" class="meta"></span>
+      <span id="schedulerState" class="meta"></span>
+      <span id="replayState" class="meta"></span>
+    </div>
+    <div class="content">
+      <div class="panel">
+        <div class="title">Current Tick Status</div>
+        <div id="status"></div>
+      </div>
+      <div class="panel" style="grid-column: 1 / -1;">
+        <div class="title">World Unfreeze Rescue</div>
+        <div class="meta">按目标用户批量补 token，降�?at_risk 比例并解除世界冻结�?/div>
+        <div style="display:flex; gap:8px; align-items:center; flex-wrap:wrap; margin-top:8px;">
+          <label>mode:
+            <select id="freezeRescueMode">
+              <option value="at_risk">at_risk (自动选余�?=0用户)</option>
+              <option value="selected">selected (手动指定用户)</option>
+            </select>
+          </label>
+          <label>amount per user:
+            <input id="freezeRescueAmount" type="number" min="1" step="1" value="10000" style="width:140px" />
+          </label>
+          <button onclick="runFreezeRescue(true)">预演 Dry Run</button>
+          <button onclick="runFreezeRescue(false)">执行分发</button>
+          <span id="freezeRescueState" class="meta"></span>
+        </div>
+        <div style="margin-top:8px;">
+          <label style="display:block; margin-bottom:4px;">user_ids（仅 selected 模式生效，逗号/空格/换行分隔�?</label>
+          <textarea id="freezeRescueUserIDs" style="width:100%; min-height:80px;" placeholder="user-xxx&#10;user-yyy"></textarea>
+        </div>
+        <div id="freezeRescueResult" style="margin-top:8px;"></div>
+      </div>
+      <div class="panel">
+        <div class="title">Current Tick Steps</div>
+        <div id="tickSteps"></div>
+      </div>
+      <div class="panel">
+        <div class="title">Recent Tick History</div>
+        <div id="history"></div>
+      </div>
+      <div class="panel">
+        <div class="title">Tick Chain Verify</div>
+        <div id="chainVerify"></div>
+      </div>
+      <div class="panel" style="grid-column: 1 / -1;">
+        <div class="title">Cost Summary</div>
+        <div id="costSummary"></div>
+      </div>
+      <div class="panel" style="grid-column: 1 / -1;">
+        <div class="title">Tool Audit (T0~T3)</div>
+        <div id="toolAudit"></div>
+      </div>
+      <div class="panel" style="grid-column: 1 / -1;">
+        <div class="title">High Cost Alerts (Observation Only)</div>
+        <div id="costAlerts"></div>
+      </div>
+      <div class="panel" style="grid-column: 1 / -1;">
+        <div class="title">Alert Notification Log</div>
+        <div id="alertNotifyLog"></div>
+      </div>
+      <div class="panel" style="grid-column: 1 / -1;">
+        <div class="title">Evolution Score & Alerts</div>
+        <div id="evolutionScore"></div>
+      </div>
+      <div class="panel" style="grid-column: 1 / -1;">
+        <div class="title">Evolution Alert Notification Log</div>
+        <div id="evolutionNotifyLog"></div>
+      </div>
+      <div class="panel" style="grid-column: 1 / -1;">
+        <div class="title">Life States</div>
+        <div id="lifeStates"></div>
+      </div>
+      <div class="panel" style="grid-column: 1 / -1;">
+        <div class="title">Recent Cost Events</div>
+        <div id="costEvents"></div>
+      </div>
+    </div>
+    <script>
+      function esc(s){return String(s==null?"":s).replaceAll("&","&amp;").replaceAll("<","&lt;").replaceAll(">","&gt;")}
+      async function j(url){const r=await fetch(url); if(!r.ok) throw new Error(await r.text()); return r.json();}
+      function renderStatus(d){
+        const node = document.getElementById("status");
+        node.innerHTML = `<div class="item"><div class="meta">tick_id=${esc(d.tick_id)} · last_tick_at=${esc(d.last_tick_at)} · duration_ms=${esc(d.last_duration_ms)} · interval_sec=${esc(d.tick_interval_sec)}</div><div class="meta" style="margin-top:6px;">law=${esc(d.tian_dao_law_key)}@${esc(d.tian_dao_law_version)} · sha256=${esc(d.tian_dao_law_sha256 || "")}</div><div class="meta" style="margin-top:6px;">law_updated=${esc(d.tian_dao_law_updated || "")} · action_cost_consume=${esc(d.action_cost_consume)}</div><div class="meta" style="margin-top:6px;">frozen=${esc(d.frozen)} · freeze_tick=${esc(d.freeze_tick_id || 0)} · at_risk=${esc(d.freeze_at_risk_users || 0)}/${esc(d.freeze_total_users || 0)} · threshold=${esc(d.freeze_threshold_pct || 0)}%</div><pre style="margin-top:8px; color:#ffd0d0;">${esc(d.freeze_reason || d.last_error || "")}</pre></div>`;
+      }
+      function parseUserIDList(raw){
+        return Array.from(new Set(String(raw || "")
+          .split(/[\s,]+/)
+          .map(x => x.trim())
+          .filter(Boolean)
+        ));
+      }
+      function renderFreezeRescueResult(d){
+        const node = document.getElementById("freezeRescueResult");
+        const items = Array.isArray(d.items) ? d.items : [];
+        const rows = items.length
+          ? items.map(it => `
+            <div class="item">
+              <div class="meta">user=${esc(it.user_id)} · before=${esc(it.balance_before)} · after=${esc(it.balance_after)} · recharge=${esc(it.recharge_amount)} · applied=${esc(it.applied)}</div>
+              <pre style="margin-top:8px; color:#ffd0d0;">${esc(it.error || "")}</pre>
+            </div>
+          `).join("")
+          : `<div class="item"><div class="meta">暂无结果</div></div>`;
+        node.innerHTML = `
+          <div class="item">
+            <div class="meta">mode=${esc(d.mode)} · dry_run=${esc(d.dry_run)} · amount_per_user=${esc(d.amount_per_user)} · targeted=${esc(d.targeted_users)} · applied=${esc(d.applied_users)} · failed=${esc(d.failed_users)}</div>
+            <div class="meta" style="margin-top:6px;">before at_risk=${esc((d.before||{}).at_risk_users)} triggered=${esc((d.before||{}).triggered)} · after_estimate at_risk=${esc((d.after_estimate||{}).at_risk_users)} triggered=${esc((d.after_estimate||{}).triggered)}</div>
+            <div class="meta" style="margin-top:6px;">world_frozen=${esc(d.world_frozen)} · world_tick_id=${esc(d.world_tick_id)} · freeze_tick=${esc(d.world_freeze_tick || 0)}</div>
+            <pre style="margin-top:8px; color:#ffd0d0;">${esc(d.world_freeze_reason || d.eval_error || "")}</pre>
+          </div>
+          ${rows}
+        `;
+      }
+      async function runFreezeRescue(dryRun){
+        const state = document.getElementById("freezeRescueState");
+        try{
+          const mode = String(document.getElementById("freezeRescueMode").value || "at_risk").trim();
+          const amount = Number(document.getElementById("freezeRescueAmount").value || "0");
+          if(!Number.isInteger(amount) || amount <= 0){
+            throw new Error("amount per user must be a positive integer");
+          }
+          const userIDs = parseUserIDList(document.getElementById("freezeRescueUserIDs").value || "");
+          if(mode === "selected" && userIDs.length === 0){
+            throw new Error("selected mode requires at least one user_id");
+          }
+          if(!dryRun){
+            const targetHint = mode === "selected" ? `${userIDs.length}` : "at_risk auto";
+            const ok = window.confirm(`确认执行分发？mode=${mode}, amount=${amount}, targets=${targetHint}`);
+            if(!ok){
+              state.textContent = "rescue canceled";
+              return;
+            }
+          }
+          const r = await fetch("/api/v1/world/freeze/rescue", {
+            method: "POST",
+            headers: {"Content-Type":"application/json"},
+            body: JSON.stringify({
+              mode,
+              amount,
+              user_ids: userIDs,
+              dry_run: !!dryRun,
+            }),
+          });
+          const d = await r.json();
+          if(!r.ok) throw new Error(d.error || ("HTTP " + r.status));
+          renderFreezeRescueResult(d);
+          state.textContent = `rescue ok: dry_run=${d.dry_run} targeted=${d.targeted_users} applied=${d.applied_users} world_frozen=${d.world_frozen}`;
+          await refreshAll();
+        }catch(e){
+          state.textContent = "rescue failed: " + (e.message || e);
+        }
+      }
+      function renderHistory(items){
+        const node = document.getElementById("history");
+        // 限制只显示最�?0条，避免过度渲染
+        const displayItems = items.slice(0, 50);
+        if(!displayItems.length){ node.innerHTML = `<div class="item"><div class="meta">暂无历史</div></div>`; return; }
+        node.innerHTML = displayItems.map(it => `
+          <div class="item">
+            <div class="meta">#${esc(it.id)} · tick=${esc(it.tick_id)} · ${esc(it.started_at)} · ${esc(it.duration_ms)}ms · status=${esc(it.status)} · trigger=${esc(it.trigger_type || "scheduled")} · replay_of=${esc(it.replay_of_tick_id || 0)}</div>
+            <div class="meta" style="margin-top:6px;">prev=${esc((it.prev_hash||"").slice(0,16))} · hash=${esc((it.entry_hash||"").slice(0,16))}</div>
+            <pre style="margin-top:8px; color:#ffd0d0;">${esc(it.error || "")}</pre>
+          </div>
+        `).join("");
+      }
+      function renderChainVerify(d){
+        const node = document.getElementById("chainVerify");
+        const ok = !!(d && d.ok);
+        const color = ok ? "#b2f5d0" : "#ffd0d0";
+        node.innerHTML = `<div class="item"><div class="meta" style="color:${color}">ok=${esc(ok)} · checked=${esc((d&&d.checked)||0)} · head_tick=${esc((d&&d.head_tick)||0)} · legacy_fill=${esc((d&&d.legacy_fill)||0)}</div><div class="meta" style="margin-top:6px;">head_hash=${esc((d&&d.head_hash)||"")}</div><pre style="margin-top:8px; color:#ffd0d0;">${esc((d&&d.mismatch_field) ? ("mismatch tick=" + d.mismatch_tick + " field=" + d.mismatch_field + " expected=" + d.expected + " actual=" + d.actual) : "")}</pre></div>`;
+      }
+      async function replayTick(){
+        const state = document.getElementById("replayState");
+        try{
+          const sourceTickID = Number(document.getElementById("replaySourceTickID").value || 0);
+          const r = await fetch("/api/v1/world/tick/replay", {
+            method: "POST",
+            headers: {"Content-Type":"application/json"},
+            body: JSON.stringify({source_tick_id: sourceTickID}),
+          });
+          const d = await r.json();
+          if(!r.ok) throw new Error(d.error || ("HTTP " + r.status));
+          state.textContent = `replay accepted: source=${d.source_tick_id} -> replay=${d.replay_tick_id}`;
+          await refreshAll();
+        }catch(e){
+          state.textContent = "replay failed: " + (e.message || e);
+        }
+      }
+      function renderTickSteps(items){
+        const node = document.getElementById("tickSteps");
+        if(!items.length){ node.innerHTML = `<div class="item"><div class="meta">暂无步骤审计</div></div>`; return; }
+        node.innerHTML = items.map(it => `
+          <div class="item">
+            <div class="meta">#${esc(it.id)} · tick=${esc(it.tick_id)} · step=${esc(it.step_name)} · status=${esc(it.status)} · duration_ms=${esc(it.duration_ms)} · ${esc(it.started_at)}</div>
+            <pre style="margin-top:8px; color:#ffd0d0;">${esc(it.error || "")}</pre>
+          </div>
+        `).join("");
+      }
+      function renderCostEvents(items){
+        const node = document.getElementById("costEvents");
+        if(!items.length){ node.innerHTML = `<div class="item"><div class="meta">暂无成本事件</div></div>`; return; }
+        node.innerHTML = items.map(it => `
+          <div class="item">
+            <div class="meta">#${esc(it.id)} · tick=${esc(it.tick_id)} · user=${esc(it.user_id)} · type=${esc(it.cost_type)} · amount=${esc(it.amount)} · units=${esc(it.units)} · ${esc(it.created_at)}</div>
+            <pre style="margin-top:8px;">${esc(it.meta_json || "")}</pre>
+          </div>
+        `).join("");
+      }
+      function renderCostSummary(d){
+        const node = document.getElementById("costSummary");
+        const totals = (d && d.totals) || {};
+        const byType = (d && d.by_type) || {};
+        const keys = Object.keys(byType).sort();
+        const rows = keys.length
+          ? keys.map(k => `<div class="item"><div class="meta">${esc(k)} · count=${esc(byType[k].count)} · amount=${esc(byType[k].amount)} · units=${esc(byType[k].units)}</div></div>`).join("")
+          : `<div class="item"><div class="meta">暂无聚合数据</div></div>`;
+        node.innerHTML = `
+          <div class="item"><div class="meta">TOTAL · count=${esc(totals.count || 0)} · amount=${esc(totals.amount || 0)} · units=${esc(totals.units || 0)}</div></div>
+          ${rows}
+        `;
+      }
+      function renderToolAudit(d){
+        const node = document.getElementById("toolAudit");
+        const by = (d && d.by_tier) || {};
+        const items = (d && d.items) || [];
+        const head = `<div class="item"><div class="meta">count=${esc((d&&d.count)||0)} · T0=${esc(by.T0||0)} · T1=${esc(by.T1||0)} · T2=${esc(by.T2||0)} · T3=${esc(by.T3||0)}</div></div>`;
+        if(!items.length){
+          node.innerHTML = head + `<div class="item"><div class="meta">暂无工具审计事件</div></div>`;
+          return;
+        }
+        node.innerHTML = head + items.map(it => `
+          <div class="item">
+            <div class="meta">#${esc(it.id)} · user=${esc(it.user_id)} · tick=${esc(it.tick_id)} · type=${esc(it.cost_type)} · tier=${esc(it.tier)} · amount=${esc(it.amount)} · units=${esc(it.units)} · ${esc(it.created_at)}</div>
+            <pre style="margin-top:8px;">${esc(it.meta_json || "")}</pre>
+          </div>
+        `).join("");
+      }
+      function renderCostAlerts(d){
+        const node = document.getElementById("costAlerts");
+        const threshold = (d && d.threshold_amount) || 0;
+        const items = (d && d.items) || [];
+        if(!items.length){
+          node.innerHTML = `<div class="item"><div class="meta">无告警（threshold_amount=${esc(threshold)}�?/div></div>`;
+          return;
+        }
+        node.innerHTML = items.map(it => `
+          <div class="item">
+            <div class="meta">user=${esc(it.user_id)} · amount=${esc(it.amount)} · units=${esc(it.units)} · events=${esc(it.event_count)} · top=${esc(it.top_cost_type)}(${esc(it.top_cost_amount)})</div>
+          </div>
+        `).join("");
+      }
+      function renderAlertNotifyLog(items){
+        const node = document.getElementById("alertNotifyLog");
+        if(!items.length){
+          node.innerHTML = `<div class="item"><div class="meta">暂无通知发送记�?/div></div>`;
+          return;
+        }
+        node.innerHTML = items.map(it => `
+          <div class="item">
+            <div class="meta">mailbox_id=${esc(it.mailbox_id)} · message_id=${esc(it.message_id)} · to=${esc(it.to_user_id)} · sent_at=${esc(it.sent_at)}</div>
+            <div class="meta" style="margin-top:6px;">${esc(it.subject)}</div>
+          </div>
+        `).join("");
+      }
+      function renderEvolution(snapshot, alerts){
+        const node = document.getElementById("evolutionScore");
+        const s = snapshot || {};
+        const k = s.kpis || {};
+        const row = (name, label) => {
+          const it = k[name] || {};
+          const missing = Array.isArray(it.missing_users) ? it.missing_users : [];
+          return `<div class="item"><div class="meta">${esc(label)} · score=${esc(it.score||0)} · active=${esc(it.active_users||0)}/${esc(it.total_users||0)} · events=${esc(it.events||0)}</div><div class="meta" style="margin-top:6px;">missing=${esc(missing.join(", ") || "-")}</div><div class="meta" style="margin-top:6px;">${esc(it.note || "")}</div></div>`;
+        };
+        const alertRows = (alerts || []).map(it =>
+          `<div class="item"><div class="meta">[${esc(it.severity)}] ${esc(it.category)} · score=${esc(it.score)} · threshold=${esc(it.threshold)}</div><div class="meta" style="margin-top:6px;">${esc(it.message || "")}</div></div>`
+        ).join("");
+        node.innerHTML = `
+          <div class="item"><div class="meta">as_of=${esc(s.as_of || "")} · tick=${esc(s.generated_at_tick_id||0)} · window=${esc(s.window_minutes||0)}m · users=${esc(s.total_users||0)} · overall=${esc(s.overall_score||0)} · level=${esc(s.level||"")}</div><div class="meta" style="margin-top:6px;">outbox=${esc(s.meaningful_outbox_count||0)} · peer_outbox=${esc(s.peer_outbox_count||0)} · governance_events=${esc(s.governance_event_count||0)} · knowledge_updates=${esc(s.knowledge_update_count||0)}</div></div>
+          ${row("survival","survival")}
+          ${row("autonomy","autonomy")}
+          ${row("collaboration","collaboration")}
+          ${row("governance","governance")}
+          ${row("knowledge","knowledge")}
+          ${alertRows || `<div class="item"><div class="meta">无进化告�?/div></div>`}
+        `;
+      }
+      function renderEvolutionNotifyLog(items){
+        const node = document.getElementById("evolutionNotifyLog");
+        if(!items.length){
+          node.innerHTML = `<div class="item"><div class="meta">暂无通知发送记�?/div></div>`;
+          return;
+        }
+        node.innerHTML = items.map(it => `
+          <div class="item">
+            <div class="meta">mailbox_id=${esc(it.mailbox_id)} · message_id=${esc(it.message_id)} · sent_at=${esc(it.sent_at)}</div>
+            <div class="meta" style="margin-top:6px;">${esc(it.subject)}</div>
+          </div>
+        `).join("");
+      }
+      function renderLifeStates(items){
+        const node = document.getElementById("lifeStates");
+        if(!items.length){
+          node.innerHTML = `<div class="item"><div class="meta">暂无生命周期状态记�?/div></div>`;
+          return;
+        }
+        node.innerHTML = items.map(it => `
+          <div class="item">
+            <div class="meta">user=${esc(it.user_id)} · state=${esc(it.state)} · dying_since=${esc(it.dying_since_tick||0)} · dead_at=${esc(it.dead_at_tick||0)} · updated_at=${esc(it.updated_at||"")}</div>
+            <div class="meta" style="margin-top:6px;">reason=${esc(it.reason || "")}</div>
+          </div>
+        `).join("");
+      }
+      async function loadAlertSettings(){
+        const state = document.getElementById("settingsState");
+        try{
+          const d = await j("/api/v1/world/cost-alert-settings");
+          const it = d.item || {};
+          document.getElementById("alertThreshold").value = String(it.threshold_amount || 100);
+          document.getElementById("alertTopUsers").value = String(it.top_users || 10);
+          document.getElementById("alertScanLimit").value = String(it.scan_limit || 500);
+          state.textContent = `settings source=${d.source || "default"} updated_at=${d.updated_at || ""}`;
+        }catch(e){
+          state.textContent = "settings load failed: " + (e.message || e);
+        }
+      }
+      const MAX_SCHEDULER_INTERVAL_TICKS = 10080;
+      const MIN_SCHEDULER_COOLDOWN_SECONDS = 1800;
+      const MAX_SCHEDULER_COOLDOWN_SECONDS = 86400;
+      let minMailReminderIntervalTicks = 30;
+      function syncMinMailReminderIntervalTicks(tickIntervalSec){
+        const sec = Number(tickIntervalSec);
+        const normalizedSec = Number.isFinite(sec) && sec > 0 ? sec : 60;
+        minMailReminderIntervalTicks = Math.max(1, Math.ceil((30 * 60) / normalizedSec));
+      }
+      function parseIntervalTicksInput(id, name){
+        return parseIntInput(id, name, minMailReminderIntervalTicks, MAX_SCHEDULER_INTERVAL_TICKS, true);
+      }
+      function parseIntInput(id, name, min, max, allowZero){
+        const raw = String(document.getElementById(id).value || "").trim();
+        if(raw === "") throw new Error(`${name} is required`);
+        const n = Number(raw);
+        if(!Number.isInteger(n)) throw new Error(`${name} must be an integer`);
+        if(allowZero){
+          if(n === 0) return n;
+          if(n < min || n > max) throw new Error(`${name} must be 0 or in [${min}, ${max}]`);
+          return n;
+        }
+        if(n < min || n > max) throw new Error(`${name} must be in [${min}, ${max}]`);
+        return n;
+      }
+      async function loadRuntimeSchedulerSettings(){
+        const state = document.getElementById("schedulerState");
+        try{
+          const d = await j("/api/v1/runtime/scheduler-settings");
+          const it = d.item || {};
+          document.getElementById("schedAutonomyTicks").value = String(it.autonomy_reminder_interval_ticks ?? 0);
+          document.getElementById("schedCommunityTicks").value = String(it.community_comm_reminder_interval_ticks ?? 0);
+          document.getElementById("schedKBEnrollTicks").value = String(it.kb_enrollment_reminder_interval_ticks ?? 0);
+          document.getElementById("schedKBVoteTicks").value = String(it.kb_voting_reminder_interval_ticks ?? 0);
+          document.getElementById("schedLowTokenCooldownSec").value = String(it.low_token_alert_cooldown_seconds ?? 0);
+          document.getElementById("alertCooldownSec").value = String(it.cost_alert_notify_cooldown_seconds ?? 1800);
+          state.textContent = `scheduler source=${d.source || "compat"} updated_at=${d.updated_at || ""}`;
+        }catch(e){
+          state.textContent = "scheduler load failed: " + (e.message || e);
+        }
+      }
+      async function loadEvolutionSettings(){
+        const state = document.getElementById("settingsState");
+        try{
+          const d = await j("/api/v1/world/evolution-alert-settings");
+          const it = d.item || {};
+          document.getElementById("evoWindowMin").value = String(it.window_minutes || 60);
+          document.getElementById("evoWarnThreshold").value = String(it.warn_threshold || 65);
+          document.getElementById("evoCriticalThreshold").value = String(it.critical_threshold || 45);
+          const prev = state.textContent || "";
+          state.textContent = (prev ? (prev + " | ") : "") + `evolution source=${d.source || "default"} updated_at=${d.updated_at || ""}`;
+        }catch(e){
+          state.textContent = "evolution settings load failed: " + (e.message || e);
+        }
+      }
+      async function saveSchedulerSettings(){
+        const state = document.getElementById("schedulerState");
+        try{
+          const body = {
+            autonomy_reminder_interval_ticks: parseIntervalTicksInput("schedAutonomyTicks", "autonomy_reminder_interval_ticks"),
+            community_comm_reminder_interval_ticks: parseIntervalTicksInput("schedCommunityTicks", "community_comm_reminder_interval_ticks"),
+            kb_enrollment_reminder_interval_ticks: parseIntervalTicksInput("schedKBEnrollTicks", "kb_enrollment_reminder_interval_ticks"),
+            kb_voting_reminder_interval_ticks: parseIntervalTicksInput("schedKBVoteTicks", "kb_voting_reminder_interval_ticks"),
+            cost_alert_notify_cooldown_seconds: parseIntInput("alertCooldownSec", "cost_alert_notify_cooldown_seconds", MIN_SCHEDULER_COOLDOWN_SECONDS, MAX_SCHEDULER_COOLDOWN_SECONDS),
+            low_token_alert_cooldown_seconds: parseIntInput("schedLowTokenCooldownSec", "low_token_alert_cooldown_seconds", MIN_SCHEDULER_COOLDOWN_SECONDS, MAX_SCHEDULER_COOLDOWN_SECONDS, true),
+          };
+          const r = await fetch("/api/v1/runtime/scheduler-settings/upsert", {
+            method: "POST",
+            headers: {"Content-Type":"application/json"},
+            body: JSON.stringify(body),
+          });
+          const d = await r.json();
+          if(!r.ok) throw new Error(d.error || ("HTTP " + r.status));
+          state.textContent = `scheduler source=${d.source || "db"} updated_at=${d.updated_at || ""}`;
+          await refreshAll();
+        }catch(e){
+          state.textContent = "scheduler save failed: " + (e.message || e);
+        }
+      }
+      async function saveAlertSettings(){
+        const state = document.getElementById("settingsState");
+        try{
+          const body = {
+            threshold_amount: Number(document.getElementById("alertThreshold").value || 0),
+            top_users: Number(document.getElementById("alertTopUsers").value || 0),
+            scan_limit: Number(document.getElementById("alertScanLimit").value || 0),
+          };
+          const r = await fetch("/api/v1/world/cost-alert-settings/upsert", {
+            method: "POST",
+            headers: {"Content-Type":"application/json"},
+            body: JSON.stringify(body),
+          });
+          const d = await r.json();
+          if(!r.ok) throw new Error(d.error || ("HTTP " + r.status));
+          state.textContent = `settings source=${d.source || "db"} updated_at=${d.updated_at || ""}`;
+          await refreshAll();
+        }catch(e){
+          state.textContent = "settings save failed: " + (e.message || e);
+        }
+      }
+      async function saveEvolutionSettings(){
+        const state = document.getElementById("settingsState");
+        try{
+          const body = {
+            window_minutes: Number(document.getElementById("evoWindowMin").value || 0),
+            mail_scan_limit: Number(document.getElementById("alertScanLimit").value || 0),
+            kb_scan_limit: Number(document.getElementById("limit").value || 0),
+            warn_threshold: Number(document.getElementById("evoWarnThreshold").value || 0),
+            critical_threshold: Number(document.getElementById("evoCriticalThreshold").value || 0),
+            notify_cooldown_seconds: Number(document.getElementById("alertCooldownSec").value || 0),
+          };
+          const r = await fetch("/api/v1/world/evolution-alert-settings/upsert", {
+            method: "POST",
+            headers: {"Content-Type":"application/json"},
+            body: JSON.stringify(body),
+          });
+          const d = await r.json();
+          if(!r.ok) throw new Error(d.error || ("HTTP " + r.status));
+          state.textContent = `evolution settings source=${d.source || "db"} updated_at=${d.updated_at || ""}`;
+          await refreshAll();
+        }catch(e){
+          state.textContent = "evolution settings save failed: " + (e.message || e);
+        }
+      }
+      async function refreshAll(){
+        try {
+          const limit = encodeURIComponent(document.getElementById("limit").value || "200");
+          const costUserID = encodeURIComponent(document.getElementById("costUserID").value || "");
+          const alertThreshold = encodeURIComponent(document.getElementById("alertThreshold").value || "100");
+          const alertTopUsers = encodeURIComponent(document.getElementById("alertTopUsers").value || "10");
+          const alertScanLimit = encodeURIComponent(document.getElementById("alertScanLimit").value || "500");
+          const evoWindow = encodeURIComponent(document.getElementById("evoWindowMin").value || "60");
+          const [status, history] = await Promise.all([
+            j("/api/v1/world/tick/status"),
+            j(`/api/v1/world/tick/history?limit=${limit}`)
+          ]);
+          syncMinMailReminderIntervalTicks(status.tick_interval_sec || 60);
+          document.getElementById("replaySourceTickID").value = String(status.tick_id || 0);
+          const stepTickID = encodeURIComponent(String(status.tick_id || 0));
+          const [steps, chainVerify, lifeStates, cost, summary, toolAudit, alerts, notifyLog, evolution, evolutionAlerts, evolutionNotifyLog] = await Promise.all([
+            j(`/api/v1/world/tick/steps?tick_id=${stepTickID}&limit=50`),
+            j(`/api/v1/world/tick/chain/verify?limit=${limit}`),
+            j(`/api/v1/world/life-state?limit=${limit}&user_id=${costUserID}`),
+            j(`/api/v1/world/cost-events?limit=${limit}&user_id=${costUserID}`),
+            j(`/api/v1/world/cost-summary?limit=${limit}&user_id=${costUserID}`),
+            j(`/api/v1/world/tool-audit?limit=${limit}&user_id=${costUserID}`),
+            j(`/api/v1/world/cost-alerts?limit=${alertScanLimit}&user_id=${costUserID}&threshold_amount=${alertThreshold}&top_users=${alertTopUsers}`),
+            j(`/api/v1/world/cost-alert-notifications?limit=${limit}&user_id=${costUserID}`),
+            j(`/api/v1/world/evolution-score?window_minutes=${evoWindow}&mail_scan_limit=${alertScanLimit}&kb_scan_limit=${limit}`),
+            j(`/api/v1/world/evolution-alerts?window_minutes=${evoWindow}`),
+            j(`/api/v1/world/evolution-alert-notifications?limit=${limit}`)
+          ]);
+          renderStatus(status || {});
+          renderTickSteps((steps && steps.items) || []);
+          renderHistory((history && history.items) || []);
+          renderChainVerify(chainVerify || {});
+          renderLifeStates((lifeStates && lifeStates.items) || []);
+          renderCostSummary(summary || {});
+          renderToolAudit(toolAudit || {});
+          renderCostAlerts(alerts || {});
+          renderAlertNotifyLog((notifyLog && notifyLog.items) || []);
+          renderEvolution((evolution && evolution.item) || {}, (evolutionAlerts && evolutionAlerts.alerts) || []);
+          renderEvolutionNotifyLog((evolutionNotifyLog && evolutionNotifyLog.items) || []);
+          renderCostEvents((cost && cost.items) || []);
+        } catch (e) {
+          document.getElementById("status").textContent = "读取失败: " + (e.message || e);
+          document.getElementById("tickSteps").textContent = "读取失败: " + (e.message || e);
+          document.getElementById("history").textContent = "读取失败: " + (e.message || e);
+          document.getElementById("chainVerify").textContent = "读取失败: " + (e.message || e);
+          document.getElementById("lifeStates").textContent = "读取失败: " + (e.message || e);
+          document.getElementById("costSummary").textContent = "读取失败: " + (e.message || e);
+          document.getElementById("toolAudit").textContent = "读取失败: " + (e.message || e);
+          document.getElementById("costAlerts").textContent = "读取失败: " + (e.message || e);
+          document.getElementById("alertNotifyLog").textContent = "读取失败: " + (e.message || e);
+          document.getElementById("evolutionScore").textContent = "读取失败: " + (e.message || e);
+          document.getElementById("evolutionNotifyLog").textContent = "读取失败: " + (e.message || e);
+          document.getElementById("costEvents").textContent = "读取失败: " + (e.message || e);
+        }
+      }
+      async function bootstrap(){
+        await Promise.all([loadAlertSettings(), loadEvolutionSettings()]);
+        // Scheduler settings own the effective cost cooldown field displayed in this page.
+        await loadRuntimeSchedulerSettings();
+        await refreshAll();
+      }
+      bootstrap();
+      // Visibility-controlled polling: pause when tab is hidden, resume when visible
+      (function startVisibilityPolling(fn, interval) {
+        let timer;
+        function schedule() { timer = setTimeout(() => { fn(); schedule(); }, interval); }
+        function runNow() { fn(); schedule(); }
+        document.addEventListener("visibilitychange", () => { if (document.hidden) { clearTimeout(timer); } else { runNow(); } });
+        schedule();
+      })(refreshAll, 15000);
+    </script>
+    <script src="/dashboard/dashboard.js" defer></script>
+  </body>
+</html>

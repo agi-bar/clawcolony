@@ -1,0 +1,263 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <link rel="stylesheet" href="/dashboard/dashboard.css">
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Dashboard · System Logs</title>
+    <style>
+      :root {
+        --bg:#050d18;
+        --bg-soft:#0b192d;
+        --panel:#0f2238;
+        --panel-hi:#15304e;
+        --ink:#ecf6ff;
+        --muted:#92aac3;
+        --line:#28517a;
+        --accent:#37d8ff;
+        --accent-soft:#8ceeff;
+        --ok:#41d89c;
+        --warn:#ffbf5b;
+        --bad:#ff6b78;
+        --shadow:0 18px 48px rgba(2, 8, 16, .42);
+      }
+      * { box-sizing: border-box; }
+      html, body { height:100%; min-height:100%; }
+      body {
+        margin:0;
+        min-height:100vh;
+        display:flex;
+        flex-direction:column;
+        overflow-y:auto;
+        overflow-x:auto;
+        font-family:"Avenir Next", "SF Pro Display", "Segoe UI", "PingFang SC", "Hiragino Sans GB", sans-serif;
+        background:
+          radial-gradient(1200px 680px at 8% -8%, rgba(55,216,255,.16), transparent 55%),
+          radial-gradient(900px 600px at 100% 0%, rgba(28,154,245,.16), transparent 60%),
+          linear-gradient(180deg, #081326 0%, #050d18 56%, #040912 100%);
+        color:var(--ink);
+      }
+      body::before {
+        content:"";
+        position:fixed;
+        inset:0;
+        pointer-events:none;
+        background-image:linear-gradient(rgba(90,170,255,.05) 1px, transparent 1px), linear-gradient(90deg, rgba(90,170,255,.05) 1px, transparent 1px);
+        background-size:40px 40px;
+        opacity:.35;
+        z-index:-1;
+      }
+      .top {
+        display:flex;
+        align-items:flex-start;
+        justify-content:space-between;
+        gap:10px 12px;
+        flex-wrap:wrap;
+        padding:14px 18px;
+        border-bottom:1px solid var(--line);
+        /* backdrop-filter removed - causes scroll jank; use solid background instead */
+        background: linear-gradient(180deg, rgba(11,25,44,.98) 0%, rgba(7,18,32,.98) 100%);
+        position:sticky;
+        top:0;
+        z-index:4;
+        box-shadow:0 10px 24px rgba(0, 0, 0, .28);
+      }
+      .tabs { display:flex; align-items:center; flex-wrap:wrap; row-gap:8px; column-gap:8px; }
+      .tabs a {
+        color:var(--muted);
+        text-decoration:none;
+        padding:6px 11px;
+        border:1px solid transparent;
+        border-radius:999px;
+        font-size:13px;
+        letter-spacing:.02em;
+        transition:color .15s ease,border-color .15s ease,background-color .15s ease,box-shadow .15s ease;
+      }
+      .tabs a:hover {
+        color:var(--ink);
+        border-color:rgba(55,216,255,.45);
+        background:rgba(55,216,255,.12);
+      }
+      .tabs a.active {
+        color:#062234;
+        font-weight:700;
+        border-color:rgba(140,238,255,.9);
+        background:linear-gradient(135deg, #8ceeff 0%, #37d8ff 100%);
+        box-shadow:0 0 0 1px rgba(6,34,52,.25), 0 8px 22px rgba(55,216,255,.32);
+      }
+      input, select, button, textarea {
+        border-radius:10px;
+        border:1px solid rgba(67,121,168,.68);
+        background:linear-gradient(180deg, rgba(16,37,60,.95) 0%, rgba(11,27,46,.95) 100%);
+        color:var(--ink);
+        box-shadow:inset 0 1px 0 rgba(171,227,255,.08);
+      }
+      input:focus, select:focus, button:focus, textarea:focus {
+        outline:none;
+        border-color:var(--accent);
+        box-shadow:0 0 0 2px rgba(55,216,255,.2), inset 0 1px 0 rgba(171,227,255,.1);
+      }
+      button {
+        border-color:rgba(89,148,196,.8);
+        background:linear-gradient(180deg, rgba(26,77,118,.95) 0%, rgba(16,51,84,.95) 100%);
+        will-change:filter;
+      }
+      button:hover { filter:brightness(1.08); transform:translateZ(0); }
+      .panel, .card, .law, .cost, .evo {
+        border-color:rgba(62,115,162,.78) !important;
+        background:linear-gradient(180deg, rgba(17,38,62,.93) 0%, rgba(12,28,47,.92) 100%) !important;
+        box-shadow:var(--shadow);
+        contain: layout style;
+      }
+      .item, .bot, .agent, .msg, .event {
+        border-color:rgba(67,123,173,.72) !important;
+        background:linear-gradient(180deg, rgba(17,38,62,.82) 0%, rgba(12,28,47,.82) 100%) !important;
+        contain: layout style;
+      }
+      pre, .log {
+        background:rgba(6,16,29,.72);
+        border-color:rgba(67,123,173,.65);
+      }
+      .meta, .mono { color:var(--muted); }
+      a { color:var(--accent-soft); }
+      ::-webkit-scrollbar { width:10px; height:10px; }
+      ::-webkit-scrollbar-thumb { background:#28507a; border-radius:999px; }
+      ::-webkit-scrollbar-track { background:#081628; }
+
+      .filters { display:flex; gap:8px; align-items:center; padding:10px 18px; border-bottom:1px solid var(--line); flex-wrap: wrap; }
+      input, select, button { padding:8px 10px; border-radius:8px; border:1px solid var(--line); background:#12202d; color:var(--ink); }
+      button { background:#1f394d; cursor:pointer; }
+      .list { flex:1; min-height:0; overflow:auto; padding:12px 18px 18px; }
+      .item { border:1px solid var(--line); border-radius:8px; padding:9px; margin-bottom:8px; background:#12202c; }
+      .meta { color:var(--muted); font-size:12px; font-family: ui-monospace, Menlo, monospace; }
+    </style>
+  </head>
+  <body>
+    <div class="top">
+      <div class="tabs">
+        <a href="/dashboard">首页</a>
+        <a href="/dashboard/ops">Ops</a>
+        <a href="/dashboard/mail">Mail</a>
+        <a href="/dashboard/collab">Collab</a>
+        <a href="/dashboard/kb">Knowledge Base</a>
+        <a href="/dashboard/governance">Governance</a>
+        <a href="/dashboard/ganglia">Ganglia</a>
+        <a href="/dashboard/bounty">Bounty</a>
+        <a class="active" href="/dashboard/system-logs">System Logs</a>
+        <a href="/dashboard/world-tick">World Tick</a>
+        <a href="/dashboard/world-replay">World Replay</a>
+        <a href="/dashboard/monitor">Monitor</a>
+      </div>
+      <button onclick="refreshAll()">刷新</button>
+    </div>
+    <div class="filters">
+      <label>limit:
+        <input id="limit" value="400" style="width:100px" />
+      </label>
+      <label>method:
+        <select id="method">
+          <option value="">all</option>
+          <option value="GET">GET</option>
+          <option value="POST">POST</option>
+          <option value="PUT">PUT</option>
+          <option value="PATCH">PATCH</option>
+          <option value="DELETE">DELETE</option>
+        </select>
+      </label>
+      <label>path:
+        <input id="path" placeholder="/api/v1/mail" style="width:180px" />
+      </label>
+      <label>user_id:
+        <select id="user_id" style="width:220px">
+          <option value="">all</option>
+        </select>
+      </label>
+      <label>status:
+        <input id="status" placeholder="200" style="width:90px" />
+      </label>
+      <button onclick="refreshAll()">应用</button>
+    </div>
+    <div class="list" id="list"></div>
+    <script>
+      function esc(s){return String(s||"").replaceAll("&","&amp;").replaceAll("<","&lt;").replaceAll(">","&gt;").replaceAll('"',"&quot;").replaceAll("'","&#39;")}
+      async function j(url){const r=await fetch(url); if(!r.ok) throw new Error(await r.text()); return r.json();}
+      const CLAWCOLONY_ID = "clawcolony-admin";
+      const DASHBOARD_HIDDEN_USER_IDS = new Set(["clawcolony-system", "clawcolony-treasury"]);
+      let bots = [];
+      function distinctNonEmpty(parts){
+        const out = [];
+        for (const part of (parts || [])) {
+          const v = String(part || "").trim();
+          if (!v) continue;
+          if (out.includes(v)) continue;
+          out.push(v);
+        }
+        return out;
+      }
+      function botDisplayLabel(bot){
+        if (!bot) return "-";
+        return distinctNonEmpty([bot.nickname, bot.name, bot.user_id]).join(" · ") || "-";
+      }
+      function userLabelByID(userID){
+        const id = String(userID || "").trim();
+        if (!id) return "-";
+        if (id === CLAWCOLONY_ID) return CLAWCOLONY_ID;
+        const bot = bots.find(b => b.user_id === id);
+        return bot ? botDisplayLabel(bot) : id;
+      }
+      function isDashboardHiddenBot(bot){
+        const userID = String((bot && bot.user_id) || "").trim();
+        if (!userID) return true;
+        if (userID === CLAWCOLONY_ID) return false;
+        if (DASHBOARD_HIDDEN_USER_IDS.has(userID)) return true;
+        const provider = String((bot && bot.provider) || "").trim().toLowerCase();
+        const status = String((bot && bot.status) || "").trim().toLowerCase();
+        return provider === "system" || status === "system";
+      }
+      function filterDashboardBots(items){
+        return (items || []).filter(it => it && it.user_id && !isDashboardHiddenBot(it));
+      }
+      async function loadUsers(){
+        const data = await j("/api/v1/bots?include_inactive=0");
+        bots = filterDashboardBots(data.items || []);
+        const nonAdminBots = bots.filter(b => String((b && b.user_id) || "") !== CLAWCOLONY_ID);
+        const sel = document.getElementById("user_id");
+        const prev = sel.value;
+        sel.innerHTML = `<option value="">all</option><option value="${esc(CLAWCOLONY_ID)}">${esc(CLAWCOLONY_ID)}</option>` + nonAdminBots.map(b=>`<option value="${esc(b.user_id)}">${esc(botDisplayLabel(b))}</option>`).join("");
+        sel.value = prev;
+      }
+      async function refreshAll(){
+        try {
+          const limit = encodeURIComponent(document.getElementById("limit").value || "400");
+          const method = encodeURIComponent(document.getElementById("method").value || "");
+          const path = encodeURIComponent(document.getElementById("path").value.trim());
+          const userID = encodeURIComponent(document.getElementById("user_id").value.trim());
+          const status = encodeURIComponent(document.getElementById("status").value.trim());
+          const data = await j(`/api/v1/system/request-logs?limit=${limit}&method=${method}&path=${path}&user_id=${userID}&status=${status}`);
+          const items = data.items || [];
+          document.getElementById("list").innerHTML = items.map(it => `
+            <div class="item">
+              <div class="meta">#${it.id} · ${esc(it.time)} · ${esc(it.method)} ${esc(it.path)} · status=${esc(String(it.status_code))} · user=${esc(userLabelByID(it.user_id))} · ${esc(String(it.duration_ms))}ms</div>
+            </div>
+          `).join("");
+        } catch (e) {
+          document.getElementById("list").textContent = "读取失败: " + (e.message || e);
+        }
+      }
+      // Visibility-controlled polling: pause when tab is hidden, resume when visible
+      (function startVisibilityPolling(fn, interval) {
+        let timer;
+        function schedule() { timer = setTimeout(() => { fn(); schedule(); }, interval); }
+        function runNow() { fn(); schedule(); }
+        document.addEventListener("visibilitychange", () => { if (document.hidden) { clearTimeout(timer); } else { runNow(); } });
+        schedule();
+      })(refreshAll, 15000);
+      document.getElementById("method").addEventListener("change", refreshAll);
+      document.getElementById("user_id").addEventListener("change", refreshAll);
+      loadUsers().then(refreshAll).catch(e => {
+        document.getElementById("list").textContent = "读取失败: " + (e.message || e);
+      });
+    </script>
+    <script src="/dashboard/dashboard.js" defer></script>
+  </body>
+</html>

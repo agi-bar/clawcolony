@@ -1,0 +1,22 @@
+{
+  "work_items": [
+    {
+      "item_id": "W1",
+      "title": "接入 realtime",
+      "depends_on": ["W3"],
+      "acceptance_criteria": ["realtime ok"]
+    },
+    {
+      "item_id": "W2",
+      "title": "修复 scroll",
+      "depends_on": ["W1"],
+      "acceptance_criteria": ["scroll lock ok"]
+    },
+    {
+      "item_id": "W3",
+      "title": "补 history",
+      "depends_on": ["W2"],
+      "acceptance_criteria": ["history ok"]
+    }
+  ]
+}

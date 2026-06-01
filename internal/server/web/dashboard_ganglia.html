@@ -1,0 +1,293 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <link rel="stylesheet" href="/dashboard/dashboard.css">
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Ganglia Stack</title>
+    <style>
+      :root {
+        --bg:#050d18;
+        --bg-soft:#0b192d;
+        --panel:#0f2238;
+        --panel-hi:#15304e;
+        --ink:#ecf6ff;
+        --muted:#92aac3;
+        --line:#28517a;
+        --accent:#37d8ff;
+        --accent-soft:#8ceeff;
+        --ok:#41d89c;
+        --warn:#ffbf5b;
+        --bad:#ff6b78;
+        --shadow:0 18px 48px rgba(2, 8, 16, .42);
+      }
+      * { box-sizing: border-box; }
+      html, body { height:100%; min-height:100%; }
+      body {
+        margin:0;
+        min-height:100vh;
+        display:flex;
+        flex-direction:column;
+        overflow-y:auto;
+        overflow-x:auto;
+        font-family:"Avenir Next", "SF Pro Display", "Segoe UI", "PingFang SC", "Hiragino Sans GB", sans-serif;
+        background:
+          radial-gradient(1200px 680px at 8% -8%, rgba(55,216,255,.16), transparent 55%),
+          radial-gradient(900px 600px at 100% 0%, rgba(28,154,245,.16), transparent 60%),
+          linear-gradient(180deg, #081326 0%, #050d18 56%, #040912 100%);
+        color:var(--ink);
+      }
+      body::before {
+        content:"";
+        position:fixed;
+        inset:0;
+        pointer-events:none;
+        background-image:linear-gradient(rgba(90,170,255,.05) 1px, transparent 1px), linear-gradient(90deg, rgba(90,170,255,.05) 1px, transparent 1px);
+        background-size:40px 40px;
+        opacity:.35;
+        z-index:-1;
+      }
+      .top {
+        display:flex;
+        align-items:flex-start;
+        justify-content:space-between;
+        gap:10px 12px;
+        flex-wrap:wrap;
+        padding:14px 18px;
+        border-bottom:1px solid var(--line);
+        /* backdrop-filter removed - causes scroll jank; use solid background instead */
+        background: linear-gradient(180deg, rgba(11,25,44,.98) 0%, rgba(7,18,32,.98) 100%);
+        position:sticky;
+        top:0;
+        z-index:4;
+        box-shadow:0 10px 24px rgba(0, 0, 0, .28);
+      }
+      .tabs { display:flex; align-items:center; flex-wrap:wrap; row-gap:8px; column-gap:8px; }
+      .tabs a {
+        color:var(--muted);
+        text-decoration:none;
+        padding:6px 11px;
+        border:1px solid transparent;
+        border-radius:999px;
+        font-size:13px;
+        letter-spacing:.02em;
+        transition:color .15s ease,border-color .15s ease,background-color .15s ease,box-shadow .15s ease;
+      }
+      .tabs a:hover {
+        color:var(--ink);
+        border-color:rgba(55,216,255,.45);
+        background:rgba(55,216,255,.12);
+      }
+      .tabs a.active {
+        color:#062234;
+        font-weight:700;
+        border-color:rgba(140,238,255,.9);
+        background:linear-gradient(135deg, #8ceeff 0%, #37d8ff 100%);
+        box-shadow:0 0 0 1px rgba(6,34,52,.25), 0 8px 22px rgba(55,216,255,.32);
+      }
+      input, select, button, textarea {
+        border-radius:10px;
+        border:1px solid rgba(67,121,168,.68);
+        background:linear-gradient(180deg, rgba(16,37,60,.95) 0%, rgba(11,27,46,.95) 100%);
+        color:var(--ink);
+        box-shadow:inset 0 1px 0 rgba(171,227,255,.08);
+      }
+      input:focus, select:focus, button:focus, textarea:focus {
+        outline:none;
+        border-color:var(--accent);
+        box-shadow:0 0 0 2px rgba(55,216,255,.2), inset 0 1px 0 rgba(171,227,255,.1);
+      }
+      button {
+        border-color:rgba(89,148,196,.8);
+        background:linear-gradient(180deg, rgba(26,77,118,.95) 0%, rgba(16,51,84,.95) 100%);
+        will-change:filter;
+      }
+      button:hover { filter:brightness(1.08); transform:translateZ(0); }
+      .panel, .card, .law, .cost, .evo {
+        border-color:rgba(62,115,162,.78) !important;
+        background:linear-gradient(180deg, rgba(17,38,62,.93) 0%, rgba(12,28,47,.92) 100%) !important;
+        box-shadow:var(--shadow);
+        contain: layout style;
+      }
+      .item, .bot, .agent, .msg, .event {
+        border-color:rgba(67,123,173,.72) !important;
+        background:linear-gradient(180deg, rgba(17,38,62,.82) 0%, rgba(12,28,47,.82) 100%) !important;
+        contain: layout style;
+      }
+      pre, .log {
+        background:rgba(6,16,29,.72);
+        border-color:rgba(67,123,173,.65);
+      }
+      .meta, .mono { color:var(--muted); }
+      a { color:var(--accent-soft); }
+      ::-webkit-scrollbar { width:10px; height:10px; }
+      ::-webkit-scrollbar-thumb { background:#28507a; border-radius:999px; }
+      ::-webkit-scrollbar-track { background:#081628; }
+
+      .wrap{ max-width:1280px; margin:0 auto; padding:16px 20px 20px; }
+      .title{ font-size:24px; font-weight:700; }
+      .sub{ color:var(--muted); margin-top:4px; }
+      .grid{ margin-top:14px; display:grid; grid-template-columns: 1.2fr 1fr; gap:12px; }
+      .card{ border:1px solid var(--line); border-radius:12px; background:var(--panel); padding:12px; }
+      .h{ font-size:14px; font-weight:700; }
+      .row{ display:flex; gap:8px; flex-wrap:wrap; margin-top:10px; }
+      input,select,button,textarea{ background:#101a24; color:#e8f0f8; border:1px solid var(--line); border-radius:8px; padding:8px 10px; }
+      button{ cursor:pointer; }
+      button:hover{ border-color:var(--accent); }
+      .list{ margin-top:10px; min-height:0; max-height:64vh; overflow:auto; display:grid; gap:8px; }
+      .item{ border:1px solid var(--line); border-radius:10px; background:#101a24; padding:10px; cursor:pointer; }
+      .item:hover{ border-color:var(--accent); }
+      .meta{ color:var(--muted); font-size:12px; margin-top:4px; }
+      .kv{ margin-top:8px; display:grid; grid-template-columns: 140px 1fr; gap:6px 10px; font-size:13px; }
+      .kv .k{ color:var(--muted); }
+      pre{ white-space:pre-wrap; word-break:break-word; background:#0d1520; border:1px solid var(--line); border-radius:10px; padding:10px; margin:8px 0 0; max-height:18vh; overflow:auto; }
+      @media (max-width: 1000px){ .grid{ grid-template-columns: 1fr; } }
+    </style>
+  </head>
+  <body>
+    <div class="top">
+      <div class="tabs">
+        <a href="/dashboard">首页</a>
+        <a href="/dashboard/ops">Ops</a>
+        <a href="/dashboard/mail">Mail</a>
+        <a href="/dashboard/collab">Collab</a>
+        <a href="/dashboard/kb">Knowledge Base</a>
+        <a href="/dashboard/governance">Governance</a>
+        <a class="active" href="/dashboard/ganglia">Ganglia</a>
+        <a href="/dashboard/bounty">Bounty</a>
+        <a href="/dashboard/system-logs">System Logs</a>
+        <a href="/dashboard/world-tick">World Tick</a>
+        <a href="/dashboard/world-replay">World Replay</a>
+        <a href="/dashboard/monitor">Monitor</a>
+      </div>
+      <button id="btnLoadTop">刷新</button>
+    </div>
+
+    <div class="wrap">
+      <div class="title">Ganglia Stack</div>
+      <div class="sub">神经节堆栈浏览、生命周期与反馈轨迹</div>
+
+      <div class="card" style="margin-top:12px;">
+        <div class="h">Filters</div>
+        <div class="row">
+          <select id="fType">
+            <option value="">all types</option>
+            <option value="survival">survival</option>
+            <option value="social">social</option>
+            <option value="tool">tool</option>
+            <option value="governance">governance</option>
+            <option value="meta">meta</option>
+          </select>
+          <select id="fState">
+            <option value="">all states</option>
+            <option value="nascent">nascent</option>
+            <option value="validated">validated</option>
+            <option value="active">active</option>
+            <option value="canonical">canonical</option>
+            <option value="legacy">legacy</option>
+            <option value="archived">archived</option>
+          </select>
+          <input id="fKeyword" placeholder="keyword" />
+          <input id="fLimit" type="number" min="1" max="500" value="100" style="width:100px;" />
+          <button id="btnLoad">Load</button>
+        </div>
+      </div>
+
+      <div class="grid">
+        <div class="card">
+          <div class="h">Ganglia</div>
+          <div id="list" class="list"></div>
+        </div>
+
+        <div class="card">
+          <div class="h">Detail</div>
+          <div id="detail" class="meta" style="margin-top:8px;">select one</div>
+          <div class="h" style="margin-top:14px;">Protocol</div>
+          <pre id="protocol">loading...</pre>
+        </div>
+      </div>
+    </div>
+    <script>
+      const esc = (s)=>String(s==null?"":s).replaceAll("&","&amp;").replaceAll("<","&lt;").replaceAll(">","&gt;");
+      const j = async (u)=>{ const r=await fetch(u); const d=await r.json(); if(!r.ok) throw new Error(d.error||("HTTP "+r.status)); return d; };
+
+      async function loadProtocol(){
+        const box = document.getElementById("protocol");
+        try {
+          const d = await j("/api/v1/ganglia/protocol");
+          box.textContent = JSON.stringify(d, null, 2);
+        } catch (e) {
+          box.textContent = String(e && e.message ? e.message : e);
+        }
+      }
+
+      async function loadList(){
+        const type = document.getElementById("fType").value.trim();
+        const state = document.getElementById("fState").value.trim();
+        const kw = document.getElementById("fKeyword").value.trim();
+        const limit = document.getElementById("fLimit").value || "100";
+        const u = new URL("/api/v1/ganglia/browse", location.origin);
+        if(type) u.searchParams.set("type", type);
+        if(state) u.searchParams.set("life_state", state);
+        if(kw) u.searchParams.set("keyword", kw);
+        u.searchParams.set("limit", limit);
+
+        const list = document.getElementById("list");
+        list.innerHTML = `<div class="meta">loading...</div>`;
+        try {
+          const d = await j(u.pathname + u.search);
+          const items = (d && d.items) || [];
+          if(!items.length){ list.innerHTML = `<div class="meta">empty</div>`; return; }
+          list.innerHTML = items.map(it => `
+            <div class="item" data-id="${esc(it.id)}">
+              <div><b>${esc(it.name)}</b></div>
+              <div class="meta">id=${esc(it.id)} · type=${esc(it.type)} · state=${esc(it.life_state)} · score=${esc((Number(it.score_avg_milli||0)/1000).toFixed(3))} (${esc(it.score_count)}) · integrations=${esc(it.integrations_count)}</div>
+            </div>
+          `).join("");
+          list.querySelectorAll('.item').forEach(el => el.addEventListener('click', ()=> loadDetail(el.getAttribute('data-id'))));
+        } catch (e) {
+          list.innerHTML = `<div class="meta">load failed: ${esc(e && e.message ? e.message : e)}</div>`;
+        }
+      }
+
+      async function loadDetail(id){
+        const box = document.getElementById("detail");
+        box.innerHTML = `loading...`;
+        try {
+          const d = await j(`/api/v1/ganglia/get?ganglion_id=${encodeURIComponent(String(id))}`);
+          const it = d.item || {};
+          const ratings = d.ratings || [];
+          const ints = d.integrations || [];
+          box.innerHTML = `
+            <div class="kv">
+              <div class="k">id</div><div>${esc(it.id)}</div>
+              <div class="k">name</div><div>${esc(it.name)}</div>
+              <div class="k">type</div><div>${esc(it.type)}</div>
+              <div class="k">life_state</div><div>${esc(it.life_state)}</div>
+              <div class="k">temporality</div><div>${esc(it.temporality)}</div>
+              <div class="k">author</div><div>${esc(it.author_user_id)}</div>
+              <div class="k">score</div><div>${esc((Number(it.score_avg_milli||0)/1000).toFixed(3))} (${esc(it.score_count)})</div>
+              <div class="k">integrations</div><div>${esc(it.integrations_count)}</div>
+              <div class="k">updated_at</div><div>${esc(it.updated_at||"")}</div>
+            </div>
+            <div class="meta" style="margin-top:8px;">description</div>
+            <pre>${esc(it.description||"")}</pre>
+            <div class="meta">implementation</div>
+            <pre>${esc(it.implementation||"")}</pre>
+            <div class="meta">validation</div>
+            <pre>${esc(it.validation||"")}</pre>
+            <div class="meta">ratings=${esc(ratings.length)} · integrations=${esc(ints.length)}</div>
+          `;
+        } catch (e) {
+          box.innerHTML = `load failed: ${esc(e && e.message ? e.message : e)}`;
+        }
+      }
+
+      document.getElementById("btnLoad").addEventListener("click", loadList);
+      document.getElementById("btnLoadTop").addEventListener("click", loadList);
+      loadProtocol();
+      loadList();
+    </script>
+    <script src="/dashboard/dashboard.js" defer></script>
+  </body>
+</html>

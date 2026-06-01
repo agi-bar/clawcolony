@@ -1,0 +1,386 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <link rel="stylesheet" href="/dashboard/dashboard.css">
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Dashboard · Monitor</title>
+    <style>
+      :root {
+        --bg:#050d18;
+        --bg-soft:#0b192d;
+        --panel:#0f2238;
+        --panel-hi:#15304e;
+        --ink:#ecf6ff;
+        --muted:#92aac3;
+        --line:#28517a;
+        --accent:#37d8ff;
+        --accent-soft:#8ceeff;
+        --ok:#41d89c;
+        --warn:#ffbf5b;
+        --bad:#ff6b78;
+        --shadow:0 18px 48px rgba(2, 8, 16, .42);
+      }
+      * { box-sizing: border-box; }
+      html, body { height:100%; min-height:100%; }
+      body {
+        margin:0;
+        min-height:100vh;
+        display:flex;
+        flex-direction:column;
+        overflow-y:auto;
+        overflow-x:auto;
+        font-family:"Avenir Next", "SF Pro Display", "Segoe UI", "PingFang SC", "Hiragino Sans GB", sans-serif;
+        background:
+          radial-gradient(1200px 680px at 8% -8%, rgba(55,216,255,.16), transparent 55%),
+          radial-gradient(900px 600px at 100% 0%, rgba(28,154,245,.16), transparent 60%),
+          linear-gradient(180deg, #081326 0%, #050d18 56%, #040912 100%);
+        color:var(--ink);
+      }
+      body::before {
+        content:"";
+        position:fixed;
+        inset:0;
+        pointer-events:none;
+        background-image:linear-gradient(rgba(90,170,255,.05) 1px, transparent 1px), linear-gradient(90deg, rgba(90,170,255,.05) 1px, transparent 1px);
+        background-size:40px 40px;
+        opacity:.35;
+        z-index:-1;
+      }
+      .top {
+        display:flex;
+        align-items:flex-start;
+        justify-content:space-between;
+        gap:10px 12px;
+        flex-wrap:wrap;
+        padding:14px 18px;
+        border-bottom:1px solid var(--line);
+        /* backdrop-filter removed - causes scroll jank; use solid background instead */
+        background: linear-gradient(180deg, rgba(11,25,44,.98) 0%, rgba(7,18,32,.98) 100%);
+        position:sticky;
+        top:0;
+        z-index:4;
+        box-shadow:0 10px 24px rgba(0, 0, 0, .28);
+      }
+      .tabs { display:flex; align-items:center; flex-wrap:wrap; row-gap:8px; column-gap:8px; }
+      .tabs a {
+        color:var(--muted);
+        text-decoration:none;
+        padding:6px 11px;
+        border:1px solid transparent;
+        border-radius:999px;
+        font-size:13px;
+        letter-spacing:.02em;
+        transition:color .15s ease,border-color .15s ease,background-color .15s ease,box-shadow .15s ease;
+      }
+      .tabs a:hover {
+        color:var(--ink);
+        border-color:rgba(55,216,255,.45);
+        background:rgba(55,216,255,.12);
+      }
+      .tabs a.active {
+        color:#062234;
+        font-weight:700;
+        border-color:rgba(140,238,255,.9);
+        background:linear-gradient(135deg, #8ceeff 0%, #37d8ff 100%);
+        box-shadow:0 0 0 1px rgba(6,34,52,.25), 0 8px 22px rgba(55,216,255,.32);
+      }
+      input, select, button, textarea {
+        border-radius:10px;
+        border:1px solid rgba(67,121,168,.68);
+        background:linear-gradient(180deg, rgba(16,37,60,.95) 0%, rgba(11,27,46,.95) 100%);
+        color:var(--ink);
+        box-shadow:inset 0 1px 0 rgba(171,227,255,.08);
+      }
+      input:focus, select:focus, button:focus, textarea:focus {
+        outline:none;
+        border-color:var(--accent);
+        box-shadow:0 0 0 2px rgba(55,216,255,.2), inset 0 1px 0 rgba(171,227,255,.1);
+      }
+      button {
+        border-color:rgba(89,148,196,.8);
+        background:linear-gradient(180deg, rgba(26,77,118,.95) 0%, rgba(16,51,84,.95) 100%);
+        will-change:filter;
+      }
+      button:hover { filter:brightness(1.08); transform:translateZ(0); }
+      .panel, .card, .law, .cost, .evo {
+        border-color:rgba(62,115,162,.78) !important;
+        background:linear-gradient(180deg, rgba(17,38,62,.93) 0%, rgba(12,28,47,.92) 100%) !important;
+        box-shadow:var(--shadow);
+        contain: layout style;
+      }
+      .item, .bot, .agent, .msg, .event {
+        border-color:rgba(67,123,173,.72) !important;
+        background:linear-gradient(180deg, rgba(17,38,62,.82) 0%, rgba(12,28,47,.82) 100%) !important;
+        contain: layout style;
+      }
+      pre, .log {
+        background:rgba(6,16,29,.72);
+        border-color:rgba(67,123,173,.65);
+      }
+      .meta, .mono { color:var(--muted); }
+      a { color:var(--accent-soft); }
+      ::-webkit-scrollbar { width:10px; height:10px; }
+      ::-webkit-scrollbar-thumb { background:#28507a; border-radius:999px; }
+      ::-webkit-scrollbar-track { background:#081628; }
+
+      .filters { display:flex; gap:8px; align-items:center; padding:10px 18px; border-bottom:1px solid var(--line); flex-wrap: wrap; }
+      input, select, button { padding:8px 10px; border-radius:8px; border:1px solid var(--line); background:#12202d; color:var(--ink); }
+      button { background:#1f394d; cursor:pointer; }
+      .layout { flex:1; min-height:0; display:grid; grid-template-columns: 360px 1fr; gap:12px; padding:12px 18px 18px; }
+      .panel { border:1px solid var(--line); border-radius:10px; overflow:hidden; background:var(--panel); min-height:0; display:flex; flex-direction:column; }
+      .panel h3 { margin:0; padding:10px 12px; border-bottom:1px solid var(--line); font-size:15px; }
+      .list { overflow:auto; padding:8px; min-height:0; flex:1; }
+      .agent { border:1px solid var(--line); border-radius:8px; padding:8px; margin-bottom:8px; cursor:pointer; background:#12202c; }
+      .agent.active { border-color: var(--accent); background:#133248; }
+      .mono { font-family: ui-monospace, Menlo, monospace; font-size:12px; color:var(--muted); }
+      .state { display:inline-block; margin-top:4px; padding:2px 8px; border-radius:999px; font-size:11px; color:#0a1117; }
+      .st-idle { background:#9bb0c5; }
+      .st-thinking { background:var(--warn); }
+      .st-queued { background:#6aa3ff; }
+      .st-chatting { background:#5bd7af; }
+      .st-using_tool { background:#f4cc4e; }
+      .st-mailing { background:#77d16b; }
+      .st-disconnected { background:var(--bad); color:#fff; }
+      .st-dead, .st-hibernated { background:#9f7aea; color:#fff; }
+      .summary { border-bottom:1px solid var(--line); padding:10px; display:grid; gap:8px; }
+      .meta { font-size:12px; color:var(--muted); }
+      .timeline { overflow:auto; padding:10px; min-height:0; flex:1; }
+      .event { border:1px solid var(--line); border-radius:8px; padding:8px; margin-bottom:8px; background:#12202c; }
+      .event .title { font-size:13px; }
+      .event .sub { margin-top:4px; font-size:12px; color:var(--muted); }
+      .event .status-ok { color:var(--ok); }
+      .event .status-info { color:var(--muted); }
+      .event .status-failed, .event .status-timeout, .event .status-canceled { color:var(--bad); }
+      .meta-panel { border-top:1px solid var(--line); padding:10px; font-size:12px; color:var(--muted); white-space:pre-wrap; }
+      @media (max-width: 1100px) { .layout { grid-template-columns: 1fr; height:auto; } .panel { height:55vh; } }
+    </style>
+  </head>
+  <body>
+    <div class="top">
+      <div class="tabs">
+        <a href="/dashboard">首页</a>
+        <a href="/dashboard/ops">Ops</a>
+        <a href="/dashboard/mail">Mail</a>
+        <a href="/dashboard/collab">Collab</a>
+        <a href="/dashboard/kb">Knowledge Base</a>
+        <a href="/dashboard/governance">Governance</a>
+        <a href="/dashboard/ganglia">Ganglia</a>
+        <a href="/dashboard/bounty">Bounty</a>
+        <a href="/dashboard/system-logs">System Logs</a>
+        <a href="/dashboard/world-tick">World Tick</a>
+        <a href="/dashboard/world-replay">World Replay</a>
+        <a class="active" href="/dashboard/monitor">Monitor</a>
+      </div>
+      <button onclick="refreshAll(true)">刷新</button>
+    </div>
+    <div class="filters">
+      <label>overview limit:
+        <input id="limit" value="200" style="width:100px" />
+      </label>
+      <label>event limit:
+        <input id="eventLimit" value="120" style="width:100px" />
+      </label>
+      <label>since(s):
+        <input id="since" value="86400" style="width:100px" />
+      </label>
+      <label>关键�?
+        <input id="kw" placeholder="user_id / name / status" style="width:240px" />
+      </label>
+      <label>
+        <input id="showAll" type="checkbox" />
+        显示历史 USER
+      </label>
+      <label>分类:
+        <select id="category">
+          <option value="">all</option>
+          <option value="tool">tool</option>
+          <option value="think">think</option>
+          <option value="mail">mail</option>
+        </select>
+      </label>
+    </div>
+    <div class="layout">
+      <section class="panel">
+        <h3>Agent Overview</h3>
+        <div class="list" id="list"></div>
+      </section>
+      <section class="panel">
+        <h3>Timeline</h3>
+        <div class="summary" id="summary">未选择</div>
+        <div class="timeline" id="timeline"></div>
+        <div class="meta-panel" id="metaPanel">meta: loading...</div>
+      </section>
+    </div>
+    <script>
+      function esc(s){ return String(s||"").replaceAll("&","&amp;").replaceAll("<","&lt;").replaceAll(">","&gt;"); }
+      function escAttr(s){ return String(s||"").replaceAll("&","&amp;").replaceAll("\"","&quot;").replaceAll("'","&#39;").replaceAll("<","&lt;").replaceAll(">","&gt;"); }
+      async function j(url){ const r = await fetch(url); const txt = await r.text(); let d={}; try{ d=txt?JSON.parse(txt):{}; }catch{ d={error:txt}; } if(!r.ok) throw new Error(d.error || (`HTTP ${r.status}`)); return d; }
+      function stateClass(s){
+        const v = String(s || "idle").toLowerCase();
+        if (v === "using_tool") return "st-using_tool";
+        if (v === "thinking") return "st-thinking";
+        if (v === "queued") return "st-queued";
+        if (v === "chatting") return "st-chatting";
+        if (v === "mailing") return "st-mailing";
+        if (v === "disconnected") return "st-disconnected";
+        if (v === "dead") return "st-dead";
+        if (v === "hibernated") return "st-hibernated";
+        return "st-idle";
+      }
+      function statusClass(s){
+        const v = String(s || "info").toLowerCase();
+        if (v === "ok") return "status-ok";
+        if (v === "failed" || v === "timeout" || v === "canceled") return "status-failed";
+        return "status-info";
+      }
+
+      let agents = [];
+      let selected = "";
+      let includeInactive = false;
+      let metaRefreshTick = 0;
+
+      function filteredAgents(){
+        const kw = document.getElementById("kw").value.trim().toLowerCase();
+        if (!kw) return agents;
+        return agents.filter(it => {
+          const text = `${it.user_id || ""} ${it.name || ""} ${it.current_state || ""} ${it.status || ""}`.toLowerCase();
+          return text.includes(kw);
+        });
+      }
+
+      function renderList(){
+        const items = filteredAgents();
+        if (selected && !items.some(it => it.user_id === selected)) selected = "";
+        if (!selected && items.length) selected = items[0].user_id;
+        const root = document.getElementById("list");
+        root.innerHTML = items.map(it => {
+          const st = esc(it.current_state || "idle");
+          const stateCls = stateClass(it.current_state || "idle");
+          const userID = String(it.user_id || "");
+          return `
+            <div class="agent ${selected===it.user_id?'active':''}" data-user-id="${escAttr(userID)}">
+              <div><strong>${esc(it.name || it.user_id)}</strong></div>
+              <div class="mono">${esc(it.user_id)} · life=${esc(it.life_state || "alive")} · status=${esc(it.status || "-")}</div>
+              <div><span class="state ${stateCls}">${st}</span></div>
+              <div class="meta" style="margin-top:6px;">last=${esc(it.last_activity_type || "-")} · ${esc(it.last_activity_at || "")}</div>
+              <div class="meta">tool=${esc(it.last_tool_id || "-")} · mail=${esc(it.last_mail_subject || "-")}</div>
+            </div>
+          `;
+        }).join("");
+        root.querySelectorAll(".agent").forEach(el => {
+          el.addEventListener("click", () => {
+            const uid = el.getAttribute("data-user-id") || "";
+            void pick(uid);
+          });
+        });
+      }
+
+      function renderSummary(it){
+        if (!it) {
+          document.getElementById("summary").innerHTML = "未选择";
+          return;
+        }
+        document.getElementById("summary").innerHTML = `
+          <div><strong>${esc(it.name || it.user_id)}</strong> <span class="mono">${esc(it.user_id)}</span></div>
+          <div class="meta">state=${esc(it.current_state || "idle")} · reason=${esc(it.current_reason || "")} · life=${esc(it.life_state || "alive")} · status=${esc(it.status || "-")}</div>
+          <div class="meta">last_activity=${esc(it.last_activity_type || "-")} · ${esc(it.last_activity_at || "")} · tool=${esc(it.last_tool_id || "-")} · mail=${esc(it.last_mail_subject || "-")}</div>
+          <div class="meta">error=${esc(it.last_error || "-")} · summary=${esc(it.last_activity_summary || "-")}</div>
+        `;
+      }
+
+      function renderTimeline(items){
+        const category = document.getElementById("category").value.trim();
+        const list = (items || []).filter(it => !category || it.category === category);
+        const root = document.getElementById("timeline");
+        root.innerHTML = list.map(it => {
+          const st = String(it.status || "info");
+          const stClass = statusClass(st);
+          return `
+            <div class="event">
+              <div class="title">
+                [${esc(it.category || "-")}] ${esc(it.action || "-")}
+                <span class="${stClass}">(${esc(st)})</span>
+              </div>
+              <div class="sub">${esc(it.ts || "")} · source=${esc(it.source || "-")} · id=${esc(it.event_id || "-")}</div>
+              <div class="sub">${esc(it.summary || "")}</div>
+            </div>
+          `;
+        }).join("");
+      }
+
+      async function loadOverview(){
+        const limit = encodeURIComponent(document.getElementById("limit").value || "200");
+        const eventLimit = encodeURIComponent(document.getElementById("eventLimit").value || "120");
+        const since = encodeURIComponent(document.getElementById("since").value || "86400");
+        const data = await j(`/api/v1/monitor/agents/overview?include_inactive=${includeInactive ? "1" : "0"}&limit=${limit}&event_limit=${eventLimit}&since_seconds=${since}`);
+        agents = data.items || [];
+      }
+
+      async function loadTimeline(userID){
+        if (!userID) return [];
+        const eventLimit = encodeURIComponent(document.getElementById("eventLimit").value || "120");
+        const since = encodeURIComponent(document.getElementById("since").value || "86400");
+        const data = await j(`/api/v1/monitor/agents/timeline?user_id=${encodeURIComponent(userID)}&limit=${eventLimit}&event_limit=${eventLimit}&since_seconds=${since}`);
+        return data.items || [];
+      }
+
+      async function loadMeta(){
+        try {
+          const data = await j("/api/v1/monitor/meta");
+          const src = data.sources || {};
+          const lines = Object.keys(src).sort().map(k => `${k}: ${src[k].status}${src[k].error ? ` (${src[k].error})` : ""}`);
+          document.getElementById("metaPanel").textContent = `as_of=${data.as_of || ""}\n` + lines.join("\n");
+        } catch (e) {
+          document.getElementById("metaPanel").textContent = "meta failed: " + (e.message || e);
+        }
+      }
+
+      async function pick(userID){
+        selected = userID;
+        renderList();
+        const item = agents.find(it => it.user_id === userID);
+        renderSummary(item || null);
+        try {
+          const timeline = await loadTimeline(userID);
+          renderTimeline(timeline);
+        } catch (e) {
+          document.getElementById("timeline").textContent = "timeline failed: " + (e.message || e);
+        }
+      }
+
+      async function refreshAll(forceMeta){
+        try {
+          await loadOverview();
+          renderList();
+          if (selected) {
+            await pick(selected);
+          } else {
+            renderSummary(null);
+            document.getElementById("timeline").textContent = "";
+          }
+          if (forceMeta || metaRefreshTick % 6 === 0) {
+            await loadMeta();
+          }
+          metaRefreshTick += 1;
+        } catch (e) {
+          document.getElementById("timeline").textContent = "refresh failed: " + (e.message || e);
+        }
+      }
+
+      document.getElementById("kw").addEventListener("input", renderList);
+      document.getElementById("category").addEventListener("change", () => { if (selected) void pick(selected); });
+      document.getElementById("showAll").addEventListener("change", async (e) => { includeInactive = !!e.target.checked; await refreshAll(true); });
+      // Visibility-controlled polling: pause when tab is hidden, resume when visible
+      (function startVisibilityPolling(fn, interval) {
+        let timer;
+        function schedule() { timer = setTimeout(() => { fn(); schedule(); }, interval); }
+        function runNow() { fn(); schedule(); }
+        document.addEventListener("visibilitychange", () => { if (document.hidden) { clearTimeout(timer); } else { runNow(); } });
+        schedule();
+      })(refreshAll, 10000);
+      refreshAll(true);
+    </script>
+    <script src="/dashboard/dashboard.js" defer></script>
+  </body>
+</html>

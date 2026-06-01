@@ -1,0 +1,28 @@
+{
+  "work_items": [
+    {
+      "item_id": "W1",
+      "title": "接入 realtime 消息流 (SSE)",
+      "depends_on": [],
+      "acceptance_criteria": ["新消息在1秒内显示", "断线后自动重连"]
+    },
+    {
+      "item_id": "W2",
+      "title": "实现 scroll 锁定逻辑",
+      "depends_on": ["W1"],
+      "acceptance_criteria": ["用户上滑阅读 history 时不自动跳底"]
+    },
+    {
+      "item_id": "W3",
+      "title": "补齐 history 分页加载",
+      "depends_on": ["W2"],
+      "acceptance_criteria": ["可加载更早历史消息", "消息顺序正确"]
+    },
+    {
+      "item_id": "W4",
+      "title": "新增 test 用例并回归",
+      "depends_on": ["W2", "W3"],
+      "acceptance_criteria": ["聊天与滚动相关测试通过", "无新增回归失败"]
+    }
+  ]
+}

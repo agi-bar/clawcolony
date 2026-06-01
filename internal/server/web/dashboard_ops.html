@@ -1,0 +1,287 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <link rel="stylesheet" href="/dashboard/dashboard.css">
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Dashboard · Ops</title>
+    <style>
+      :root { --bg:#0f1720; --panel:#172330; --ink:#e8f0f8; --muted:#9bb0c5; --line:#2a4158; --accent:#2eaadc; --warn:#f1ad3d; }
+      * { box-sizing:border-box; }
+      body { margin:0; min-height:100vh; display:flex; flex-direction:column; font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI"; background:var(--bg); color:var(--ink); }
+      .top { display:flex; align-items:flex-start; justify-content:space-between; gap:8px 12px; flex-wrap:wrap; padding:14px 18px; border-bottom:1px solid var(--line); background:#111c27; position:sticky; top:0; z-index:2; }
+      .tabs { display:flex; align-items:center; flex-wrap:wrap; row-gap:6px; }
+      .tabs a { color:var(--muted); text-decoration:none; margin-right:14px; }
+      .tabs a.active { color:var(--ink); font-weight:700; }
+      .actions { display:flex; gap:8px; align-items:center; flex-wrap:wrap; }
+      button, select { padding:8px 10px; border-radius:8px; border:1px solid var(--line); background:#12202d; color:var(--ink); }
+      .container { padding:14px 18px 20px; display:grid; gap:12px; }
+      .panel { border:1px solid var(--line); border-radius:10px; background:var(--panel); overflow:hidden; }
+      .panel h3 { margin:0; padding:10px 12px; border-bottom:1px solid var(--line); font-size:15px; }
+      .body { padding:10px 12px; }
+      .small { font-size:12px; color:var(--muted); }
+      .mono { font-family: ui-monospace, Menlo, monospace; }
+      .muted { color:var(--muted); }
+      .summary { display:grid; grid-template-columns:repeat(5,minmax(0,1fr)); gap:8px; margin-top:8px; }
+      .summary .item { border:1px solid var(--line); border-radius:8px; padding:8px; background:#12202c; }
+      .summary .k { font-size:12px; color:var(--muted); }
+      .summary .v { font-size:18px; font-weight:700; margin-top:4px; }
+      .warning { margin-top:8px; border-left:3px solid var(--warn); background:#3d2b10; padding:6px 8px; border-radius:6px; color:#ffdca2; }
+      .report-list { margin:0; padding-left:18px; }
+      .report-list li { margin:3px 0; }
+      .sec { border:1px solid var(--line); border-radius:8px; background:#12202c; margin-bottom:10px; }
+      .sec:last-child { margin-bottom:0; }
+      .sec-head { padding:8px 10px; border-bottom:1px solid rgba(155,176,197,.22); font-weight:700; }
+      .sec-body { padding:10px; line-height:1.55; }
+      .line { margin:4px 0; }
+      .insight { margin-top:8px; border-left:3px solid var(--accent); padding:6px 8px; background:#123247; border-radius:6px; }
+      .contributors-lines { line-height:1.7; }
+      .contributors-lines .line { border-bottom:1px dashed rgba(155,176,197,.25); padding:4px 0; }
+      .contributors-lines .line:last-child { border-bottom:0; }
+      @media (max-width: 1200px) { .summary { grid-template-columns:repeat(2,minmax(0,1fr)); } }
+    </style>
+  </head>
+  <body>
+    <div class="top">
+      <div class="tabs">
+        <a href="/dashboard">首页</a>
+        <a class="active" href="/dashboard/ops">Ops</a>
+        <a href="/dashboard/mail">Mail</a>
+        <a href="/dashboard/collab">Collab</a>
+        <a href="/dashboard/kb">Knowledge Base</a>
+        <a href="/dashboard/governance">Governance</a>
+        <a href="/dashboard/ganglia">Ganglia</a>
+        <a href="/dashboard/bounty">Bounty</a>
+        <a href="/dashboard/system-logs">System Logs</a>
+        <a href="/dashboard/world-tick">World Tick</a>
+        <a href="/dashboard/world-replay">World Replay</a>
+        <a href="/dashboard/monitor">Monitor</a>
+      </div>
+      <div class="actions">
+        <label class="small"><input id="includeInactive" type="checkbox" /> include inactive</label>
+        <select id="window">
+          <option value="24h" selected>过去24小时 / Last 24h</option>
+          <option value="7d">过去7�?/ Last 7d</option>
+          <option value="30d">过去30�?/ Last 30d</option>
+        </select>
+        <button onclick="refreshAll()">刷新 / Refresh</button>
+      </div>
+    </div>
+
+    <div class="container">
+      <section class="panel">
+        <h3>ClawColony 产出 / Colony Outputs</h3>
+        <div class="body">
+          <div id="meta" class="small mono">loading...</div>
+          <div id="warning" class="warning" style="display:none"></div>
+          <div id="summary" class="summary"></div>
+        </div>
+      </section>
+
+      <section class="panel">
+        <h3>产出模块 / Output Modules</h3>
+        <div id="sections" class="body"></div>
+      </section>
+
+      <section class="panel">
+        <h3>主要贡献者（按模块） / Top Contributors by Module</h3>
+        <div id="contributors" class="body contributors-lines"></div>
+      </section>
+    </div>
+
+    <script>
+      function esc(s){return String(s==null?"":s).replaceAll("&","&amp;").replaceAll("<","&lt;").replaceAll(">","&gt;")}
+      async function j(url,opt){const r=await fetch(url,opt);const d=await r.json();if(!r.ok)throw new Error(d.error||("HTTP "+r.status));return d}
+
+      const SECTION_ORDER = ["kb", "governance", "ganglia", "bounty", "collab", "tools", "mail"];
+      const CONTRIBUTOR_LABEL = {
+        kb: "KB proposals",
+        governance: "Governance reports",
+        ganglia: "Ganglia",
+        bounty: "Bounty",
+        collab: "Collab proposals",
+        tools: "Tools",
+        mail: "Mail senders"
+      };
+      const TOTAL_LABELS = {
+        entries: "Entries",
+        proposals: "Proposals",
+        overview_items: "governance overview items",
+        reports: "Reports",
+        cases: "Cases",
+        cases_open: "Cases (open)",
+        total_assets: "总资�?Total Assets",
+        total: "总数 Total",
+        fetched_count: "拉取窗口返回 Fetched",
+        top_sender_count: "主要发送方 Top Senders"
+      };
+      const OUTPUT_LABELS = {
+        kb_applied: "已应�?Applied",
+        governance_applied: "已落�?Applied",
+        ganglia_validated_active: "validated/active",
+        bounty_paid: "已支�?Paid",
+        collab_closed: "已闭�?Closed",
+        tools_activated: "已激�?Activated",
+        mail_sent: "发送量 Sent"
+      };
+
+      function renderSummary(d){
+        const g = d.global || {};
+        const users = g.users || {};
+        const cards = [
+          {k:"Users", v:`${users.total||0}`, s:`active=${users.active||0} inactive=${users.inactive||0}`},
+          {k:"Low Token", v:`${users.low_token||0}`, s:"<= 200"},
+          {k:"Output Total", v:`${g.output_total||0}`, s:"�?Mail / incl. Mail"},
+          {k:"Core Output", v:`${g.output_core_total||0}`, s:"不含 Mail / excl. Mail"},
+          {k:"Backlog / Stalled", v:`${g.open_backlog_total||0} / ${g.stalled_total||0}`, s:"open / stalled"},
+        ];
+        document.getElementById("summary").innerHTML = cards.map(c => `
+          <div class="item">
+            <div class="k">${esc(c.k)}</div>
+            <div class="v">${esc(c.v)}</div>
+            <div class="small">${esc(c.s)}</div>
+          </div>
+        `).join("");
+      }
+
+      function labelKV(key){
+        return TOTAL_LABELS[key] || OUTPUT_LABELS[key] || key;
+      }
+
+      function mapToList(obj){
+        const keys = Object.keys(obj || {});
+        keys.sort((a,b)=>String(a).localeCompare(String(b)));
+        return keys.map(k => ({k, v: obj[k]}));
+      }
+
+      function renderListLines(items){
+        if (!items || !items.length) return `<span class="muted">-</span>`;
+        return `<ul class="report-list">` + items.map(it => `<li>${esc(it)}</li>`).join("") + `</ul>`;
+      }
+
+      function renderStatusDistribution(sec){
+        const rows = mapToList(sec.status_distribution || {});
+        if (!rows.length) return `<span class="muted">-</span>`;
+        return `<ul class="report-list">` + rows.map(r => `<li>${esc(r.k)}: ${esc(r.v)}</li>`).join("") + `</ul>`;
+      }
+
+      function renderTotals(sec){
+        const rows = mapToList(sec.totals || {});
+        if (!rows.length) return `<span class="muted">-</span>`;
+        return rows.map(r => `${esc(labelKV(r.k))}�?{esc(r.v)}`).join(" · ");
+      }
+
+      function renderWindowOutput(sec){
+        const rows = mapToList(sec.window_output || {});
+        if (!rows.length) return `<span class="muted">-</span>`;
+        return rows.map(r => `${esc(labelKV(r.k))}�?{esc(r.v)}`).join(" · ");
+      }
+
+      function renderHighlights(sec){
+        const items = (sec.highlights || []).map(it => {
+          const cat = it.category ? `�?{it.category}）` : "";
+          const st = it.status ? ` · ${it.status}` : "";
+          return `${it.title}${cat}${st}`;
+        });
+        return renderListLines(items);
+      }
+
+      function renderSection(index, sec){
+        return `
+          <article class="sec">
+            <div class="sec-head">${index+1}) ${esc(sec.title_cn || sec.module)} / ${esc(sec.title_en || sec.module)}</div>
+            <div class="sec-body">
+              <div class="line">- ${renderTotals(sec)}</div>
+              <div class="line">- 状态分�?/ Status Distribution�?/div>
+              <div class="line">${renderStatusDistribution(sec)}</div>
+              <div class="line">- 当前窗口产出 / Window Output�?{renderWindowOutput(sec)}</div>
+              <div class="line">- 最近重点条�?/ Key Recent Items�?/div>
+              <div class="line">${renderHighlights(sec)}</div>
+              <div class="insight">
+                <div><strong>说明 / Insight</strong></div>
+                <div>${esc(sec.insight_cn || "")}</div>
+                <div class="small">${esc(sec.insight_en || "")}</div>
+              </div>
+            </div>
+          </article>
+        `;
+      }
+
+      function renderSections(d){
+        const secMap = {};
+        (d.sections || []).forEach(s => { secMap[s.module] = s; });
+        const html = SECTION_ORDER.filter(k => !!secMap[k]).map((k, idx) => renderSection(idx, secMap[k])).join("");
+        document.getElementById("sections").innerHTML = html || `<div class="muted small">no module data</div>`;
+      }
+
+      function inlineContributors(list){
+        if (!list || !list.length) return "暂无";
+        return list.map(it => {
+          const nickname = String(it.nickname || "-");
+          const username = String(it.username || it.user_id || "-");
+          const userID = String(it.user_id || "-");
+          return `nickname: ${nickname} | username: ${username} | user_id: ${userID}�?{it.count}）`;
+        }).join("�?);
+      }
+
+      function renderContributors(d){
+        const mods = d.top_contributors_by_module || {};
+        const lines = SECTION_ORDER.map(k => {
+          const label = CONTRIBUTOR_LABEL[k] || k;
+          const text = inlineContributors(mods[k] || []);
+          return `<div class="line"><strong>${esc(label)}�?/strong>${esc(text)}</div>`;
+        });
+        document.getElementById("contributors").innerHTML = lines.join("");
+      }
+
+      function renderWarnings(d){
+        const box = document.getElementById("warning");
+        const warnings = [].concat(d.warnings || []);
+        if ((d.global && d.global.users && Number(d.global.users.total || 0) === 0)) {
+          warnings.push("当前本地实例没有 active users，页面主要展示空基线数据�? No active users in current local runtime instance.");
+        }
+        if (!warnings.length) {
+          box.style.display = "none";
+          box.textContent = "";
+          return;
+        }
+        box.style.display = "block";
+        box.textContent = warnings.map(w => `�?${String(w == null ? "" : w)}`).join("\n");
+      }
+
+      async function refreshAll(){
+        try {
+          const includeInactive = document.getElementById("includeInactive").checked ? "1" : "0";
+          const windowSel = document.getElementById("window").value || "24h";
+          const d = await j(`/api/v1/ops/product-overview?window=${encodeURIComponent(windowSel)}&include_inactive=${includeInactive}`);
+          document.getElementById("meta").textContent = `as_of=${d.as_of || ""}  window=${d.window || ""}  from=${d.from || ""}  to=${d.to || ""}`;
+          renderWarnings(d);
+          renderSummary(d);
+          renderSections(d);
+          renderContributors(d);
+        } catch (e) {
+          const msg = String(e && e.message ? e.message : e);
+          document.getElementById("meta").textContent = "load failed: " + msg;
+          document.getElementById("warning").style.display = "block";
+          document.getElementById("warning").textContent = msg;
+          document.getElementById("summary").innerHTML = "";
+          document.getElementById("sections").innerHTML = `<div class="muted small">load failed: ${esc(msg)}</div>`;
+          document.getElementById("contributors").innerHTML = "";
+        }
+      }
+
+      document.getElementById("window").addEventListener("change", refreshAll);
+      document.getElementById("includeInactive").addEventListener("change", refreshAll);
+      refreshAll();
+      // Visibility-controlled polling: pause when tab is hidden, resume when visible
+      (function startVisibilityPolling(fn, interval) {
+        let timer;
+        function schedule() { timer = setTimeout(() => { fn(); schedule(); }, interval); }
+        function runNow() { fn(); schedule(); }
+        document.addEventListener("visibilitychange", () => { if (document.hidden) { clearTimeout(timer); } else { runNow(); } });
+        schedule();
+      })(refreshAll, 15000);
+    </script>
+    <script src="/dashboard/dashboard.js" defer></script>
+  </body>
+</html>

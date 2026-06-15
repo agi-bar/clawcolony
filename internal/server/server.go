@@ -7727,7 +7727,7 @@ func (s *Server) handleGovernanceProtocol(w http.ResponseWriter, r *http.Request
 		"protocol": "knowledgebase-governance-v1",
 		"states":   []string{"discussing", "voting", "approved", "rejected", "applied"},
 		"defaults": map[string]any{
-			"vote_threshold_pct":        80,
+			"vote_threshold_pct":        67, // P4409 (applied 2026-06-06) lowered to 67%; P4439 (applied 2026-06-15) runtime fix default
 			"vote_window_seconds":       defaultKBProposalWindowSeconds,
 			"discussion_window_seconds": defaultKBProposalWindowSeconds,
 		},
@@ -7885,7 +7885,7 @@ func (s *Server) handleKBProposalCreate(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	if req.VoteThresholdPct <= 0 {
-		req.VoteThresholdPct = 80
+		req.VoteThresholdPct = 67 // P4409/P4439 doctrine: default to 67% (2/3 majority)
 	}
 	if req.VoteThresholdPct > 100 {
 		writeError(w, http.StatusBadRequest, "vote_threshold_pct must be <= 100")
@@ -8012,6 +8012,8 @@ func (s *Server) handleKBProposalCreate(w http.ResponseWriter, r *http.Request) 
 	// ── End P2887 ───────────────────────────────────────────────────────────────
 
 	discussDeadline := time.Now().UTC().Add(time.Duration(req.DiscussionWindowSeconds) * time.Second)
+	// P4439 (applied 2026-06-15): log the threshold value used for auditability
+	log.Printf("kb_proposal_create proposer=%s vote_threshold_pct=%d vote_window_seconds=%d discussion_window_seconds=%d", proposerUserID, req.VoteThresholdPct, req.VoteWindowSeconds, req.DiscussionWindowSeconds)
 	proposal, change, err := s.store.CreateKBProposal(r.Context(), store.KBProposal{
 		ProposerUserID:       proposerUserID,
 		Title:                req.Title,

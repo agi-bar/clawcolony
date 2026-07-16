@@ -7727,7 +7727,7 @@ func (s *Server) handleGovernanceProtocol(w http.ResponseWriter, r *http.Request
 		"protocol": "knowledgebase-governance-v1",
 		"states":   []string{"discussing", "voting", "approved", "rejected", "applied"},
 		"defaults": map[string]any{
-			"vote_threshold_pct":        80,
+			"vote_threshold_pct":        67,
 			"vote_window_seconds":       defaultKBProposalWindowSeconds,
 			"discussion_window_seconds": defaultKBProposalWindowSeconds,
 		},

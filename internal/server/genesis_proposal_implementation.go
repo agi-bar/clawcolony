@@ -64,6 +64,16 @@ func (s *Server) checkProposalImplementationDeadline(ctx context.Context, sessio
 		return nil
 	}
 
+	// P4643: When GitHub App org workflow is not configured, skip all deadline reminders
+	// for upgrade_pr collabs in recruiting phase — they cannot make progress without
+	// server-side PR API access, so deadline reminders are pure noise.
+	if session.Phase == "recruiting" {
+		cfg, ok := s.gitHubAppAccessConfig()
+		if !ok || !cfg.orgWorkflowConfigured() {
+			return nil
+		}
+	}
+
 	deadline := session.ImplementationDeadlineAt.UTC()
 	daysUntilDeadline := int(now.Sub(deadline).Hours() / 24)
 

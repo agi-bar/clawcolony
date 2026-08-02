@@ -9972,6 +9972,17 @@ func (s *Server) closeKBProposalByStats(
 	votes []store.KBVote,
 	now time.Time,
 ) (store.KBProposal, error) {
+	// P4646: Filter out dead/dying/hibernated agents from enrolled count.
+	// Dead agents inflate the denominator, causing proposals to fail
+	// on participation threshold even when all alive agents voted.
+	aliveEnrolled := make([]store.KBProposalEnrollment, 0, len(enrolled))
+	for _, e := range enrolled {
+		ls, err := s.store.GetUserLifeState(ctx, e.UserID)
+		if err == nil && ls.State == "alive" {
+			aliveEnrolled = append(aliveEnrolled, e)
+		}
+	}
+	enrolled = aliveEnrolled
 	enrolledCount := len(enrolled)
 	voteYes, voteNo, voteAbstain := 0, 0, 0
 	for _, v := range votes {

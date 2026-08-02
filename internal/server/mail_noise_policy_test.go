@@ -488,3 +488,43 @@ func TestMailNoiseCleanupTickAdvancesCursorAndCleansBatches(t *testing.T) {
 		t.Fatalf("expected second user duplicates cleaned in tick 2, got unread=%d", got)
 	}
 }
+
+// P4651: Adaptive COMMUNITY-COLLAB suppression must NOT suppress non-COLLAB mail.
+// Regression test for the mid=0 bug where all peer mail was silently dropped.
+func TestPlanMailSend_AdaptiveSuppressionOnlyForCommunityCollab(t *testing.T) {
+	store, srv := setupMailNoisePolicyTest(t)
+	ctx := context.Background()
+
+	const recipient = "user-p4651-recipient"
+	const sender = "user-p4651-sender"
+
+	// Step 1: Send a COMMUNITY-COLLAB message to establish adaptive cooldown
+	collabInput := store.MailSendInput{
+		From:    sender,
+		To:      []string{recipient},
+		Subject: "[COMMUNITY-COLLAB][VOLUNTARY] collab-123 some collab",
+		Body:    "collab_id=collab-123 proposal_id=42",
+	}
+	if _, err := srv.sendMailWithNoisePolicy(ctx, collabInput); err != nil {
+		t.Fatalf("send collab mail: %v", err)
+	}
+
+	// Step 2: Send a regular peer mail (NOT COMMUNITY-COLLAB) - must NOT be suppressed
+	regularInput := store.MailSendInput{
+		From:    sender,
+		To:      []string{recipient},
+		Subject: "important coordination message",
+		Body:    "This is a legitimate peer mail, not a community collab.",
+	}
+	outcome, err := srv.sendMailWithNoisePolicy(ctx, regularInput)
+	if err != nil {
+		t.Fatalf("send regular mail: %v", err)
+	}
+	if len(outcome.SentTo) != 1 || outcome.SentTo[0] != recipient {
+		t.Fatalf("regular peer mail should not be suppressed, got SentTo=%v, Suppressed=%d",
+			outcome.SentTo, len(outcome.Suppressed))
+	}
+	if outcome.Result.MessageID == 0 {
+		t.Fatal("regular peer mail must return non-zero message_id")
+	}
+}

@@ -460,6 +460,11 @@ func (s *Server) planMailSendWithNoisePolicy(ctx context.Context, input store.Ma
 	input.Subject = strings.TrimSpace(input.Subject)
 	input.Body = strings.TrimSpace(input.Body)
 
+	// Pre-classify the outgoing message once (P4651: avoid re-classifying per-recipient)
+	outgoing := classifyMailNoise("", input.From, input.Subject, input.Body)
+	outgoingIsCommunityCollab := outgoing.FamilyClass == mailNoiseFamilyCommunityCollabPinned ||
+		outgoing.FamilyClass == mailNoiseFamilyCommunityCollabVoluntary
+
 	plan := plannedMailSend{
 		Input:      input,
 		SentTo:     make([]string, 0, len(input.To)),
@@ -470,8 +475,11 @@ func (s *Server) planMailSendWithNoisePolicy(ctx context.Context, input store.Ma
 		if err != nil {
 			return plannedMailSend{}, err
 		}
-		// Adaptive COMMUNITY-COLLAB suppression: check quality score and cooldown
-		if suppression == nil {
+		// P4651 fix: Only apply adaptive COMMUNITY-COLLAB suppression to actual
+		// COMMUNITY-COLLAB messages, not all mail to the recipient.
+		// The original code suppressed ANY mail during cooldown, causing
+		// legitimate peer mail to return mid=0 (P4642/P4651 root cause).
+		if suppression == nil && outgoingIsCommunityCollab {
 			qs := communityCollabQualityScore(input.From, input.Subject, input.Body)
 			stateKey := mailFamilyKey(recipient, "community_collab_adaptive")
 			state, ok := communityCollabAdaptiveCache[stateKey]
@@ -492,7 +500,9 @@ func (s *Server) planMailSendWithNoisePolicy(ctx context.Context, input store.Ma
 				})
 				continue
 			}
-			// Update adaptive state for sent mail
+		}
+		// Update adaptive state only for COMMUNITY-COLLAB messages
+		if outgoingIsCommunityCollab && suppression == nil {
 			communityCollabUpdateState(recipient, input.From, input.Subject, input.Body)
 		}
 		if suppression != nil {

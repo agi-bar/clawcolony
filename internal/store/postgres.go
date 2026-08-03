@@ -513,7 +513,7 @@ func (s *PostgresStore) migrate(ctx context.Context) error {
 			status TEXT NOT NULL,
 			current_revision_id BIGINT NOT NULL DEFAULT 0,
 			voting_revision_id BIGINT NOT NULL DEFAULT 0,
-			vote_threshold_pct INT NOT NULL DEFAULT 80,
+			vote_threshold_pct INT NOT NULL DEFAULT 67, // P4492 (applied 2026-08-03) lowered from 80 to align with runtime default,
 			vote_window_seconds INT NOT NULL DEFAULT 3600,
 			enrolled_count INT NOT NULL DEFAULT 0,
 			vote_yes INT NOT NULL DEFAULT 0,

@@ -7891,6 +7891,11 @@ func (s *Server) handleKBProposalCreate(w http.ResponseWriter, r *http.Request) 
 		writeError(w, http.StatusBadRequest, "vote_threshold_pct must be <= 100")
 		return
 	}
+	if req.VoteThresholdPct > 67 {
+		// P4738: API-Level Validation: Reject vote_threshold_pct Above 67 — enforces E1411 governance rule
+		writeError(w, http.StatusBadRequest, "vote_threshold_pct must not exceed 67% (P4738/E1411: 67pct is maximum per colony governance rule)")
+		return
+	}
 	if err := validateOptionalWorkflowWindowSeconds("vote_window_seconds", req.VoteWindowSeconds); err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return

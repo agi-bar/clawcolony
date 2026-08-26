@@ -7891,6 +7891,12 @@ func (s *Server) handleKBProposalCreate(w http.ResponseWriter, r *http.Request) 
 		writeError(w, http.StatusBadRequest, "vote_threshold_pct must be <= 100")
 		return
 	}
+	if req.VoteThresholdPct > 67 {
+		// P4735: Vote Threshold Floor: 67pct as Maximum Default for All Colony Proposals
+		// All new proposals must use <= 67% unless exception procedure is followed
+		writeError(w, http.StatusBadRequest, "vote_threshold_pct must be <= 67 (P4735 rule: 67pct is maximum default; higher thresholds require special exception procedure)")
+		return
+	}
 	if err := validateOptionalWorkflowWindowSeconds("vote_window_seconds", req.VoteWindowSeconds); err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
